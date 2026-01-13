@@ -128,6 +128,9 @@ class AssetManager:
         items_data = []
         for idx, item in enumerate(items):
             if isinstance(item, VTextItem):
+                # 保存连接点可见性状态
+                connection_point_visible = item.connection_point.isVisible() if item.connection_point else True
+                
                 item_data = {
                     'type': 'VTextItem',
                     'text': item.full_text,
@@ -139,6 +142,7 @@ class AssetManager:
                     'column_spacing': item.column_spacing,
                     'auto_height': item.auto_height,
                     'manual_line_break': item.manual_line_break,
+                    'connection_point_visible': connection_point_visible,
                     'scene_pos': (item.scenePos().x(), item.scenePos().y()),
                     'local_pos': (item.x(), item.y()),
                     'parent_index': item_to_index.get(item.parentItem(), -1) if isinstance(item.parentItem(), BaseElement) else -1
@@ -154,11 +158,15 @@ class AssetManager:
                     import shutil
                     shutil.copy2(original_path, asset_path)
                     
+                    # 保存连接点可见性状态
+                    connection_point_visible = item.connection_point.isVisible() if item.connection_point else True
+                    
                     item_data = {
                         'type': 'VImageItem',
                         'path': asset_path,
                         'original_path': original_path,
                         'width': item.target_width,
+                        'connection_point_visible': connection_point_visible,
                         'scene_pos': (item.scenePos().x(), item.scenePos().y()),
                         'local_pos': (item.x(), item.y()),
                         'parent_index': item_to_index.get(item.parentItem(), -1) if isinstance(item.parentItem(), BaseElement) else -1
@@ -475,6 +483,7 @@ class AssetLibraryWidget(QWidget):
                         new_item.manual_line_break = item_data['manual_line_break']
                     
                     new_item.rebuild()
+                        
                 elif item_data['type'] == 'VImageItem':
                     if os.path.exists(item_data['path']):
                         new_item = VImageItem(item_data['path'], item_data['width'])
@@ -488,6 +497,12 @@ class AssetLibraryWidget(QWidget):
                     # 使用撤销系统添加元素
                     command = AddItemCommand(self.main_window.scene, new_item)
                     self.main_window.scene.undo_stack.push(command)
+                    
+                    # 在AddItemCommand执行后，重新设置连接点可见性
+                    # 因为AddItemCommand.execute()会使用场景的全局设置覆盖个别设置
+                    if 'connection_point_visible' in item_data and new_item.connection_point:
+                        new_item.connection_point.setVisible(item_data['connection_point_visible'])
+                    
                     new_items.append(new_item)
             
             # 第二步：恢复父子关系
@@ -688,6 +703,11 @@ class DeleteItemCommand(UndoCommand):
         self.save_item_state()
     
     def execute(self):
+        # 删除与此元素相关的所有连接器
+        self.scene.remove_all_connectors_for_item(self.item)
+        # 删除与此元素相关的图文连接器
+        self.scene.remove_image_text_connectors(self.item)
+        # 删除元素本身
         self.scene.removeItem(self.item)
     
     def undo(self):
@@ -1592,6 +1612,13 @@ class LayoutScene(QGraphicsScene):
         for c in to_rem:
             self.removeItem(c)
             self.connectors.remove(c)
+    
+    def remove_all_connectors_for_item(self, item):
+        """移除与指定元素相关的所有连接器（父子关系连接器）"""
+        to_rem = [c for c in self.connectors if c.parent_element == item or c.child_element == item]
+        for c in to_rem:
+            self.removeItem(c)
+            self.connectors.remove(c)
 
     def update_connectors(self, item_moved):
         for c in self.connectors:
@@ -1903,6 +1930,9 @@ class LayoutScene(QGraphicsScene):
         
         for idx, item in enumerate(items):
             if isinstance(item, VTextItem):
+                # 保存连接点可见性状态
+                connection_point_visible = item.connection_point.isVisible() if item.connection_point else True
+                
                 item_data = {
                     'type': 'VTextItem',
                     'text': item.full_text,
@@ -1910,16 +1940,25 @@ class LayoutScene(QGraphicsScene):
                     'box_height': item.box_height,
                     'font_family': item.font_family,
                     'text_color': item.text_color.name(),
+                    'chars_per_column': item.chars_per_column,
+                    'column_spacing': item.column_spacing,
+                    'auto_height': item.auto_height,
+                    'manual_line_break': item.manual_line_break,
+                    'connection_point_visible': connection_point_visible,
                     'scene_pos': (item.scenePos().x(), item.scenePos().y()),
                     'local_pos': (item.x(), item.y()),
                     'parent_index': item_to_index.get(item.parentItem(), -1) if isinstance(item.parentItem(), BaseElement) else -1
                 }
                 self.clipboard_items.append(item_data)
             elif isinstance(item, VImageItem):
+                # 保存连接点可见性状态
+                connection_point_visible = item.connection_point.isVisible() if item.connection_point else True
+                
                 item_data = {
                     'type': 'VImageItem',
                     'path': item.file_path,
                     'width': item.target_width,
+                    'connection_point_visible': connection_point_visible,
                     'scene_pos': (item.scenePos().x(), item.scenePos().y()),
                     'local_pos': (item.x(), item.y()),
                     'parent_index': item_to_index.get(item.parentItem(), -1) if isinstance(item.parentItem(), BaseElement) else -1
@@ -1943,7 +1982,17 @@ class LayoutScene(QGraphicsScene):
         min_x = min(item['scene_pos'][0] for item in self.clipboard_items)
         min_y = min(item['scene_pos'][1] for item in self.clipboard_items)
         
-        base_x, base_y = (pos.x(), pos.y()) if pos else (100, 100)
+        # 如果没有指定位置，使用当前视图的中心
+        if pos is None:
+            if self.views():
+                view = self.views()[0]
+                center = view.mapToScene(view.viewport().rect().center())
+                base_x, base_y = center.x(), center.y()
+            else:
+                base_x, base_y = 100, 100
+        else:
+            base_x, base_y = pos.x(), pos.y()
+        
         new_items = []
         
         for idx, item_data in enumerate(self.clipboard_items):
@@ -1952,7 +2001,19 @@ class LayoutScene(QGraphicsScene):
                 new_item = VTextItem(item_data['text'], item_data['font_size'], item_data['box_height'])
                 new_item.font_family = item_data['font_family']
                 new_item.text_color = QColor(item_data['text_color'])
+                
+                # 恢复其他属性
+                if 'chars_per_column' in item_data:
+                    new_item.chars_per_column = item_data['chars_per_column']
+                if 'column_spacing' in item_data:
+                    new_item.column_spacing = item_data['column_spacing']
+                if 'auto_height' in item_data:
+                    new_item.auto_height = item_data['auto_height']
+                if 'manual_line_break' in item_data:
+                    new_item.manual_line_break = item_data['manual_line_break']
+                
                 new_item.rebuild()
+                    
             elif item_data['type'] == 'VImageItem':
                 new_item = VImageItem(item_data['path'], item_data['width'])
             
@@ -1961,6 +2022,12 @@ class LayoutScene(QGraphicsScene):
                 offset_y = item_data['scene_pos'][1] - min_y
                 new_item.setPos(base_x + offset_x, base_y + offset_y)
                 self.undo_stack.push(AddItemCommand(self, new_item))
+                
+                # 在AddItemCommand执行后，重新设置连接点可见性
+                # 因为AddItemCommand.execute()会使用场景的全局设置覆盖个别设置
+                if 'connection_point_visible' in item_data and new_item.connection_point:
+                    new_item.connection_point.setVisible(item_data['connection_point_visible'])
+                
                 new_items.append(new_item)
         
         for idx, item_data in enumerate(self.clipboard_items):
@@ -2169,6 +2236,14 @@ class MainWindow(QMainWindow):
         self.chars_per_column_spin.valueChanged.connect(self.change_chars_per_column)
         toolbar1.addWidget(self.chars_per_column_spin)
         
+        toolbar1.addWidget(QLabel("列间距:"))
+        self.column_spacing_spin = QSpinBox()
+        self.column_spacing_spin.setRange(0, 200)
+        self.column_spacing_spin.setValue(COLUMN_SPACING)
+        self.column_spacing_spin.setSuffix("px")
+        self.column_spacing_spin.valueChanged.connect(self.change_column_spacing)
+        toolbar1.addWidget(self.column_spacing_spin)
+        
         self.manual_line_break_btn = QPushButton("手动换行")
         self.manual_line_break_btn.setCheckable(True)
         self.manual_line_break_btn.setChecked(True)
@@ -2320,16 +2395,31 @@ class MainWindow(QMainWindow):
             item.chars_per_column = chars_count
             item.rebuild()
     
+    def change_column_spacing(self, spacing):
+        """改变选中文字的列间距"""
+        selected_items = [item for item in self.scene.selectedItems() if isinstance(item, VTextItem)]
+        for item in selected_items:
+            item.column_spacing = spacing
+            item.rebuild()
+    
     def update_font_controls(self):
         selected_items = [item for item in self.scene.selectedItems() if isinstance(item, VTextItem)]
         if selected_items:
             item = selected_items[0]
             self.font_combo.blockSignals(True)
             self.font_size_spin.blockSignals(True)
+            self.chars_per_column_spin.blockSignals(True)
+            self.column_spacing_spin.blockSignals(True)
+            
             self.font_combo.setCurrentFont(QFont(item.font_family))
             self.font_size_spin.setValue(item.font_size)
+            self.chars_per_column_spin.setValue(item.chars_per_column)
+            self.column_spacing_spin.setValue(item.column_spacing)
+            
             self.font_combo.blockSignals(False)
             self.font_size_spin.blockSignals(False)
+            self.chars_per_column_spin.blockSignals(False)
+            self.column_spacing_spin.blockSignals(False)
     
     def on_selection_changed(self):
         if hasattr(self, 'font_combo'): self.update_font_controls()
