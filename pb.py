@@ -135,6 +135,10 @@ class AssetManager:
                     'box_height': item.box_height,
                     'font_family': item.font_family,
                     'text_color': item.text_color.name(),
+                    'chars_per_column': item.chars_per_column,
+                    'column_spacing': item.column_spacing,
+                    'auto_height': item.auto_height,
+                    'manual_line_break': item.manual_line_break,
                     'scene_pos': (item.scenePos().x(), item.scenePos().y()),
                     'local_pos': (item.x(), item.y()),
                     'parent_index': item_to_index.get(item.parentItem(), -1) if isinstance(item.parentItem(), BaseElement) else -1
@@ -459,6 +463,17 @@ class AssetLibraryWidget(QWidget):
                     )
                     new_item.font_family = item_data['font_family']
                     new_item.text_color = QColor(item_data['text_color'])
+                    
+                    # 恢复其他属性
+                    if 'chars_per_column' in item_data:
+                        new_item.chars_per_column = item_data['chars_per_column']
+                    if 'column_spacing' in item_data:
+                        new_item.column_spacing = item_data['column_spacing']
+                    if 'auto_height' in item_data:
+                        new_item.auto_height = item_data['auto_height']
+                    if 'manual_line_break' in item_data:
+                        new_item.manual_line_break = item_data['manual_line_break']
+                    
                     new_item.rebuild()
                 elif item_data['type'] == 'VImageItem':
                     if os.path.exists(item_data['path']):
@@ -788,14 +803,14 @@ class AnchorHandle(QGraphicsRectItem):
 class ConnectionPoint(QGraphicsEllipseItem):
     """可视化连接点"""
     def __init__(self, parent_item, point_type="image_top"):
-        super().__init__(-6, -6, 12, 12)  # 12x12像素的圆点
+        super().__init__(-8, -8, 16, 16)  # 16x16像素的圆点（更大）
         self.parent_element = parent_item
         self.point_type = point_type  # "image_top", "text_bottom"
         self.connected_lines = []  # 连接到此点的线条
         
         # 设置样式
         self.setBrush(QBrush(QColor(255, 100, 100, 200)))  # 半透明红色
-        self.setPen(QPen(QColor(200, 50, 50), 2))
+        self.setPen(QPen(QColor(200, 50, 50), 3))  # 更粗的边框
         
         # 设置交互属性
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, False)
@@ -829,13 +844,13 @@ class ConnectionPoint(QGraphicsEllipseItem):
     def hoverEnterEvent(self, event):
         """鼠标悬停进入"""
         self.setBrush(QBrush(QColor(255, 150, 150, 255)))  # 高亮显示
-        self.setPen(QPen(QColor(255, 0, 0), 3))
+        self.setPen(QPen(QColor(255, 0, 0), 4))  # 更粗的悬停边框
         super().hoverEnterEvent(event)
     
     def hoverLeaveEvent(self, event):
         """鼠标悬停离开"""
         self.setBrush(QBrush(QColor(255, 100, 100, 200)))  # 恢复原样
-        self.setPen(QPen(QColor(200, 50, 50), 2))
+        self.setPen(QPen(QColor(200, 50, 50), 3))  # 恢复原始粗细
         super().hoverLeaveEvent(event)
     
     def mousePressEvent(self, event):
@@ -849,6 +864,71 @@ class ConnectionPoint(QGraphicsEllipseItem):
         """获取连接点在场景中的中心位置"""
         return self.mapToScene(0, 0)
 
+class VGenericConnector(QGraphicsPathItem):
+    """通用连接线 - 支持任意两个元素之间的连接"""
+    def __init__(self, item1, item2, connection_type="generic"):
+        super().__init__()
+        self.item1 = item1
+        self.item2 = item2
+        self.connection_type = connection_type  # "image-image", "text-text", "generic"
+        self.setZValue(-45)  # 比图文连接器层级稍低
+        
+        # 统一使用红色连接线
+        pen = QPen(QColor(255, 0, 0, 200))  # 红色
+        pen.setWidth(3)  # 更粗的线条
+        pen.setStyle(Qt.PenStyle.SolidLine)
+        self.setPen(pen)
+        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, False)
+        
+    def update_path(self):
+        if not self.item1.scene() or not self.item2.scene():
+            return
+
+        # 获取两个元素的连接点
+        point1 = self.get_connection_point(self.item1)
+        point2 = self.get_connection_point(self.item2)
+        
+        if not point1 or not point2:
+            # 如果没有连接点，使用中心点
+            rect1 = self.item1.boundingRect()
+            pos1 = self.item1.scenePos()
+            anchor1 = pos1 + QPointF(rect1.width()/2, rect1.height()/2)
+            
+            rect2 = self.item2.boundingRect()
+            pos2 = self.item2.scenePos()
+            anchor2 = pos2 + QPointF(rect2.width()/2, rect2.height()/2)
+        else:
+            anchor1 = point1.get_scene_center()
+            anchor2 = point2.get_scene_center()
+        
+        path = QPainterPath()
+        path.moveTo(anchor1)
+        
+        # 计算控制点，创建优美的曲线
+        distance = (anchor2 - anchor1).manhattanLength()
+        curve_offset = min(distance * 0.3, 80)
+        
+        # 根据相对位置调整控制点
+        dx = anchor2.x() - anchor1.x()
+        dy = anchor2.y() - anchor1.y()
+        
+        if abs(dx) > abs(dy):  # 水平方向为主
+            ctrl1 = anchor1 + QPointF(curve_offset if dx > 0 else -curve_offset, 0)
+            ctrl2 = anchor2 - QPointF(curve_offset if dx > 0 else -curve_offset, 0)
+        else:  # 垂直方向为主
+            ctrl1 = anchor1 + QPointF(0, curve_offset if dy > 0 else -curve_offset)
+            ctrl2 = anchor2 - QPointF(0, curve_offset if dy > 0 else -curve_offset)
+        
+        path.cubicTo(ctrl1, ctrl2, anchor2)
+        self.setPath(path)
+    
+    def get_connection_point(self, item):
+        """获取元素的连接点"""
+        for child in item.childItems():
+            if isinstance(child, ConnectionPoint):
+                return child
+        return None
+
 class VImageTextConnector(QGraphicsPathItem):
     """图文连接线- 连接图片顶部中点和文字底部中点"""
     def __init__(self, image_item, text_item):
@@ -858,7 +938,7 @@ class VImageTextConnector(QGraphicsPathItem):
         self.setZValue(-50)  # 比普通连接器层级高一条
         
         pen = QPen(QColor(255, 100, 100, 200))  # 稍微不同的红条
-        pen.setWidth(2)
+        pen.setWidth(3)  # 更粗的线条
         pen.setStyle(Qt.PenStyle.SolidLine)  # 实线而不是虚条
         self.setPen(pen)
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, False)
@@ -924,7 +1004,7 @@ class VConnector(QGraphicsPathItem):
         self.setZValue(-100)
         
         pen = QPen(QColor(255, 0, 0, 150))
-        pen.setWidth(2)
+        pen.setWidth(3)  # 更粗的线条
         pen.setStyle(Qt.PenStyle.DashLine)
         self.setPen(pen)
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, False)
@@ -971,6 +1051,14 @@ class BaseElement(QGraphicsItem):
     def contextMenuEvent(self, event):
         menu = QMenu()
         
+        # 添加隐藏/显示连接点选项
+        if hasattr(self, 'connection_point') and self.connection_point:
+            if self.connection_point.isVisible():
+                toggle_connection_point_action = menu.addAction("隐藏连接点 (Hide Connection Point)")
+            else:
+                toggle_connection_point_action = menu.addAction("显示连接点 (Show Connection Point)")
+            menu.addSeparator()
+        
         # 复制和删条
         copy_action = menu.addAction("复制 (Copy)")
         delete_action = menu.addAction("删除 (Delete)")
@@ -1004,7 +1092,11 @@ class BaseElement(QGraphicsItem):
             clear_connections_action = batch_menu.addAction("清除所有连接")
         
         action = menu.exec(event.screenPos())
-        if action == copy_action:
+        
+        # 处理隐藏/显示连接点
+        if hasattr(self, 'connection_point') and self.connection_point and action == toggle_connection_point_action:
+            self.toggle_connection_point()
+        elif action == copy_action:
             if self.scene():
                 self.scene().copy_item(self)
         elif action == delete_action:
@@ -1052,6 +1144,17 @@ class BaseElement(QGraphicsItem):
             painter.setPen(QPen(Qt.GlobalColor.blue, 1, Qt.PenStyle.DotLine))
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawRect(self.boundingRect())
+    
+    def toggle_connection_point(self):
+        """切换连接点的可见性"""
+        if hasattr(self, 'connection_point') and self.connection_point:
+            current_visible = self.connection_point.isVisible()
+            self.connection_point.setVisible(not current_visible)
+            element_type = "图片" if isinstance(self, VImageItem) else "文字"
+            if current_visible:
+                print(f"{element_type}连接点已隐藏")
+            else:
+                print(f"{element_type}连接点已显示")
 
 class VTextItem(BaseElement):
     """Vertical Text Engine (Right-to-Left columns)"""
@@ -1065,6 +1168,10 @@ class VTextItem(BaseElement):
         self.chars_per_column = 15  # 每列字符数，可以调整
         self.auto_height = True  # 是否自动调整高度
         self.manual_line_break = True  # 是否启用手动换行（响应\n字符）
+        
+        # 列间距属性
+        self.column_spacing = COLUMN_SPACING  # 列间距（所有列间距相同）
+        
         self._rect = QRectF(0, 0, 100, 100)  # 初始值，会在rebuild中重新计算
         self.connection_point = None  # 连接线
         self.rebuild()
@@ -1087,8 +1194,8 @@ class VTextItem(BaseElement):
         fm = QFontMetrics(font)
         char_h = fm.height()
         
-        # Define accurate column step
-        col_step = self.font_size + COLUMN_SPACING
+        # 计算每列的步长（字体大小 + 列间距）
+        col_step = self.font_size + self.column_spacing
         
         # 计算每列的实际高度限制
         if self.auto_height:
@@ -1119,6 +1226,7 @@ class VTextItem(BaseElement):
                 cursor_y = 0
                 col_idx += 1
             
+            # 计算列的x位置（从右到左排列）
             x_local = -(col_idx * col_step)
             y_pos = cursor_y
             
@@ -1140,6 +1248,8 @@ class VTextItem(BaseElement):
 
         total_cols = col_idx + 1
         total_width = total_cols * col_step
+        
+        # 调整所有字符位置，使第一列保持在右侧
         shift_x = total_width - col_step
         
         for item in generated_items:
@@ -1186,7 +1296,16 @@ class VTextItem(BaseElement):
         action_font = menu.addAction("设置字体 (Font)")
         action_color = menu.addAction("设置颜色 (Color)")
         action_chars_per_col = menu.addAction("设置每列字数 (Chars per Column)")
+        action_column_spacing = menu.addAction("设置列间距 (Column Spacing)")
         menu.addSeparator()
+        
+        # 添加隐藏/显示连接点选项
+        if self.connection_point and self.connection_point.isVisible():
+            toggle_connection_point_action = menu.addAction("隐藏连接点 (Hide Connection Point)")
+        else:
+            toggle_connection_point_action = menu.addAction("显示连接点 (Show Connection Point)")
+        menu.addSeparator()
+        
         copy_action = menu.addAction("复制 (Copy)")
         delete_action = menu.addAction("删除 (Delete)")
         save_as_asset_action = menu.addAction("保存为素材(Save as Asset)")
@@ -1222,6 +1341,10 @@ class VTextItem(BaseElement):
             self.change_color_settings()
         elif action == action_chars_per_col:
             self.change_chars_per_column_settings()
+        elif action == action_column_spacing:
+            self.change_column_spacing_settings()
+        elif action == toggle_connection_point_action:
+            self.toggle_connection_point()
         elif action == copy_action:
             if self.scene():
                 self.scene().copy_item(self)
@@ -1284,6 +1407,26 @@ class VTextItem(BaseElement):
             self.rebuild()
             if self.scene(): 
                 self.scene().update_connectors(self)
+    
+    def change_column_spacing_settings(self):
+        """设置列间距"""
+        spacing, ok = QInputDialog.getInt(None, "设置列间距", "列间距 (像素):", self.column_spacing, 0, 200)
+        if ok:
+            self.column_spacing = spacing
+            self.rebuild()
+            if self.scene():
+                self.scene().update_connectors(self)
+            print(f"列间距已设置为: {self.column_spacing}px")
+    
+    def toggle_connection_point(self):
+        """切换连接点的可见性"""
+        if self.connection_point:
+            current_visible = self.connection_point.isVisible()
+            self.connection_point.setVisible(not current_visible)
+            if current_visible:
+                print("文字连接点已隐藏")
+            else:
+                print("文字连接点已显示")
 
     def mouseDoubleClickEvent(self, event):
         text, ok = QInputDialog.getMultiLineText(None, "编辑文本", "请输入排版内容", self.full_text)
@@ -1328,6 +1471,16 @@ class VImageItem(BaseElement):
         """设置连接点可见性"""
         if self.connection_point:
             self.connection_point.setVisible(visible)
+    
+    def toggle_connection_point(self):
+        """切换连接点的可见性"""
+        if self.connection_point:
+            current_visible = self.connection_point.isVisible()
+            self.connection_point.setVisible(not current_visible)
+            if current_visible:
+                print("图片连接点已隐藏")
+            else:
+                print("图片连接点已显示")
     
     def boundingRect(self):
         return self._rect
@@ -1497,8 +1650,14 @@ class LayoutScene(QGraphicsScene):
             self.add_image_text_connector(source_item, target_item)
         elif isinstance(source_item, VTextItem) and isinstance(target_item, VImageItem):
             self.add_image_text_connector(target_item, source_item)
+        elif isinstance(source_item, VImageItem) and isinstance(target_item, VImageItem):
+            # 图片和图片之间的连接
+            self.add_image_image_connector(source_item, target_item)
+        elif isinstance(source_item, VTextItem) and isinstance(target_item, VTextItem):
+            # 文字和文字之间的连接
+            self.add_text_text_connector(source_item, target_item)
         else:
-            print("只能在图片和文字之间建立连接")
+            print("连接类型不支持")
     
     def toggle_connection_points(self):
         """切换连接点显示状态"""
@@ -1574,22 +1733,68 @@ class LayoutScene(QGraphicsScene):
         conn.setVisible(self.show_image_text_connectors)
         print("图文连接已创建")
     
+    def add_image_image_connector(self, image1, image2):
+        """添加图片-图片连接线"""
+        # 检查是否已经存在连接
+        for conn in self.image_text_connectors:
+            if hasattr(conn, 'item1') and hasattr(conn, 'item2'):
+                if ((conn.item1 == image1 and conn.item2 == image2) or
+                    (conn.item1 == image2 and conn.item2 == image1)):
+                    print("这两个图片已经连接")
+                    return
+        
+        conn = VGenericConnector(image1, image2, "image-image")
+        self.addItem(conn)
+        self.image_text_connectors.append(conn)
+        conn.update_path()
+        conn.setVisible(self.show_image_text_connectors)
+        print("图片-图片连接已创建")
+    
+    def add_text_text_connector(self, text1, text2):
+        """添加文字-文字连接线"""
+        # 检查是否已经存在连接
+        for conn in self.image_text_connectors:
+            if hasattr(conn, 'item1') and hasattr(conn, 'item2'):
+                if ((conn.item1 == text1 and conn.item2 == text2) or
+                    (conn.item1 == text2 and conn.item2 == text1)):
+                    print("这两个文字已经连接")
+                    return
+        
+        conn = VGenericConnector(text1, text2, "text-text")
+        self.addItem(conn)
+        self.image_text_connectors.append(conn)
+        conn.update_path()
+        conn.setVisible(self.show_image_text_connectors)
+        print("文字-文字连接已创建")
+    
     def remove_image_text_connectors(self, item):
-        """移除与指定元素相关的图文连接线"""
+        """移除与指定元素相关的所有连接线"""
         to_remove = []
         for conn in self.image_text_connectors:
-            if conn.image_item == item or conn.text_item == item:
-                to_remove.append(conn)
+            # 检查图文连接器
+            if hasattr(conn, 'image_item') and hasattr(conn, 'text_item'):
+                if conn.image_item == item or conn.text_item == item:
+                    to_remove.append(conn)
+            # 检查通用连接器
+            elif hasattr(conn, 'item1') and hasattr(conn, 'item2'):
+                if conn.item1 == item or conn.item2 == item:
+                    to_remove.append(conn)
         
         for conn in to_remove:
             self.removeItem(conn)
             self.image_text_connectors.remove(conn)
     
     def update_image_text_connectors(self, item):
-        """更新与指定元素相关的图文连接线"""
+        """更新与指定元素相关的所有连接线"""
         for conn in self.image_text_connectors:
-            if conn.image_item == item or conn.text_item == item:
-                conn.update_path()
+            # 检查图文连接器
+            if hasattr(conn, 'image_item') and hasattr(conn, 'text_item'):
+                if conn.image_item == item or conn.text_item == item:
+                    conn.update_path()
+            # 检查通用连接器
+            elif hasattr(conn, 'item1') and hasattr(conn, 'item2'):
+                if conn.item1 == item or conn.item2 == item:
+                    conn.update_path()
     
     def update_all_image_text_connectors(self):
         """更新所有图文连接器"""
@@ -2001,6 +2206,10 @@ class MainWindow(QMainWindow):
         btn_asset_library.triggered.connect(self.open_asset_library)
         toolbar3.addAction(btn_asset_library)
         
+        btn_save_group = QAction("保存组合", self)
+        btn_save_group.triggered.connect(self.save_selected_as_group)
+        toolbar3.addAction(btn_save_group)
+        
         btn_save = QAction("保存工程", self)
         btn_save.triggered.connect(self.save_proj)
         toolbar3.addAction(btn_save)
@@ -2019,6 +2228,17 @@ class MainWindow(QMainWindow):
         save_action = QAction('保存工程', self)
         save_action.triggered.connect(self.save_proj)
         file_menu.addAction(save_action)
+        
+        # 添加素材菜单
+        asset_menu = menubar.addMenu('素材')
+        save_group_action = QAction('保存组合素材', self)
+        save_group_action.setShortcut('Ctrl+G')
+        save_group_action.triggered.connect(self.save_selected_as_group)
+        asset_menu.addAction(save_group_action)
+        
+        open_library_action = QAction('打开素材库', self)
+        open_library_action.triggered.connect(self.open_asset_library)
+        asset_menu.addAction(open_library_action)
 
     def fit_view(self):
         rect = self.scene.sceneRect()
@@ -2139,13 +2359,31 @@ class MainWindow(QMainWindow):
     def export_image(self):
         path, _ = QFileDialog.getSaveFileName(self, "Export Image", "", "PNG (*.png)")
         if path:
-            rect = self.scene.sceneRect()
-            img = QImage(rect.size().toSize(), QImage.Format.Format_ARGB32)
-            img.fill(Qt.GlobalColor.white)
-            p = QPainter(img)
-            self.scene.render(p)
-            p.end()
-            img.save(path)
+            # 保存当前设置
+            original_show_grid = self.scene.show_grid
+            original_show_connectors = self.scene.show_connectors
+            original_show_connection_points = self.scene.show_connection_points
+            
+            # 导出时的设置：隐藏网格、父子连线和连接点，但保持图文连接线可见
+            self.scene.show_grid = False
+            self.scene.set_connectors_visible(False)  # 隐藏父子关系连线
+            self.scene.set_connection_points_visible(False)  # 隐藏连接点
+            # 图文连接器保持可见，不隐藏
+            
+            try:
+                rect = self.scene.sceneRect()
+                img = QImage(rect.size().toSize(), QImage.Format.Format_ARGB32)
+                img.fill(Qt.GlobalColor.white)
+                p = QPainter(img)
+                self.scene.render(p)
+                p.end()
+                img.save(path)
+                print(f"图片已导出到: {path}")
+            finally:
+                # 恢复原始设置
+                self.scene.show_grid = original_show_grid
+                self.scene.set_connectors_visible(original_show_connectors)
+                self.scene.set_connection_points_visible(original_show_connection_points)
 
     def save_proj(self):
         path, _ = QFileDialog.getSaveFileName(self, "Save Project", "", "VLayout (*.vlayout)")
