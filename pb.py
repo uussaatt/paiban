@@ -1176,6 +1176,118 @@ class BaseElement(QGraphicsItem):
             else:
                 print(f"{element_type}连接点已显示")
 
+class InlineTextEditor(QTextEdit):
+    """内联文本编辑器"""
+    editingFinished = pyqtSignal(str)
+    editingCancelled = pyqtSignal()
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowFlags(Qt.WindowType.FramelessWindowHint)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
+        
+        # 设置样式
+        self.setStyleSheet("""
+            QTextEdit {
+                border: 2px solid #4A90E2;
+                background-color: white;
+                font-family: SimSun;
+                padding: 2px;
+            }
+        """)
+        
+        # 设置字体
+        font = QFont("SimSun", 24)
+        self.setFont(font)
+        
+        self.original_text = ""
+        self.text_item = None
+        
+    def start_editing(self, text_item, text):
+        """开始编辑指定的文字项目"""
+        self.text_item = text_item
+        self.original_text = text
+        self.setPlainText(text)
+        
+        # 设置编辑器的字体和大小
+        font = QFont(text_item.font_family, text_item.font_size)
+        self.setFont(font)
+        
+        # 设置文字颜色
+        palette = self.palette()
+        palette.setColor(QPalette.ColorRole.Text, text_item.text_color)
+        self.setPalette(palette)
+        
+        # 计算编辑器的位置和大小
+        scene = text_item.scene()
+        if scene and scene.views():
+            view = scene.views()[0]
+            
+            # 获取文字项目在视图中的位置
+            item_rect = text_item.boundingRect()
+            scene_rect = QRectF(text_item.scenePos(), item_rect.size())
+            view_rect = view.mapFromScene(scene_rect).boundingRect()
+            
+            # 调整编辑器大小，给一些额外空间
+            margin = 10
+            view_rect.adjust(-margin, -margin, margin, margin)
+            
+            # 确保编辑器不会超出视图边界
+            view_size = view.size()
+            if view_rect.right() > view_size.width():
+                view_rect.moveRight(view_size.width() - 5)
+            if view_rect.bottom() > view_size.height():
+                view_rect.moveBottom(view_size.height() - 5)
+            if view_rect.left() < 0:
+                view_rect.moveLeft(5)
+            if view_rect.top() < 0:
+                view_rect.moveTop(5)
+            
+            # 设置编辑器位置和大小
+            self.setParent(view)
+            self.setGeometry(view_rect)
+            self.show()
+            self.setFocus()
+            self.selectAll()
+    
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_Escape:
+            print("按下Escape键，取消编辑")
+            self.editingCancelled.emit()
+            self.hide()
+            # 清理编辑器状态
+            self.text_item = None
+            self.original_text = ""
+        elif event.key() == Qt.Key.Key_Return and event.modifiers() == Qt.KeyboardModifier.ControlModifier:
+            # Ctrl+Enter 完成编辑
+            print("按下Ctrl+Enter，完成编辑")
+            self.finish_editing()
+        elif event.key() == Qt.Key.Key_Return:
+            # 普通回车插入换行
+            super().keyPressEvent(event)
+        else:
+            super().keyPressEvent(event)
+    
+    def focusOutEvent(self, event):
+        """失去焦点时完成编辑"""
+        self.finish_editing()
+        super().focusOutEvent(event)
+    
+    def finish_editing(self):
+        """完成编辑"""
+        new_text = self.toPlainText()
+        print(f"InlineTextEditor完成编辑: 原文本='{self.original_text[:20]}...', 新文本='{new_text[:20]}...'")
+        
+        # 无论文本是否改变，都发送信号以确保状态重置
+        self.editingFinished.emit(new_text)
+        self.hide()
+        
+        # 清理编辑器状态
+        self.text_item = None
+        self.original_text = ""
+
 class VTextItem(BaseElement):
     """Vertical Text Engine (Right-to-Left columns)"""
     def __init__(self, text="请输入文本", font_size=DEFAULT_FONT_SIZE, box_height=400):
@@ -1194,6 +1306,11 @@ class VTextItem(BaseElement):
         
         self._rect = QRectF(0, 0, 100, 100)  # 初始值，会在rebuild中重新计算
         self.connection_point = None  # 连接线
+        
+        # 内联编辑器
+        self.inline_editor = None
+        self.is_editing = False
+        
         self.rebuild()
         self.create_connection_point()
 
@@ -1313,6 +1430,13 @@ class VTextItem(BaseElement):
         
     def contextMenuEvent(self, event):
         menu = QMenu()
+        
+        # 编辑选项
+        action_inline_edit = menu.addAction("直接编辑 (Inline Edit)")
+        action_dialog_edit = menu.addAction("对话框编辑 (Dialog Edit)")
+        action_reset_editing = menu.addAction("重置编辑状态 (Reset Editing)")
+        menu.addSeparator()
+        
         action_font = menu.addAction("设置字体 (Font)")
         action_color = menu.addAction("设置颜色 (Color)")
         action_chars_per_col = menu.addAction("设置每列字数 (Chars per Column)")
@@ -1355,7 +1479,13 @@ class VTextItem(BaseElement):
         
         action = menu.exec(event.screenPos())
         
-        if action == action_font:
+        if action == action_inline_edit:
+            self.start_inline_editing()
+        elif action == action_dialog_edit:
+            self.start_dialog_editing()
+        elif action == action_reset_editing:
+            self.reset_editing_state()
+        elif action == action_font:
             self.change_font_settings()
         elif action == action_color:
             self.change_color_settings()
@@ -1449,12 +1579,74 @@ class VTextItem(BaseElement):
                 print("文字连接点已显示")
 
     def mouseDoubleClickEvent(self, event):
+        """双击开始内联编辑"""
+        print(f"双击文字，当前编辑状态: {self.is_editing}")
+        if self.is_editing:
+            print("已经在编辑状态，强制重置")
+            self.reset_editing_state()
+        self.start_inline_editing()
+    
+    def start_inline_editing(self):
+        """开始内联编辑"""
+        if self.is_editing:
+            print("已经在编辑状态中")
+            return
+            
+        print("开始内联编辑")
+        self.is_editing = True
+        
+        # 创建内联编辑器
+        if not self.inline_editor:
+            self.inline_editor = InlineTextEditor()
+            self.inline_editor.editingFinished.connect(self.finish_inline_editing)
+            self.inline_editor.editingCancelled.connect(self.cancel_inline_editing)
+        
+        # 开始编辑
+        self.inline_editor.start_editing(self, self.full_text)
+    
+    def finish_inline_editing(self, new_text):
+        """完成内联编辑"""
+        print(f"完成内联编辑: {new_text[:20]}...")
+        self.is_editing = False
+        if new_text != self.full_text:
+            self.full_text = new_text
+            self.rebuild()
+            if self.scene():
+                self.scene().update_connectors(self)
+    
+    def cancel_inline_editing(self):
+        """取消内联编辑"""
+        print("取消内联编辑")
+        self.is_editing = False
+        if self.inline_editor:
+            self.inline_editor.hide()
+    
+    def reset_editing_state(self):
+        """强制重置编辑状态"""
+        print("强制重置编辑状态")
+        self.is_editing = False
+        if self.inline_editor:
+            self.inline_editor.hide()
+            self.inline_editor.text_item = None
+            self.inline_editor.original_text = ""
+    
+    def start_dialog_editing(self):
+        """开始对话框编辑（原来的方式）"""
         text, ok = QInputDialog.getMultiLineText(None, "编辑文本", "请输入排版内容", self.full_text)
         if ok:
             self.full_text = text
             self.rebuild()
             if self.scene():
                 self.scene().update_connectors(self)
+    
+    def keyPressEvent(self, event):
+        """处理键盘事件"""
+        if event.key() == Qt.Key.Key_F2 or event.key() == Qt.Key.Key_Return:
+            # F2 或 Enter 键开始内联编辑
+            self.start_inline_editing()
+            event.accept()
+        else:
+            super().keyPressEvent(event)
 
     def boundingRect(self):
         return self._rect
@@ -2107,6 +2299,8 @@ class LayoutScene(QGraphicsScene):
         print(f"已对齐到右边")
     
 class LayoutView(QGraphicsView):
+    transformChanged = pyqtSignal()  # 变换改变信号
+    
     def __init__(self, scene):
         super().__init__(scene)
         self.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -2146,8 +2340,77 @@ class LayoutView(QGraphicsView):
         if event.modifiers() == Qt.KeyboardModifier.ControlModifier:
             scale = 1.1 if event.angleDelta().y() > 0 else 0.9
             self.scale(scale, scale)
+            self.transformChanged.emit()
         else:
             super().wheelEvent(event)
+    
+    def fit_in_view(self):
+        """合适屏幕 - 让整个画布内容适合视图"""
+        scene = self.scene()
+        if scene:
+            # 获取所有可见元素的边界
+            items_rect = scene.itemsBoundingRect()
+            if not items_rect.isEmpty():
+                # 添加一些边距
+                margin = 50
+                items_rect.adjust(-margin, -margin, margin, margin)
+                self.fitInView(items_rect, Qt.AspectRatioMode.KeepAspectRatio)
+            else:
+                # 如果没有元素，适合整个场景
+                self.fitInView(scene.sceneRect(), Qt.AspectRatioMode.KeepAspectRatio)
+            self.transformChanged.emit()
+    
+    def fill_view(self):
+        """填充屏幕 - 让画布内容填满整个视图"""
+        scene = self.scene()
+        if scene:
+            # 获取所有可见元素的边界
+            items_rect = scene.itemsBoundingRect()
+            if not items_rect.isEmpty():
+                self.fitInView(items_rect, Qt.AspectRatioMode.KeepAspectRatioByExpanding)
+            else:
+                # 如果没有元素，填充整个场景
+                self.fitInView(scene.sceneRect(), Qt.AspectRatioMode.KeepAspectRatioByExpanding)
+            self.transformChanged.emit()
+    
+    def actual_size(self):
+        """实际大小 - 100%缩放"""
+        self.resetTransform()
+        self.transformChanged.emit()
+    
+    def zoom_in(self):
+        """放大"""
+        self.scale(1.25, 1.25)
+        self.transformChanged.emit()
+    
+    def zoom_out(self):
+        """缩小"""
+        self.scale(0.8, 0.8)
+        self.transformChanged.emit()
+    
+    def zoom_to_selection(self):
+        """缩放到选中内容"""
+        scene = self.scene()
+        if scene:
+            selected_items = scene.selectedItems()
+            if selected_items:
+                # 计算选中项目的边界
+                selection_rect = QRectF()
+                for item in selected_items:
+                    if hasattr(item, 'boundingRect'):
+                        item_rect = item.boundingRect()
+                        scene_rect = QRectF(item.scenePos(), item_rect.size())
+                        if selection_rect.isEmpty():
+                            selection_rect = scene_rect
+                        else:
+                            selection_rect = selection_rect.united(scene_rect)
+                
+                if not selection_rect.isEmpty():
+                    # 添加边距
+                    margin = 30
+                    selection_rect.adjust(-margin, -margin, margin, margin)
+                    self.fitInView(selection_rect, Qt.AspectRatioMode.KeepAspectRatio)
+                    self.transformChanged.emit()
 
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls(): event.accept()
@@ -2187,6 +2450,14 @@ class MainWindow(QMainWindow):
         self.create_menu_bar()
         self.create_toolbars()
         
+        # 创建状态栏
+        self.status_bar = self.statusBar()
+        self.zoom_label = QLabel("缩放: 100%")
+        self.status_bar.addPermanentWidget(self.zoom_label)
+        
+        # 连接视图变换信号来更新缩放显示
+        self.view.transformChanged.connect(self.update_zoom_display)
+        
         self.timer = QTimer()
         self.timer.timeout.connect(self.refresh_ui)
         self.timer.start(2000)
@@ -2205,6 +2476,10 @@ class MainWindow(QMainWindow):
         btn_add_img = QAction("插入图片", self)
         btn_add_img.triggered.connect(self.add_image)
         toolbar1.addAction(btn_add_img)
+        
+        btn_edit_text = QAction("编辑文字", self)
+        btn_edit_text.triggered.connect(self.edit_selected_text)
+        toolbar1.addAction(btn_edit_text)
         toolbar1.addSeparator()
         
         toolbar1.addWidget(QLabel("字体:"))
@@ -2292,6 +2567,43 @@ class MainWindow(QMainWindow):
         btn_export_img = QAction("导出图片", self)
         btn_export_img.triggered.connect(self.export_image)
         toolbar3.addAction(btn_export_img)
+        
+        # 视图工具栏
+        toolbar4 = QToolBar("视图缩放")
+        self.addToolBarBreak(Qt.ToolBarArea.TopToolBarArea)
+        self.addToolBar(Qt.ToolBarArea.TopToolBarArea, toolbar4)
+        
+        btn_fit_view = QAction("合适屏幕", self)
+        btn_fit_view.setShortcut("Ctrl+0")
+        btn_fit_view.triggered.connect(self.fit_in_view)
+        toolbar4.addAction(btn_fit_view)
+        
+        btn_fill_view = QAction("填充屏幕", self)
+        btn_fill_view.setShortcut("Ctrl+Alt+0")
+        btn_fill_view.triggered.connect(self.fill_view)
+        toolbar4.addAction(btn_fill_view)
+        
+        btn_actual_size = QAction("实际大小", self)
+        btn_actual_size.setShortcut("Ctrl+1")
+        btn_actual_size.triggered.connect(self.actual_size)
+        toolbar4.addAction(btn_actual_size)
+        
+        toolbar4.addSeparator()
+        
+        btn_zoom_in = QAction("放大", self)
+        btn_zoom_in.setShortcut("Ctrl+=")
+        btn_zoom_in.triggered.connect(self.zoom_in)
+        toolbar4.addAction(btn_zoom_in)
+        
+        btn_zoom_out = QAction("缩小", self)
+        btn_zoom_out.setShortcut("Ctrl+-")
+        btn_zoom_out.triggered.connect(self.zoom_out)
+        toolbar4.addAction(btn_zoom_out)
+        
+        btn_zoom_selection = QAction("缩放到选中", self)
+        btn_zoom_selection.setShortcut("Ctrl+2")
+        btn_zoom_selection.triggered.connect(self.zoom_to_selection)
+        toolbar4.addAction(btn_zoom_selection)
 
     def create_menu_bar(self):
         menubar = self.menuBar()
@@ -2314,10 +2626,47 @@ class MainWindow(QMainWindow):
         open_library_action = QAction('打开素材库', self)
         open_library_action.triggered.connect(self.open_asset_library)
         asset_menu.addAction(open_library_action)
+        
+        # 添加视图菜单
+        view_menu = menubar.addMenu('视图')
+        
+        fit_view_action = QAction('合适屏幕', self)
+        fit_view_action.setShortcut('Ctrl+0')
+        fit_view_action.triggered.connect(self.fit_in_view)
+        view_menu.addAction(fit_view_action)
+        
+        fill_view_action = QAction('填充屏幕', self)
+        fill_view_action.setShortcut('Ctrl+Alt+0')
+        fill_view_action.triggered.connect(self.fill_view)
+        view_menu.addAction(fill_view_action)
+        
+        actual_size_action = QAction('实际大小', self)
+        actual_size_action.setShortcut('Ctrl+1')
+        actual_size_action.triggered.connect(self.actual_size)
+        view_menu.addAction(actual_size_action)
+        
+        view_menu.addSeparator()
+        
+        zoom_in_action = QAction('放大', self)
+        zoom_in_action.setShortcut('Ctrl+=')
+        zoom_in_action.triggered.connect(self.zoom_in)
+        view_menu.addAction(zoom_in_action)
+        
+        zoom_out_action = QAction('缩小', self)
+        zoom_out_action.setShortcut('Ctrl+-')
+        zoom_out_action.triggered.connect(self.zoom_out)
+        view_menu.addAction(zoom_out_action)
+        
+        zoom_selection_action = QAction('缩放到选中', self)
+        zoom_selection_action.setShortcut('Ctrl+2')
+        zoom_selection_action.triggered.connect(self.zoom_to_selection)
+        view_menu.addAction(zoom_selection_action)
 
     def fit_view(self):
-        rect = self.scene.sceneRect()
-        self.view.fitInView(rect, Qt.AspectRatioMode.KeepAspectRatio)
+        """初始化时适应视图"""
+        # 使用新的智能适应方法
+        self.view.fit_in_view()
+        # 稍微缩小一点，留出边距
         self.view.scale(0.95, 0.95)
 
     def add_text(self):
@@ -2332,6 +2681,15 @@ class MainWindow(QMainWindow):
             img.setPos(500, 300)
             self.scene.add_item_with_undo(img)
     
+    def edit_selected_text(self):
+        """编辑选中的文字"""
+        selected_items = [item for item in self.scene.selectedItems() if isinstance(item, VTextItem)]
+        if selected_items:
+            # 编辑第一个选中的文字项目
+            selected_items[0].start_inline_editing()
+        else:
+            print("请先选择一个文字元素")
+    
     def undo(self):
         self.scene.undo()
     
@@ -2343,6 +2701,38 @@ class MainWindow(QMainWindow):
     
     def align_right(self):
         self.scene.align_right()
+    
+    # 视图缩放方法
+    def fit_in_view(self):
+        """合适屏幕"""
+        self.view.fit_in_view()
+    
+    def fill_view(self):
+        """填充屏幕"""
+        self.view.fill_view()
+    
+    def actual_size(self):
+        """实际大小"""
+        self.view.actual_size()
+    
+    def zoom_in(self):
+        """放大"""
+        self.view.zoom_in()
+    
+    def zoom_out(self):
+        """缩小"""
+        self.view.zoom_out()
+    
+    def zoom_to_selection(self):
+        """缩放到选中内容"""
+        self.view.zoom_to_selection()
+    
+    def update_zoom_display(self):
+        """更新缩放显示"""
+        transform = self.view.transform()
+        scale_factor = transform.m11()  # 获取x轴缩放因子
+        zoom_percent = int(scale_factor * 100)
+        self.zoom_label.setText(f"缩放: {zoom_percent}%")
     
     def auto_connect_selected(self):
         self.scene.auto_connect_selected_items()
