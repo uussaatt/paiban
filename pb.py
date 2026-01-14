@@ -1333,6 +1333,54 @@ class SetParentCommand(UndoCommand):
             self.child_item.setParentItem(None)
             self.child_item.setPos(self.old_scene_pos)
 
+class MoveItemCommand(UndoCommand):
+    """移动元素命令"""
+    def __init__(self, scene, item, old_pos, new_pos):
+        super().__init__(scene)
+        self.item = item
+        # 存储场景坐标，以简化父子移动的恢复逻辑
+        self.old_scene_pos = old_pos
+        self.new_scene_pos = new_pos
+        
+        # 记录移动前子元素的场景位置，以防父元素移动导致子元素相对位置变化
+        self.child_scene_positions = {}
+        for child in item.childItems():
+            if isinstance(child, BaseElement):
+                self.child_scene_positions[child] = child.scenePos()
+
+    def execute(self):
+        # 执行：移到新场景位置
+        if self.item.parentItem():
+            # 如果有父级，转换为本地坐标
+            local_pos = self.item.parentItem().mapFromScene(self.new_scene_pos)
+            self.item.setPos(local_pos)
+        else:
+            self.item.setPos(self.new_scene_pos)
+
+        # 确保连线更新
+        self.item.scene().update_connectors(self.item)
+        self.item.scene().update_image_text_connectors(self.item)
+
+    def undo(self):
+        # 撤销：移回旧场景位置
+        if self.item.parentItem():
+            # 如果有父级，转换为本地坐标
+            local_pos = self.item.parentItem().mapFromScene(self.old_scene_pos)
+            self.item.setPos(local_pos)
+        else:
+            self.item.setPos(self.old_scene_pos)
+        
+        # 恢复子元素场景位置
+        for child, scene_pos in self.child_scene_positions.items():
+            if child.parentItem() == self.item:
+                # 将场景位置转换回父元素（即当前项目）的新本地坐标
+                local_pos = self.item.mapFromScene(scene_pos)
+                child.setPos(local_pos)
+        
+        # 确保连线更新
+        self.item.scene().update_connectors(self.item)
+        self.item.scene().update_image_text_connectors(self.item)
+
 class UndoStack:
     """撤销栈管理器"""
     def __init__(self, max_size=50):
@@ -1519,6 +1567,12 @@ class VGenericConnector(QGraphicsPathItem):
             # 选中时使用橙色粗线
             pen = QPen(QColor(255, 140, 0), self.line_width + 2, Qt.PenStyle.SolidLine)
             self.setPen(pen)
+        else:
+            # 连线被取消选中时，强制恢复到基础画笔颜色
+            pen = QPen(self.base_color)
+            pen.setWidth(self.line_width)
+            pen.setStyle(Qt.PenStyle.SolidLine)
+            self.setPen(pen)
         super().paint(painter, option, widget)
     
     def contextMenuEvent(self, event):
@@ -1662,6 +1716,12 @@ class VImageTextConnector(QGraphicsPathItem):
             # 选中时使用橙色粗线
             pen = QPen(QColor(255, 140, 0), self.line_width + 2, Qt.PenStyle.SolidLine)
             self.setPen(pen)
+        else:
+            # 连线被取消选中时，强制恢复到基础画笔颜色
+            pen = QPen(self.base_color)
+            pen.setWidth(self.line_width)
+            pen.setStyle(Qt.PenStyle.SolidLine)
+            self.setPen(pen)
         super().paint(painter, option, widget)
         
     def contextMenuEvent(self, event):
@@ -1804,7 +1864,8 @@ class BaseElement(QGraphicsItem):
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable)
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable)
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemSendsGeometryChanges)
-        self.connectors = [] 
+        self.connectors = []
+        self._drag_start_pos_scene = QPointF() # 记录拖动开始时的场景位置 
 
     def itemChange(self, change, value):
         if change == QGraphicsItem.GraphicsItemChange.ItemPositionHasChanged:
@@ -1813,6 +1874,24 @@ class BaseElement(QGraphicsItem):
                 self.scene().update_connectors(self)
                 self.scene().update_image_text_connectors(self)
         return super().itemChange(change, value)
+
+    def mousePressEvent(self, event):
+        """记录拖动开始时的位置"""
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._drag_start_pos_scene = self.scenePos()
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        """记录移动命令到撤销栈"""
+        if event.button() == Qt.MouseButton.LeftButton:
+            current_pos_scene = self.scenePos()
+            # 只有当移动距离足够大时才记录，避免误触
+            if (current_pos_scene - self._drag_start_pos_scene).manhattanLength() > 2.0:
+                # 创建移动命令
+                command = MoveItemCommand(self.scene(), self, self._drag_start_pos_scene, current_pos_scene)
+                self.scene().undo_stack.push(command)
+        
+        super().mouseReleaseEvent(event)
     
     def contextMenuEvent(self, event):
         menu = QMenu()
@@ -3203,6 +3282,13 @@ class LayoutScene(QGraphicsScene):
                 if self.views():
                     self.views()[0].setCursor(Qt.CursorShape.ArrowCursor)
                 print("已取消父子绑定模式")
+                event.accept()
+                return
+            
+            # 清除所有选中状态，包括连接线
+            if self.selectedItems():
+                self.clearSelection()
+                print("已清除所有选中状态")
                 event.accept()
                 return
         
