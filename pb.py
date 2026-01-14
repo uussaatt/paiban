@@ -1612,9 +1612,15 @@ class BaseElement(QGraphicsItem):
              if self.scene(): self.scene().start_binding_mode(self)
 
     def paint(self, painter, option, widget):
-        # Draw a subtle selection border
+        # Draw orange dashed selection border
         if self.isSelected():
-            painter.setPen(QPen(Qt.GlobalColor.blue, 1, Qt.PenStyle.DotLine))
+            # 设置抗锯齿以获得更平滑的线条
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            
+            # 橙色粗虚线边框
+            pen = QPen(QColor(255, 140, 0), 3, Qt.PenStyle.DashLine)  # 橙色，3像素粗
+            pen.setDashPattern([8, 4])  # 自定义虚线样式：8像素实线，4像素间隔
+            painter.setPen(pen)
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawRect(self.boundingRect())
     
@@ -2814,19 +2820,11 @@ class LayoutView(QGraphicsView):
             super().wheelEvent(event)
     
     def fit_in_view(self):
-        """合适屏幕 - 让整个画布内容适合视图"""
+        """合适屏幕 - 让整个画布区域适合视图"""
         scene = self.scene()
         if scene:
-            # 获取所有可见元素的边界
-            items_rect = scene.itemsBoundingRect()
-            if not items_rect.isEmpty():
-                # 添加一些边距
-                margin = 50
-                items_rect.adjust(-margin, -margin, margin, margin)
-                self.fitInView(items_rect, Qt.AspectRatioMode.KeepAspectRatio)
-            else:
-                # 如果没有元素，适合整个场景
-                self.fitInView(scene.sceneRect(), Qt.AspectRatioMode.KeepAspectRatio)
+            # 始终适配整个场景矩形（画布区域）
+            self.fitInView(scene.sceneRect(), Qt.AspectRatioMode.KeepAspectRatio)
             self.transformChanged.emit()
     
     def fill_view(self):
@@ -3072,6 +3070,11 @@ class MainWindow(QMainWindow):
         btn_fit_view.setShortcut("Ctrl+0")
         btn_fit_view.triggered.connect(self.fit_in_view)
         view_toolbar.addAction(btn_fit_view)
+        
+        btn_fill_view = QAction("填充屏幕", self)
+        btn_fill_view.setShortcut("Ctrl+Alt+0")
+        btn_fill_view.triggered.connect(self.fill_view)
+        view_toolbar.addAction(btn_fill_view)
         
         btn_actual_size = QAction("实际大小", self)
         btn_actual_size.setShortcut("Ctrl+1")
