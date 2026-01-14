@@ -15,6 +15,7 @@ DEFAULT_FONT_SIZE = 24
 COLUMN_SPACING = 10
 LINE_HEIGHT_RATIO = 1.2
 ASSETS_DIR = "assets"  # 素材库目录
+DEFAULT_LINE_WIDTH = 3  # 默认连接线粗细（像素）
 
 # Vertically sensitive characters (Simple Heuristic for demo)
 ROTATE_CHARS = {'—', '…', '(', ')', '[', ']', '{', '}', '《', '》', '-', '_'}
@@ -906,63 +907,155 @@ class ProjectData:
     """Helper to serialize/deserialize project"""
     @staticmethod
     def save(scene, filepath):
-        items_data = []
+        project_data = {
+            'version': '2.0',
+            'items': [],
+            'connectors': [],
+            'image_text_connectors': []
+        }
+        
         # Store items with IDs to reconstruct hierarchy
-        item_map = {} # item -> id
+        item_map = {}  # item -> id
         
         # Assign IDs
         for idx, item in enumerate(scene.items()):
             if isinstance(item, (VTextItem, VImageItem)):
                 item_map[item] = idx
         
+        # Save items
         for item, item_id in item_map.items():
             data = {
                 'id': item_id,
                 'type': item.__class__.__name__,
                 'x': item.x(),
                 'y': item.y(),
-                'parent_id': item_map.get(item.parentItem(), -1),
+                'scene_x': item.scenePos().x(),
+                'scene_y': item.scenePos().y(),
+                'parent_id': item_map.get(item.parentItem(), -1) if isinstance(item.parentItem(), (VTextItem, VImageItem)) else -1,
                 'z': item.zValue()
             }
+            
             if isinstance(item, VTextItem):
                 data['text'] = item.full_text
                 data['font_size'] = item.font_size
                 data['box_height'] = item.box_height
                 data['font_family'] = item.font_family
                 data['text_color'] = item.text_color.name()
+                data['chars_per_column'] = item.chars_per_column
+                data['column_spacing'] = item.column_spacing
+                data['auto_height'] = item.auto_height
+                data['manual_line_break'] = item.manual_line_break
+                if item.connection_point:
+                    data['connection_point_visible'] = item.connection_point.isVisible()
             elif isinstance(item, VImageItem):
                 data['path'] = item.file_path
                 data['width'] = item.target_width
+                if item.connection_point:
+                    data['connection_point_visible'] = item.connection_point.isVisible()
             
-            items_data.append(data)
+            project_data['items'].append(data)
+        
+        # Save parent-child connectors
+        for conn in scene.connectors:
+            if hasattr(conn, 'parent_element') and hasattr(conn, 'child_element'):
+                parent_id = item_map.get(conn.parent_element, -1)
+                child_id = item_map.get(conn.child_element, -1)
+                if parent_id != -1 and child_id != -1:
+                    project_data['connectors'].append({
+                        'parent_id': parent_id,
+                        'child_id': child_id
+                    })
+        
+        # Save image-text connectors
+        for conn in scene.image_text_connectors:
+            conn_data = {}
+            if hasattr(conn, 'image_item') and hasattr(conn, 'text_item'):
+                # VImageTextConnector
+                img_id = item_map.get(conn.image_item, -1)
+                text_id = item_map.get(conn.text_item, -1)
+                if img_id != -1 and text_id != -1:
+                    conn_data = {
+                        'type': 'VImageTextConnector',
+                        'image_id': img_id,
+                        'text_id': text_id,
+                        'line_width': conn.line_width if hasattr(conn, 'line_width') else 3
+                    }
+            elif hasattr(conn, 'item1') and hasattr(conn, 'item2'):
+                # VGenericConnector
+                item1_id = item_map.get(conn.item1, -1)
+                item2_id = item_map.get(conn.item2, -1)
+                if item1_id != -1 and item2_id != -1:
+                    conn_data = {
+                        'type': 'VGenericConnector',
+                        'item1_id': item1_id,
+                        'item2_id': item2_id,
+                        'connection_type': conn.connection_type if hasattr(conn, 'connection_type') else 'generic',
+                        'line_width': conn.line_width if hasattr(conn, 'line_width') else 3
+                    }
             
+            if conn_data:
+                project_data['image_text_connectors'].append(conn_data)
+        
         with open(filepath, 'w', encoding='utf-8') as f:
-            json.dump(items_data, f, indent=2, ensure_ascii=False)
+            json.dump(project_data, f, indent=2, ensure_ascii=False)
+        
+        print(f"工程已保存: {len(project_data['items'])} 个元素, {len(project_data['connectors'])} 个父子连接, {len(project_data['image_text_connectors'])} 个图文连接")
 
     @staticmethod
     def load(scene, filepath):
         scene.clear()
+        
         with open(filepath, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-            
+            project_data = json.load(f)
+        
+        # 兼容旧版本格式
+        if isinstance(project_data, list):
+            data = project_data
+            connectors_data = []
+            image_text_connectors_data = []
+        else:
+            data = project_data.get('items', [])
+            connectors_data = project_data.get('connectors', [])
+            image_text_connectors_data = project_data.get('image_text_connectors', [])
+        
         # First pass: Create items
-        id_map = {} # id -> item
+        id_map = {}  # id -> item
         delayed_parents = []
         
         for d in data:
             item = None
             if d['type'] == 'VTextItem':
                 item = VTextItem(d['text'], d['font_size'], d['box_height'])
-                if 'font_family' in d: item.font_family = d['font_family']
-                if 'text_color' in d: item.text_color = QColor(d['text_color'])
-                item.rebuild() # Rebrand with new changes
+                if 'font_family' in d:
+                    item.font_family = d['font_family']
+                if 'text_color' in d:
+                    item.text_color = QColor(d['text_color'])
+                if 'chars_per_column' in d:
+                    item.chars_per_column = d['chars_per_column']
+                if 'column_spacing' in d:
+                    item.column_spacing = d['column_spacing']
+                if 'auto_height' in d:
+                    item.auto_height = d['auto_height']
+                if 'manual_line_break' in d:
+                    item.manual_line_break = d['manual_line_break']
+                item.rebuild()
             elif d['type'] == 'VImageItem':
                 item = VImageItem(d['path'], d['width'])
             
             if item:
-                item.setPos(d['x'], d['y'])
+                # 使用场景坐标（如果有的话）
+                if 'scene_x' in d and 'scene_y' in d:
+                    item.setPos(d['scene_x'], d['scene_y'])
+                else:
+                    item.setPos(d['x'], d['y'])
+                
                 item.setZValue(d.get('z', 0))
                 scene.addItem(item)
+                
+                # 恢复连接点可见性
+                if 'connection_point_visible' in d and item.connection_point:
+                    item.connection_point.setVisible(d['connection_point_visible'])
+                
                 id_map[d['id']] = item
                 if d['parent_id'] != -1:
                     delayed_parents.append((item, d['parent_id']))
@@ -970,13 +1063,48 @@ class ProjectData:
         # Second pass: Restore hierarchy
         for item, pid in delayed_parents:
             if pid in id_map:
+                parent = id_map[pid]
                 # 保存当前场景坐标
                 curr_scene_pos = item.scenePos()
                 # 设置父级
-                item.setParentItem(id_map[pid])
+                item.setParentItem(parent)
                 # 将场景坐标转换为父级的本地坐标并设置
-                local_pos = id_map[pid].mapFromScene(curr_scene_pos)
+                local_pos = parent.mapFromScene(curr_scene_pos)
                 item.setPos(local_pos)
+        
+        # Third pass: Restore parent-child connectors
+        for conn_data in connectors_data:
+            parent_id = conn_data.get('parent_id', -1)
+            child_id = conn_data.get('child_id', -1)
+            if parent_id in id_map and child_id in id_map:
+                scene.add_connector(id_map[parent_id], id_map[child_id])
+        
+        # Fourth pass: Restore image-text connectors
+        for conn_data in image_text_connectors_data:
+            conn_type = conn_data.get('type', 'VImageTextConnector')
+            line_width = conn_data.get('line_width', 3)
+            
+            if conn_type == 'VImageTextConnector':
+                img_id = conn_data.get('image_id', -1)
+                text_id = conn_data.get('text_id', -1)
+                if img_id in id_map and text_id in id_map:
+                    conn = VImageTextConnector(id_map[img_id], id_map[text_id], line_width)
+                    scene.addItem(conn)
+                    scene.image_text_connectors.append(conn)
+                    conn.update_path()
+                    conn.setVisible(scene.show_image_text_connectors)
+            elif conn_type == 'VGenericConnector':
+                item1_id = conn_data.get('item1_id', -1)
+                item2_id = conn_data.get('item2_id', -1)
+                connection_type = conn_data.get('connection_type', 'generic')
+                if item1_id in id_map and item2_id in id_map:
+                    conn = VGenericConnector(id_map[item1_id], id_map[item2_id], connection_type, line_width)
+                    scene.addItem(conn)
+                    scene.image_text_connectors.append(conn)
+                    conn.update_path()
+                    conn.setVisible(scene.show_image_text_connectors)
+        
+        print(f"工程已加载: {len(id_map)} 个元素, {len(connectors_data)} 个父子连接, {len(image_text_connectors_data)} 个图文连接")
 
 # --- Undo/Redo System ---
 
@@ -1314,6 +1442,10 @@ class ConnectionPoint(QGraphicsEllipseItem):
         elif self.point_type == "text_bottom":
             # 文字底部中点
             self.setPos(rect.width()/2, rect.height())
+        
+        # 更新与此连接点相关的所有连接线
+        if self.scene() and self.parent_element:
+            self.scene().update_image_text_connectors(self.parent_element)
     
     def hoverEnterEvent(self, event):
         """鼠标悬停进入"""
@@ -1340,19 +1472,99 @@ class ConnectionPoint(QGraphicsEllipseItem):
 
 class VGenericConnector(QGraphicsPathItem):
     """通用连接线 - 支持任意两个元素之间的连接"""
-    def __init__(self, item1, item2, connection_type="generic"):
+    def __init__(self, item1, item2, connection_type="generic", line_width=None):
         super().__init__()
         self.item1 = item1
         self.item2 = item2
         self.connection_type = connection_type  # "image-image", "text-text", "generic"
+        self.line_width = line_width if line_width is not None else DEFAULT_LINE_WIDTH  # 线条粗细
+        self.base_color = QColor(255, 0, 0, 200)  # 基础颜色
         self.setZValue(-45)  # 比图文连接器层级稍低
         
         # 统一使用红色连接线
-        pen = QPen(QColor(255, 0, 0, 200))  # 红色
-        pen.setWidth(3)  # 更粗的线条
+        pen = QPen(self.base_color)
+        pen.setWidth(self.line_width)
         pen.setStyle(Qt.PenStyle.SolidLine)
         self.setPen(pen)
-        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, False)
+        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, True)  # 可选中
+        self.setAcceptHoverEvents(True)  # 接受悬停事件
+    
+    def set_line_width(self, width):
+        """设置线条粗细"""
+        self.line_width = width
+        pen = self.pen()
+        pen.setWidth(width)
+        self.setPen(pen)
+        self.update()
+    
+    def hoverEnterEvent(self, event):
+        """鼠标悬停时高亮"""
+        pen = QPen(QColor(255, 150, 0, 255))  # 橙色高亮
+        pen.setWidth(self.line_width + 1)
+        pen.setStyle(Qt.PenStyle.SolidLine)
+        self.setPen(pen)
+        super().hoverEnterEvent(event)
+    
+    def hoverLeaveEvent(self, event):
+        """鼠标离开时恢复"""
+        pen = QPen(self.base_color)
+        pen.setWidth(self.line_width)
+        pen.setStyle(Qt.PenStyle.SolidLine)
+        self.setPen(pen)
+        super().hoverLeaveEvent(event)
+    
+    def paint(self, painter, option, widget):
+        """绘制连接线，选中时显示高亮"""
+        if self.isSelected():
+            # 选中时使用橙色粗线
+            pen = QPen(QColor(255, 140, 0), self.line_width + 2, Qt.PenStyle.SolidLine)
+            self.setPen(pen)
+        super().paint(painter, option, widget)
+    
+    def contextMenuEvent(self, event):
+        """右键菜单"""
+        menu = QMenu()
+        
+        # 线条粗细子菜单
+        width_menu = menu.addMenu("线条粗细")
+        width_1 = width_menu.addAction("细 (1px)")
+        width_2 = width_menu.addAction("较细 (2px)")
+        width_3 = width_menu.addAction("正常 (3px)")
+        width_4 = width_menu.addAction("较粗 (4px)")
+        width_5 = width_menu.addAction("粗 (5px)")
+        width_8 = width_menu.addAction("很粗 (8px)")
+        width_custom = width_menu.addAction("自定义...")
+        
+        # 当前粗细标记
+        width_actions = {1: width_1, 2: width_2, 3: width_3, 4: width_4, 5: width_5, 8: width_8}
+        if self.line_width in width_actions:
+            width_actions[self.line_width].setCheckable(True)
+            width_actions[self.line_width].setChecked(True)
+        
+        menu.addSeparator()
+        delete_action = menu.addAction("删除连接线")
+        
+        action = menu.exec(event.screenPos())
+        
+        if action == width_1:
+            self.set_line_width(1)
+        elif action == width_2:
+            self.set_line_width(2)
+        elif action == width_3:
+            self.set_line_width(3)
+        elif action == width_4:
+            self.set_line_width(4)
+        elif action == width_5:
+            self.set_line_width(5)
+        elif action == width_8:
+            self.set_line_width(8)
+        elif action == width_custom:
+            width, ok = QInputDialog.getInt(None, "自定义线条粗细", "线条粗细 (像素):", self.line_width, 1, 20)
+            if ok:
+                self.set_line_width(width)
+        elif action == delete_action:
+            if self.scene():
+                self.scene().remove_connector_item(self)
         
     def update_path(self):
         if not self.item1.scene() or not self.item2.scene():
@@ -1405,17 +1617,97 @@ class VGenericConnector(QGraphicsPathItem):
 
 class VImageTextConnector(QGraphicsPathItem):
     """图文连接线- 连接图片顶部中点和文字底部中点"""
-    def __init__(self, image_item, text_item):
+    def __init__(self, image_item, text_item, line_width=None):
         super().__init__()
         self.image_item = image_item
         self.text_item = text_item
+        self.line_width = line_width if line_width is not None else DEFAULT_LINE_WIDTH  # 线条粗细
+        self.base_color = QColor(255, 100, 100, 200)  # 基础颜色
         self.setZValue(-50)  # 比普通连接器层级高一条
         
-        pen = QPen(QColor(255, 100, 100, 200))  # 稍微不同的红条
-        pen.setWidth(3)  # 更粗的线条
-        pen.setStyle(Qt.PenStyle.SolidLine)  # 实线而不是虚条
+        pen = QPen(self.base_color)
+        pen.setWidth(self.line_width)
+        pen.setStyle(Qt.PenStyle.SolidLine)
         self.setPen(pen)
-        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, False)
+        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, True)  # 可选中
+        self.setAcceptHoverEvents(True)  # 接受悬停事件
+    
+    def set_line_width(self, width):
+        """设置线条粗细"""
+        self.line_width = width
+        pen = self.pen()
+        pen.setWidth(width)
+        self.setPen(pen)
+        self.update()
+    
+    def hoverEnterEvent(self, event):
+        """鼠标悬停时高亮"""
+        pen = QPen(QColor(255, 150, 0, 255))  # 橙色高亮
+        pen.setWidth(self.line_width + 1)
+        pen.setStyle(Qt.PenStyle.SolidLine)
+        self.setPen(pen)
+        super().hoverEnterEvent(event)
+    
+    def hoverLeaveEvent(self, event):
+        """鼠标离开时恢复"""
+        pen = QPen(self.base_color)
+        pen.setWidth(self.line_width)
+        pen.setStyle(Qt.PenStyle.SolidLine)
+        self.setPen(pen)
+        super().hoverLeaveEvent(event)
+    
+    def paint(self, painter, option, widget):
+        """绘制连接线，选中时显示高亮"""
+        if self.isSelected():
+            # 选中时使用橙色粗线
+            pen = QPen(QColor(255, 140, 0), self.line_width + 2, Qt.PenStyle.SolidLine)
+            self.setPen(pen)
+        super().paint(painter, option, widget)
+        
+    def contextMenuEvent(self, event):
+        """右键菜单"""
+        menu = QMenu()
+        
+        # 线条粗细子菜单
+        width_menu = menu.addMenu("线条粗细")
+        width_1 = width_menu.addAction("细 (1px)")
+        width_2 = width_menu.addAction("较细 (2px)")
+        width_3 = width_menu.addAction("正常 (3px)")
+        width_4 = width_menu.addAction("较粗 (4px)")
+        width_5 = width_menu.addAction("粗 (5px)")
+        width_8 = width_menu.addAction("很粗 (8px)")
+        width_custom = width_menu.addAction("自定义...")
+        
+        # 当前粗细标记
+        width_actions = {1: width_1, 2: width_2, 3: width_3, 4: width_4, 5: width_5, 8: width_8}
+        if self.line_width in width_actions:
+            width_actions[self.line_width].setCheckable(True)
+            width_actions[self.line_width].setChecked(True)
+        
+        menu.addSeparator()
+        delete_action = menu.addAction("删除连接线")
+        
+        action = menu.exec(event.screenPos())
+        
+        if action == width_1:
+            self.set_line_width(1)
+        elif action == width_2:
+            self.set_line_width(2)
+        elif action == width_3:
+            self.set_line_width(3)
+        elif action == width_4:
+            self.set_line_width(4)
+        elif action == width_5:
+            self.set_line_width(5)
+        elif action == width_8:
+            self.set_line_width(8)
+        elif action == width_custom:
+            width, ok = QInputDialog.getInt(None, "自定义线条粗细", "线条粗细 (像素):", self.line_width, 1, 20)
+            if ok:
+                self.set_line_width(width)
+        elif action == delete_action:
+            if self.scene():
+                self.scene().remove_connector_item(self)
         
     def update_path(self):
         if not self.image_item.scene() or not self.text_item.scene():
@@ -2186,7 +2478,11 @@ class LayoutScene(QGraphicsScene):
         self.connection_source_point = None  
         self.asset_manager = AssetManager()  
         self.image_text_binding_mode = False  
-        self.image_text_source = None  
+        self.image_text_source = None
+        self.selection_order = []  # 记录选中顺序
+        
+        # 连接选择改变信号
+        self.selectionChanged.connect(self.on_selection_changed_track)
 
     def drawBackground(self, painter, rect):
         painter.fillRect(rect, QColor(60, 60, 60))
@@ -2208,6 +2504,24 @@ class LayoutScene(QGraphicsScene):
                 painter.drawLine(x, c_top, x, c_bottom)
             for y in range(c_top, c_bottom + 1, step):
                 painter.drawLine(c_left, y, c_right, y)
+    
+    def on_selection_changed_track(self):
+        """追踪选中顺序"""
+        current_selected = set(self.selectedItems())
+        previous_selected = set(self.selection_order)
+        
+        # 找出新选中的项目
+        newly_selected = current_selected - previous_selected
+        # 找出取消选中的项目
+        deselected = previous_selected - current_selected
+        
+        # 从列表中移除取消选中的项目
+        self.selection_order = [item for item in self.selection_order if item not in deselected]
+        
+        # 添加新选中的项目到列表末尾
+        for item in newly_selected:
+            if isinstance(item, (VImageItem, VTextItem)):
+                self.selection_order.append(item)
             
     def start_binding_mode(self, item):
         self.binding_source = item
@@ -2324,7 +2638,16 @@ class LayoutScene(QGraphicsScene):
             self.connection_source_point = point
             if self.views():
                 self.views()[0].setCursor(Qt.CursorShape.CrossCursor)
-            print("连接模式：点击另一个连接点完成连接")
+            print("连接模式：点击另一个连接点完成连接，或按ESC键取消")
+    
+    def cancel_connection_mode(self):
+        """取消连接模式"""
+        if self.connection_mode:
+            self.connection_mode = False
+            self.connection_source_point = None
+            if self.views():
+                self.views()[0].setCursor(Qt.CursorShape.ArrowCursor)
+            print("已取消连接模式")
     
     def complete_connection(self, source_point, target_point):
         """完成两个连接点之间的连接"""
@@ -2415,10 +2738,18 @@ class LayoutScene(QGraphicsScene):
     def add_image_text_connector(self, image_item, text_item):
         """添加图文连接线"""
         for conn in self.image_text_connectors:
-            if ((conn.image_item == image_item and conn.text_item == text_item) or
-                (conn.image_item == text_item and conn.text_item == image_item)):
-                print("这两个元素已经连接")
-                return
+            # 检查VImageTextConnector类型的连接
+            if hasattr(conn, 'image_item') and hasattr(conn, 'text_item'):
+                if ((conn.image_item == image_item and conn.text_item == text_item) or
+                    (conn.image_item == text_item and conn.text_item == image_item)):
+                    print("这两个元素已经连接")
+                    return
+            # 检查VGenericConnector类型的连接
+            elif hasattr(conn, 'item1') and hasattr(conn, 'item2'):
+                if ((conn.item1 == image_item and conn.item2 == text_item) or
+                    (conn.item1 == text_item and conn.item2 == image_item)):
+                    print("这两个元素已经连接")
+                    return
         
         conn = VImageTextConnector(image_item, text_item)
         self.addItem(conn)
@@ -2431,9 +2762,16 @@ class LayoutScene(QGraphicsScene):
         """添加图片-图片连接线"""
         # 检查是否已经存在连接
         for conn in self.image_text_connectors:
+            # 检查VGenericConnector类型的连接
             if hasattr(conn, 'item1') and hasattr(conn, 'item2'):
                 if ((conn.item1 == image1 and conn.item2 == image2) or
                     (conn.item1 == image2 and conn.item2 == image1)):
+                    print("这两个图片已经连接")
+                    return
+            # 检查VImageTextConnector类型的连接
+            elif hasattr(conn, 'image_item') and hasattr(conn, 'text_item'):
+                if ((conn.image_item == image1 and conn.text_item == image2) or
+                    (conn.image_item == image2 and conn.text_item == image1)):
                     print("这两个图片已经连接")
                     return
         
@@ -2448,9 +2786,16 @@ class LayoutScene(QGraphicsScene):
         """添加文字-文字连接线"""
         # 检查是否已经存在连接
         for conn in self.image_text_connectors:
+            # 检查VGenericConnector类型的连接
             if hasattr(conn, 'item1') and hasattr(conn, 'item2'):
                 if ((conn.item1 == text1 and conn.item2 == text2) or
                     (conn.item1 == text2 and conn.item2 == text1)):
+                    print("这两个文字已经连接")
+                    return
+            # 检查VImageTextConnector类型的连接
+            elif hasattr(conn, 'image_item') and hasattr(conn, 'text_item'):
+                if ((conn.image_item == text1 and conn.text_item == text2) or
+                    (conn.image_item == text2 and conn.text_item == text1)):
                     print("这两个文字已经连接")
                     return
         
@@ -2497,45 +2842,145 @@ class LayoutScene(QGraphicsScene):
             conn.setVisible(self.show_image_text_connectors)
     
     def auto_connect_selected_items(self):
-        """自动连接选中的图片和文字"""
-        selected = self.selectedItems()
-        images = [item for item in selected if isinstance(item, VImageItem)]
-        texts = [item for item in selected if isinstance(item, VTextItem)]
-        
-        if not images or not texts:
-            print("请同时选中图片和文字进行自动连接")
+        """智能连接：按选中顺序识别图片-文字组合体，按连接点顺序连接
+        组合体的连接点顺序：a=图片连接点(顶部), b=文字连接点(底部)
+        连接规则：第1组的b → 第2组的a, 第2组的b → 第3组的a, 依次类推
+        """
+        # 使用选中顺序列表，而不是selectedItems()
+        if not self.selection_order:
+            print("请按顺序选中元素进行连接")
             return
         
+        # 过滤出图片和文字元素，保持选中顺序
+        items = [item for item in self.selection_order if isinstance(item, (VImageItem, VTextItem))]
+        
+        if len(items) < 2:
+            print("请至少选中两个元素进行连接")
+            return
+        
+        print(f"按选中顺序处理 {len(items)} 个元素")
+        
+        # 识别图片-文字组合体（有父子绑定关系的），保持选中顺序
+        groups = []  # 每个组是字典 {'image': 图片, 'text': 文字, 'point_a': 图片连接点, 'point_b': 文字连接点}
+        processed = set()
+        
+        for item in items:
+            if item in processed:
+                continue
+            
+            if isinstance(item, VImageItem):
+                # 查找这个图片的子文字
+                text_child = None
+                for child in item.childItems():
+                    if isinstance(child, VTextItem) and child in items:
+                        text_child = child
+                        break
+                
+                if text_child:
+                    # 这是一个完整的图片-文字组合体
+                    group = {
+                        'image': item,
+                        'text': text_child,
+                        'point_a': item,  # a连接点：图片（顶部）
+                        'point_b': text_child  # b连接点：文字（底部）
+                    }
+                    groups.append(group)
+                    processed.add(item)
+                    processed.add(text_child)
+                    print(f"识别到组合体: 图片(a连接点) + 文字(b连接点)")
+                else:
+                    # 单独的图片，只有a连接点
+                    group = {
+                        'image': item,
+                        'text': None,
+                        'point_a': item,
+                        'point_b': item  # 单独图片，b连接点也是自己
+                    }
+                    groups.append(group)
+                    processed.add(item)
+                    print(f"识别到单独图片: 只有a连接点")
+                    
+            elif isinstance(item, VTextItem):
+                # 查找这个文字的父图片
+                parent = item.parentItem()
+                if isinstance(parent, VImageItem) and parent in items:
+                    # 已经在处理图片时添加了
+                    if item not in processed:
+                        group = {
+                            'image': parent,
+                            'text': item,
+                            'point_a': parent,
+                            'point_b': item
+                        }
+                        groups.append(group)
+                        processed.add(parent)
+                        processed.add(item)
+                        print(f"识别到组合体: 图片(a连接点) + 文字(b连接点)")
+                else:
+                    # 单独的文字，只有b连接点
+                    group = {
+                        'image': None,
+                        'text': item,
+                        'point_a': item,  # 单独文字，a连接点也是自己
+                        'point_b': item
+                    }
+                    groups.append(group)
+                    processed.add(item)
+                    print(f"识别到单独文字: 只有b连接点")
+        
+        if len(groups) < 2:
+            print("识别到的组合体数量不足2个，无法连接")
+            return
+        
+        # 连接逻辑：第i组的b连接点 → 第i+1组的a连接点
         connections_made = 0
-        if len(images) == len(texts):
-            used_texts = set()
-            for img in images:
-                closest_text = None
-                min_distance = float('inf')
-                for text in texts:
-                    if text in used_texts: continue
-                    img_pos = img.scenePos()
-                    text_pos = text.scenePos()
-                    distance = ((img_pos.x() - text_pos.x()) ** 2 + (img_pos.y() - text_pos.y()) ** 2) ** 0.5
-                    if distance < min_distance:
-                        min_distance = distance
-                        closest_text = text
-                if closest_text:
-                    self.add_image_text_connector(img, closest_text)
-                    used_texts.add(closest_text)
-                    connections_made += 1
-        else:
-            if len(images) == 1:
-                img = images[0]
-                for text in texts:
-                    self.add_image_text_connector(img, text)
-                    connections_made += 1
-            elif len(texts) == 1:
-                text = texts[0]
-                for img in images:
-                    self.add_image_text_connector(img, text)
-                    connections_made += 1
-        print(f"自动创建了 {connections_made} 个图文连接")
+        for i in range(len(groups) - 1):
+            current_group = groups[i]
+            next_group = groups[i + 1]
+            
+            # 当前组的b连接点（文字或图片）
+            source_item = current_group['point_b']
+            # 下一组的a连接点（图片或文字）
+            target_item = next_group['point_a']
+            
+            # 检查是否已经存在连接
+            already_connected = False
+            for conn in self.image_text_connectors:
+                if hasattr(conn, 'image_item') and hasattr(conn, 'text_item'):
+                    if ((conn.image_item == source_item and conn.text_item == target_item) or
+                        (conn.image_item == target_item and conn.text_item == source_item)):
+                        already_connected = True
+                        break
+                elif hasattr(conn, 'item1') and hasattr(conn, 'item2'):
+                    if ((conn.item1 == source_item and conn.item2 == target_item) or
+                        (conn.item1 == target_item and conn.item2 == source_item)):
+                        already_connected = True
+                        break
+            
+            if already_connected:
+                print(f"跳过已存在的连接: 第{i+1}组b点 → 第{i+2}组a点")
+                continue
+            
+            # 根据类型创建连接
+            if isinstance(source_item, VImageItem) and isinstance(target_item, VTextItem):
+                self.add_image_text_connector(source_item, target_item)
+                connections_made += 1
+                print(f"创建连接: 第{i+1}组b点(图片) → 第{i+2}组a点(文字)")
+            elif isinstance(source_item, VTextItem) and isinstance(target_item, VImageItem):
+                self.add_image_text_connector(target_item, source_item)
+                connections_made += 1
+                print(f"创建连接: 第{i+1}组b点(文字) → 第{i+2}组a点(图片)")
+            elif isinstance(source_item, VImageItem) and isinstance(target_item, VImageItem):
+                self.add_image_image_connector(source_item, target_item)
+                connections_made += 1
+                print(f"创建连接: 第{i+1}组b点(图片) → 第{i+2}组a点(图片)")
+            elif isinstance(source_item, VTextItem) and isinstance(target_item, VTextItem):
+                self.add_text_text_connector(source_item, target_item)
+                connections_made += 1
+                print(f"创建连接: 第{i+1}组b点(文字) → 第{i+2}组a点(文字)")
+        
+        print(f"智能连接完成：创建了 {connections_made} 个连接")
+        print(f"连接规则：每组的b连接点 → 下一组的a连接点")
     
     def connect_by_position(self):
         """按位置连接：上下相邻的图片和文字自动连接"""
@@ -2587,6 +3032,17 @@ class LayoutScene(QGraphicsScene):
             self.removeItem(conn)
         self.image_text_connectors.clear()
         print(f"已移除 {count} 个图文连接")
+    
+    def remove_connector_item(self, connector):
+        """删除单个连接线"""
+        if connector in self.image_text_connectors:
+            self.removeItem(connector)
+            self.image_text_connectors.remove(connector)
+            print("已删除连接线")
+        elif connector in self.connectors:
+            self.removeItem(connector)
+            self.connectors.remove(connector)
+            print("已删除父子连接线")
     
     def copy_items(self, items):
         """复制多个元素到剪贴板"""
@@ -2728,6 +3184,28 @@ class LayoutScene(QGraphicsScene):
         self.undo_stack.redo()
     
     def keyPressEvent(self, event):
+        # ESC键取消连接模式
+        if event.key() == Qt.Key.Key_Escape:
+            if self.connection_mode:
+                self.cancel_connection_mode()
+                event.accept()
+                return
+            elif self.image_text_binding_mode:
+                self.image_text_binding_mode = False
+                self.image_text_source = None
+                if self.views():
+                    self.views()[0].setCursor(Qt.CursorShape.ArrowCursor)
+                print("已取消图文连接模式")
+                event.accept()
+                return
+            elif self.binding_source:
+                self.binding_source = None
+                if self.views():
+                    self.views()[0].setCursor(Qt.CursorShape.ArrowCursor)
+                print("已取消父子绑定模式")
+                event.accept()
+                return
+        
         if event.modifiers() == Qt.KeyboardModifier.ControlModifier:
             if event.key() == Qt.Key.Key_Z:
                 self.undo()
@@ -2742,7 +3220,11 @@ class LayoutScene(QGraphicsScene):
         elif event.key() == Qt.Key.Key_Delete:
             selected = self.selectedItems()
             for item in selected:
-                if isinstance(item, BaseElement): self.delete_item(item)
+                if isinstance(item, BaseElement):
+                    self.delete_item(item)
+                elif isinstance(item, (VImageTextConnector, VGenericConnector)):
+                    # 删除连接线
+                    self.remove_connector_item(item)
         else:
             super().keyPressEvent(event)
     
@@ -2757,6 +3239,12 @@ class LayoutScene(QGraphicsScene):
                 item.setPos(item.parentItem().mapFromScene(new_scene_pos))
             else:
                 item.setPos(new_scene_pos)
+        
+        # 更新所有移动元素的连接线
+        for item in items:
+            self.update_connectors(item)
+            self.update_image_text_connectors(item)
+        
         print(f"已对齐到顶部")
     
     def align_right(self, items=None):
@@ -2771,6 +3259,12 @@ class LayoutScene(QGraphicsScene):
                 item.setPos(item.parentItem().mapFromScene(new_scene_pos))
             else:
                 item.setPos(new_scene_pos)
+        
+        # 更新所有移动元素的连接线
+        for item in items:
+            self.update_connectors(item)
+            self.update_image_text_connectors(item)
+        
         print(f"已对齐到右边")
     
 class LayoutView(QGraphicsView):
@@ -3121,6 +3615,11 @@ class MainWindow(QMainWindow):
         
         view_toolbar.addSeparator()
         
+        btn_open = QAction("打开工程", self)
+        btn_open.setShortcut("Ctrl+O")
+        btn_open.triggered.connect(self.load_proj)
+        view_toolbar.addAction(btn_open)
+        
         btn_save = QAction("保存工程", self)
         btn_save.setShortcut("Ctrl+S")
         btn_save.triggered.connect(self.save_proj)
@@ -3134,13 +3633,30 @@ class MainWindow(QMainWindow):
     def create_menu_bar(self):
         menubar = self.menuBar()
         file_menu = menubar.addMenu('文件')
+        
         new_action = QAction('新建', self)
+        new_action.setShortcut('Ctrl+N')
         new_action.triggered.connect(lambda: self.scene.clear())
         file_menu.addAction(new_action)
         
-        save_action = QAction('保存工程', self)
+        file_menu.addSeparator()
+        
+        open_action = QAction('打开工程...', self)
+        open_action.setShortcut('Ctrl+O')
+        open_action.triggered.connect(self.load_proj)
+        file_menu.addAction(open_action)
+        
+        save_action = QAction('保存工程...', self)
+        save_action.setShortcut('Ctrl+S')
         save_action.triggered.connect(self.save_proj)
         file_menu.addAction(save_action)
+        
+        file_menu.addSeparator()
+        
+        export_action = QAction('导出图片...', self)
+        export_action.setShortcut('Ctrl+E')
+        export_action.triggered.connect(self.export_image)
+        file_menu.addAction(export_action)
         
         # 添加素材菜单
         asset_menu = menubar.addMenu('素材')
@@ -3188,6 +3704,36 @@ class MainWindow(QMainWindow):
         zoom_selection_action.setShortcut('Ctrl+2')
         zoom_selection_action.triggered.connect(self.zoom_to_selection)
         view_menu.addAction(zoom_selection_action)
+        
+        # 添加连线菜单
+        connector_menu = menubar.addMenu('连线')
+        
+        set_all_line_width_action = QAction('设置所有连线粗细...', self)
+        set_all_line_width_action.triggered.connect(self.set_all_connector_width)
+        connector_menu.addAction(set_all_line_width_action)
+        
+        connector_menu.addSeparator()
+        
+        # 预设粗细选项
+        set_width_1_action = QAction('所有连线 - 细 (1px)', self)
+        set_width_1_action.triggered.connect(lambda: self.set_all_connector_width(1))
+        connector_menu.addAction(set_width_1_action)
+        
+        set_width_2_action = QAction('所有连线 - 较细 (2px)', self)
+        set_width_2_action.triggered.connect(lambda: self.set_all_connector_width(2))
+        connector_menu.addAction(set_width_2_action)
+        
+        set_width_3_action = QAction('所有连线 - 正常 (3px)', self)
+        set_width_3_action.triggered.connect(lambda: self.set_all_connector_width(3))
+        connector_menu.addAction(set_width_3_action)
+        
+        set_width_5_action = QAction('所有连线 - 粗 (5px)', self)
+        set_width_5_action.triggered.connect(lambda: self.set_all_connector_width(5))
+        connector_menu.addAction(set_width_5_action)
+        
+        set_width_8_action = QAction('所有连线 - 很粗 (8px)', self)
+        set_width_8_action.triggered.connect(lambda: self.set_all_connector_width(8))
+        connector_menu.addAction(set_width_8_action)
 
     def fit_view(self):
         """初始化时适应视图"""
@@ -3344,6 +3890,37 @@ class MainWindow(QMainWindow):
     
     def on_selection_changed(self):
         if hasattr(self, 'font_combo'): self.update_font_controls()
+    
+    def set_all_connector_width(self, width=None):
+        """设置所有连线的粗细"""
+        if width is None:
+            # 弹出对话框让用户输入
+            width, ok = QInputDialog.getInt(
+                self, 
+                "设置所有连线粗细", 
+                "请输入连线粗细 (像素):", 
+                3,  # 默认值
+                1,  # 最小值
+                20  # 最大值
+            )
+            if not ok:
+                return
+        
+        # 更新所有图文连接线
+        count = 0
+        for conn in self.scene.image_text_connectors:
+            if hasattr(conn, 'set_line_width'):
+                conn.set_line_width(width)
+                count += 1
+        
+        # 更新所有父子连接线（如果需要的话）
+        # for conn in self.scene.connectors:
+        #     if hasattr(conn, 'set_line_width'):
+        #         conn.set_line_width(width)
+        #         count += 1
+        
+        print(f"已将 {count} 条连线的粗细设置为 {width}px")
+        QMessageBox.information(self, "设置完成", f"已将 {count} 条连线的粗细设置为 {width}px")
     
     def set_canvas_size(self):
         current_rect = self.scene.sceneRect()
