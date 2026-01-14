@@ -256,6 +256,343 @@ class AssetManager:
             self.assets['images'] = [a for a in self.assets['images'] if a['id'] != asset_id]
             self.save_assets()
 
+class AssetLibraryDockWidget(QDockWidget):
+    """素材库停靠面板"""
+    def __init__(self, asset_manager, main_window):
+        super().__init__("素材库", main_window)
+        self.asset_manager = asset_manager
+        self.main_window = main_window
+        
+        # 设置停靠属性
+        self.setAllowedAreas(Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea)
+        self.setFeatures(QDockWidget.DockWidgetFeature.DockWidgetMovable | 
+                        QDockWidget.DockWidgetFeature.DockWidgetClosable |
+                        QDockWidget.DockWidgetFeature.DockWidgetFloatable)
+        
+        # 创建主要内容widget
+        self.content_widget = QWidget()
+        self.setWidget(self.content_widget)
+        
+        self.setup_ui()
+        self.refresh_assets()
+    
+    def setup_ui(self):
+        """设置界面"""
+        layout = QVBoxLayout(self.content_widget)
+        layout.setContentsMargins(5, 5, 5, 5)
+        layout.setSpacing(5)
+        
+        # 标签页
+        self.tab_widget = QTabWidget()
+        self.tab_widget.setTabPosition(QTabWidget.TabPosition.North)
+        
+        # 文字素材标签页
+        self.text_tab = QWidget()
+        text_layout = QVBoxLayout(self.text_tab)
+        text_layout.setContentsMargins(2, 2, 2, 2)
+        
+        # 文字素材列表
+        text_label = QLabel("文字素材:")
+        text_label.setStyleSheet("font-weight: bold; margin: 2px;")
+        text_layout.addWidget(text_label)
+        
+        self.text_list = QListWidget()
+        self.text_list.setDragDropMode(QAbstractItemView.DragDropMode.DragOnly)
+        self.text_list.itemDoubleClicked.connect(self.use_text_asset)
+        self.text_list.setMaximumHeight(200)  # 限制高度以节省空间
+        text_layout.addWidget(self.text_list)
+        
+        # 文字操作按钮
+        text_btn_layout = QHBoxLayout()
+        btn_delete_text = QPushButton("删除")
+        btn_delete_text.setMaximumHeight(25)
+        btn_delete_text.setProperty("class", "danger")  # 添加危险样式
+        btn_delete_text.clicked.connect(self.delete_text_asset)
+        text_btn_layout.addWidget(btn_delete_text)
+        text_layout.addLayout(text_btn_layout)
+        
+        self.tab_widget.addTab(self.text_tab, "文字")
+        
+        # 图片素材标签页
+        self.image_tab = QWidget()
+        image_layout = QVBoxLayout(self.image_tab)
+        image_layout.setContentsMargins(2, 2, 2, 2)
+        
+        # 图片素材列表
+        image_label = QLabel("图片素材:")
+        image_label.setStyleSheet("font-weight: bold; margin: 2px;")
+        image_layout.addWidget(image_label)
+        
+        self.image_list = QListWidget()
+        self.image_list.setDragDropMode(QAbstractItemView.DragDropMode.DragOnly)
+        self.image_list.setViewMode(QListView.ViewMode.IconMode)
+        self.image_list.setIconSize(QSize(60, 60))  # 稍小的图标以适应面板
+        self.image_list.setGridSize(QSize(70, 80))
+        self.image_list.itemDoubleClicked.connect(self.use_image_asset)
+        self.image_list.setMaximumHeight(200)
+        image_layout.addWidget(self.image_list)
+        
+        # 图片操作按钮
+        image_btn_layout = QHBoxLayout()
+        btn_delete_image = QPushButton("删除")
+        btn_delete_image.setMaximumHeight(25)
+        btn_delete_image.setProperty("class", "danger")  # 添加危险样式
+        btn_delete_image.clicked.connect(self.delete_image_asset)
+        image_btn_layout.addWidget(btn_delete_image)
+        image_layout.addLayout(image_btn_layout)
+        
+        self.tab_widget.addTab(self.image_tab, "图片")
+        
+        # 组合素材标签页
+        self.group_tab = QWidget()
+        group_layout = QVBoxLayout(self.group_tab)
+        group_layout.setContentsMargins(2, 2, 2, 2)
+        
+        # 组合素材列表
+        group_label = QLabel("组合素材:")
+        group_label.setStyleSheet("font-weight: bold; margin: 2px;")
+        group_layout.addWidget(group_label)
+        
+        self.group_list = QListWidget()
+        self.group_list.setDragDropMode(QAbstractItemView.DragDropMode.DragOnly)
+        self.group_list.itemDoubleClicked.connect(self.use_group_asset)
+        self.group_list.setMaximumHeight(200)
+        group_layout.addWidget(self.group_list)
+        
+        # 组合操作按钮
+        group_btn_layout = QHBoxLayout()
+        btn_delete_group = QPushButton("删除")
+        btn_delete_group.setMaximumHeight(25)
+        btn_delete_group.setProperty("class", "danger")  # 添加危险样式
+        btn_delete_group.clicked.connect(self.delete_group_asset)
+        group_btn_layout.addWidget(btn_delete_group)
+        group_layout.addLayout(group_btn_layout)
+        
+        self.tab_widget.addTab(self.group_tab, "组合")
+        
+        layout.addWidget(self.tab_widget)
+        
+        # 底部刷新按钮
+        btn_refresh = QPushButton("刷新素材库")
+        btn_refresh.setMaximumHeight(30)
+        btn_refresh.setProperty("class", "primary")  # 添加主要样式
+        btn_refresh.clicked.connect(self.refresh_assets)
+        layout.addWidget(btn_refresh)
+        
+        # 添加弹性空间
+        layout.addStretch()
+    
+    def refresh_assets(self):
+        """刷新素材列表"""
+        print("开始刷新素材库显示")
+        
+        # 重新加载素材数据
+        self.asset_manager.load_assets()
+        
+        # 刷新文字素材
+        self.text_list.clear()
+        text_assets = self.asset_manager.get_text_assets()
+        print(f"加载文字素材: {len(text_assets)} 条")
+        for asset in text_assets:
+            item = QListWidgetItem(asset['name'])
+            item.setData(Qt.ItemDataRole.UserRole, asset)
+            item.setToolTip(f"文字: {asset['text'][:50]}...\n字体: {asset['font_family']}\n大小: {asset['font_size']}")
+            self.text_list.addItem(item)
+        
+        # 刷新图片素材
+        self.image_list.clear()
+        image_assets = self.asset_manager.get_image_assets()
+        print(f"加载图片素材: {len(image_assets)} 条")
+        for asset in image_assets:
+            item = QListWidgetItem(asset['name'])
+            item.setData(Qt.ItemDataRole.UserRole, asset)
+            
+            # 设置缩略图
+            if os.path.exists(asset['path']):
+                pixmap = QPixmap(asset['path'])
+                if not pixmap.isNull():
+                    scaled_pixmap = pixmap.scaled(60, 60, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+                    item.setIcon(QIcon(scaled_pixmap))
+            
+            item.setToolTip(f"图片: {asset['name']}\n尺寸: {asset['width']}px")
+            self.image_list.addItem(item)
+        
+        # 刷新组合素材
+        self.group_list.clear()
+        group_assets = self.asset_manager.get_group_assets()
+        print(f"加载组合素材: {len(group_assets)} 条")
+        for asset in group_assets:
+            item = QListWidgetItem(asset['name'])
+            item.setData(Qt.ItemDataRole.UserRole, asset)
+            
+            # 创建详细信息
+            details = f"包含 {asset['item_count']} 个元素\n"
+            text_count = sum(1 for item_data in asset['items'] if item_data['type'] == 'VTextItem')
+            image_count = sum(1 for item_data in asset['items'] if item_data['type'] == 'VImageItem')
+            details += f"文字: {text_count} 条 图片: {image_count} 个\n"
+            details += f"连接: {len(asset['image_text_connections'])} 条"
+            
+            item.setToolTip(details)
+            self.group_list.addItem(item)
+        
+        print("素材库刷新完成")
+    
+    def use_text_asset(self, item):
+        """使用文字素材"""
+        asset = item.data(Qt.ItemDataRole.UserRole)
+        if asset:
+            # 创建文字项目
+            text_item = VTextItem(
+                asset['text'],
+                asset['font_size'],
+                asset['box_height']
+            )
+            text_item.font_family = asset['font_family']
+            text_item.text_color = QColor(asset['text_color'])
+            text_item.rebuild()
+            
+            # 添加到画布中央
+            center = self.main_window.view.mapToScene(self.main_window.view.viewport().rect().center())
+            text_item.setPos(center)
+            self.main_window.scene.add_item_with_undo(text_item)
+            print(f"已添加文字素材 {asset['name']}")
+    
+    def use_image_asset(self, item):
+        """使用图片素材"""
+        asset = item.data(Qt.ItemDataRole.UserRole)
+        if asset and os.path.exists(asset['path']):
+            # 创建图片项目
+            image_item = VImageItem(asset['path'], asset['width'])
+            
+            # 添加到画布中央
+            center = self.main_window.view.mapToScene(self.main_window.view.viewport().rect().center())
+            image_item.setPos(center)
+            self.main_window.scene.add_item_with_undo(image_item)
+            print(f"已添加图片素材 {asset['name']}")
+    
+    def use_group_asset(self, item):
+        """使用组合素材"""
+        asset = item.data(Qt.ItemDataRole.UserRole)
+        if asset:
+            # 获取粘贴位置
+            center = self.main_window.view.mapToScene(self.main_window.view.viewport().rect().center())
+            
+            # 计算所有项目的边界框，用于确定粘贴位置
+            if asset['items']:
+                min_x = min(item_data['scene_pos'][0] for item_data in asset['items'])
+                min_y = min(item_data['scene_pos'][1] for item_data in asset['items'])
+            else:
+                min_x = min_y = 0
+            
+            base_x, base_y = center.x(), center.y()
+            new_items = []
+            
+            # 第一步：创建所有项目
+            for idx, item_data in enumerate(asset['items']):
+                new_item = None
+                
+                if item_data['type'] == 'VTextItem':
+                    new_item = VTextItem(
+                        item_data['text'],
+                        item_data['font_size'],
+                        item_data['box_height']
+                    )
+                    new_item.font_family = item_data['font_family']
+                    new_item.text_color = QColor(item_data['text_color'])
+                    
+                    # 恢复其他属性
+                    if 'chars_per_column' in item_data:
+                        new_item.chars_per_column = item_data['chars_per_column']
+                    if 'column_spacing' in item_data:
+                        new_item.column_spacing = item_data['column_spacing']
+                    if 'auto_height' in item_data:
+                        new_item.auto_height = item_data['auto_height']
+                    if 'manual_line_break' in item_data:
+                        new_item.manual_line_break = item_data['manual_line_break']
+                    
+                    new_item.rebuild()
+                        
+                elif item_data['type'] == 'VImageItem':
+                    if os.path.exists(item_data['path']):
+                        new_item = VImageItem(item_data['path'], item_data['width'])
+                
+                if new_item:
+                    # 计算相对于原始组合的偏移量，然后应用到新的基准位置
+                    offset_x = item_data['scene_pos'][0] - min_x
+                    offset_y = item_data['scene_pos'][1] - min_y
+                    new_item.setPos(base_x + offset_x, base_y + offset_y)
+                    
+                    # 使用撤销系统添加元素
+                    command = AddItemCommand(self.main_window.scene, new_item)
+                    self.main_window.scene.undo_stack.push(command)
+                    
+                    # 在AddItemCommand执行后，重新设置连接点可见性
+                    # 因为AddItemCommand.execute()会使用场景的全局设置覆盖个别设置
+                    if 'connection_point_visible' in item_data and new_item.connection_point:
+                        new_item.connection_point.setVisible(item_data['connection_point_visible'])
+                    
+                    new_items.append(new_item)
+            
+            # 第二步：恢复父子关系
+            for idx, item_data in enumerate(asset['items']):
+                if item_data['parent_index'] != -1 and item_data['parent_index'] < len(new_items):
+                    child_item = new_items[idx]
+                    parent_item = new_items[item_data['parent_index']]
+                    
+                    # 保存当前场景坐标
+                    current_scene_pos = child_item.scenePos()
+                    # 设置父子关系
+                    child_item.setParentItem(parent_item)
+                    # 将场景坐标转换为父级的本地坐标
+                    local_pos = parent_item.mapFromScene(current_scene_pos)
+                    child_item.setPos(local_pos)
+                    
+                    # 创建父子连接线
+                    self.main_window.scene.add_connector(parent_item, child_item)
+            
+            # 第三步：恢复图文连接
+            for img_idx, text_idx in asset['image_text_connections']:
+                if img_idx < len(new_items) and text_idx < len(new_items):
+                    img_item = new_items[img_idx]
+                    text_item = new_items[text_idx]
+                    # 确保是正确的类型
+                    if isinstance(img_item, VImageItem) and isinstance(text_item, VTextItem):
+                        self.main_window.scene.add_image_text_connector(img_item, text_item)
+                    elif isinstance(img_item, VTextItem) and isinstance(text_item, VImageItem):
+                        self.main_window.scene.add_image_text_connector(text_item, img_item)
+            
+            print(f"已添加组合素材 {asset['name']} ({len(new_items)} 个元素)")
+    
+    def delete_text_asset(self):
+        """删除选中的文字素材"""
+        current_item = self.text_list.currentItem()
+        if current_item:
+            asset = current_item.data(Qt.ItemDataRole.UserRole)
+            reply = QMessageBox.question(self, "确认删除", f"确定要删除文字素材'{asset['name']}' 吗？")
+            if reply == QMessageBox.StandardButton.Yes:
+                self.asset_manager.remove_text_asset(asset['id'])
+                self.refresh_assets()
+    
+    def delete_image_asset(self):
+        """删除选中的图片素材"""
+        current_item = self.image_list.currentItem()
+        if current_item:
+            asset = current_item.data(Qt.ItemDataRole.UserRole)
+            reply = QMessageBox.question(self, "确认删除", f"确定要删除图片素材'{asset['name']}' 吗？")
+            if reply == QMessageBox.StandardButton.Yes:
+                self.asset_manager.remove_image_asset(asset['id'])
+                self.refresh_assets()
+    
+    def delete_group_asset(self):
+        """删除选中的组合素材"""
+        current_item = self.group_list.currentItem()
+        if current_item:
+            asset = current_item.data(Qt.ItemDataRole.UserRole)
+            reply = QMessageBox.question(self, "确认删除", f"确定要删除组合素材'{asset['name']}' 吗？")
+            if reply == QMessageBox.StandardButton.Yes:
+                self.asset_manager.remove_group_asset(asset['id'])
+                self.refresh_assets()
+
 class AssetLibraryWidget(QWidget):
     """素材库窗口"""
     def __init__(self, asset_manager, main_window):
@@ -662,6 +999,10 @@ class AddItemCommand(UndoCommand):
         super().__init__(scene)
         self.item = item
         self.item_data = None
+        self.parent_item = None
+        self.child_connectors = []  # 保存作为父级的连接器
+        self.parent_connector = None  # 保存作为子级的连接器
+        self.image_text_connectors = []  # 保存图文连接器
     
     def execute(self):
         self.scene.addItem(self.item)
@@ -672,10 +1013,20 @@ class AddItemCommand(UndoCommand):
         self.save_item_state()
     
     def undo(self):
+        # 删除与此元素相关的所有连接器
+        self.scene.remove_all_connectors_for_item(self.item)
+        # 删除与此元素相关的图文连接器
+        self.scene.remove_image_text_connectors(self.item)
+        # 删除元素本身
         self.scene.removeItem(self.item)
     
     def save_item_state(self):
         """保存元素状态"""
+        # 保存父子关系
+        if self.item.parentItem() and isinstance(self.item.parentItem(), BaseElement):
+            self.parent_item = self.item.parentItem()
+        
+        # 保存基本属性
         if isinstance(self.item, VTextItem):
             self.item_data = {
                 'type': 'VTextItem',
@@ -684,14 +1035,16 @@ class AddItemCommand(UndoCommand):
                 'box_height': self.item.box_height,
                 'font_family': self.item.font_family,
                 'text_color': self.item.text_color.name(),
-                'pos': (self.item.x(), self.item.y())
+                'pos': (self.item.x(), self.item.y()),
+                'scene_pos': (self.item.scenePos().x(), self.item.scenePos().y())
             }
         elif isinstance(self.item, VImageItem):
             self.item_data = {
                 'type': 'VImageItem',
                 'path': self.item.file_path,
                 'width': self.item.target_width,
-                'pos': (self.item.x(), self.item.y())
+                'pos': (self.item.x(), self.item.y()),
+                'scene_pos': (self.item.scenePos().x(), self.item.scenePos().y())
             }
 
 class DeleteItemCommand(UndoCommand):
@@ -700,9 +1053,17 @@ class DeleteItemCommand(UndoCommand):
         super().__init__(scene)
         self.item = item
         self.item_data = None
+        self.parent_item = None
+        self.child_items = []  # 保存子元素
+        self.child_connectors = []  # 保存作为父级的连接器
+        self.parent_connector = None  # 保存作为子级的连接器
+        self.image_text_connectors = []  # 保存图文连接器
         self.save_item_state()
     
     def execute(self):
+        # 保存父子关系和连接器信息
+        self.save_relationships()
+        
         # 删除与此元素相关的所有连接器
         self.scene.remove_all_connectors_for_item(self.item)
         # 删除与此元素相关的图文连接器
@@ -727,9 +1088,54 @@ class DeleteItemCommand(UndoCommand):
                 self.item_data['width']
             )
         
-        new_item.setPos(self.item_data['pos'][0], self.item_data['pos'][1])
-        self.scene.addItem(new_item)
+        # 设置位置
+        if self.parent_item and self.parent_item.scene():
+            # 如果有父级，恢复父子关系
+            new_item.setParentItem(self.parent_item)
+            new_item.setPos(self.item_data['pos'][0], self.item_data['pos'][1])
+            # 重新创建父子连接器
+            self.scene.add_connector(self.parent_item, new_item)
+        else:
+            # 没有父级，直接添加到场景
+            new_item.setPos(self.item_data['scene_pos'][0], self.item_data['scene_pos'][1])
+            self.scene.addItem(new_item)
+        
+        # 恢复子元素的父子关系
+        for child_item in self.child_items:
+            if child_item.scene():
+                # 保存子元素当前场景位置
+                child_scene_pos = child_item.scenePos()
+                # 设置父子关系
+                child_item.setParentItem(new_item)
+                # 转换为本地坐标
+                child_local_pos = new_item.mapFromScene(child_scene_pos)
+                child_item.setPos(child_local_pos)
+                # 重新创建连接器
+                self.scene.add_connector(new_item, child_item)
+        
+        # 恢复图文连接器（这里需要更复杂的逻辑，暂时跳过）
+        
         self.item = new_item
+    
+    def save_relationships(self):
+        """保存父子关系和连接器"""
+        # 保存父级关系
+        if self.item.parentItem() and isinstance(self.item.parentItem(), BaseElement):
+            self.parent_item = self.item.parentItem()
+        
+        # 保存子元素
+        for child in self.item.childItems():
+            if isinstance(child, BaseElement):
+                self.child_items.append(child)
+        
+        # 保存相关的连接器
+        self.child_connectors = [c for c in self.scene.connectors if c.parent_element == self.item]
+        self.parent_connector = next((c for c in self.scene.connectors if c.child_element == self.item), None)
+        
+        # 保存图文连接器
+        self.image_text_connectors = [c for c in self.scene.image_text_connectors 
+                                    if (hasattr(c, 'image_item') and (c.image_item == self.item or c.text_item == self.item)) or
+                                       (hasattr(c, 'item1') and (c.item1 == self.item or c.item2 == self.item))]
     
     def save_item_state(self):
         """保存元素状态"""
@@ -741,15 +1147,63 @@ class DeleteItemCommand(UndoCommand):
                 'box_height': self.item.box_height,
                 'font_family': self.item.font_family,
                 'text_color': self.item.text_color.name(),
-                'pos': (self.item.x(), self.item.y())
+                'pos': (self.item.x(), self.item.y()),
+                'scene_pos': (self.item.scenePos().x(), self.item.scenePos().y())
             }
         elif isinstance(self.item, VImageItem):
             self.item_data = {
                 'type': 'VImageItem',
                 'path': self.item.file_path,
                 'width': self.item.target_width,
-                'pos': (self.item.x(), self.item.y())
+                'pos': (self.item.x(), self.item.y()),
+                'scene_pos': (self.item.scenePos().x(), self.item.scenePos().y())
             }
+
+class SetParentCommand(UndoCommand):
+    """设置父子关系命令"""
+    def __init__(self, scene, child_item, new_parent, old_parent=None):
+        super().__init__(scene)
+        self.child_item = child_item
+        self.new_parent = new_parent
+        self.old_parent = old_parent
+        self.old_pos = child_item.pos()
+        self.old_scene_pos = child_item.scenePos()
+    
+    def execute(self):
+        # 移除旧的连接器
+        if self.old_parent:
+            self.scene.remove_child_connectors(self.child_item)
+        
+        # 保存当前场景坐标
+        current_scene_pos = self.child_item.scenePos()
+        
+        # 设置新的父子关系
+        if self.new_parent:
+            self.child_item.setParentItem(self.new_parent)
+            # 转换为父级的本地坐标
+            local_pos = self.new_parent.mapFromScene(current_scene_pos)
+            self.child_item.setPos(local_pos)
+            # 创建新的连接器
+            self.scene.add_connector(self.new_parent, self.child_item)
+        else:
+            # 移除父子关系
+            self.child_item.setParentItem(None)
+            self.child_item.setPos(current_scene_pos)
+    
+    def undo(self):
+        # 移除当前连接器
+        self.scene.remove_child_connectors(self.child_item)
+        
+        # 恢复旧的父子关系
+        if self.old_parent and self.old_parent.scene():
+            self.child_item.setParentItem(self.old_parent)
+            self.child_item.setPos(self.old_pos)
+            # 重新创建旧的连接器
+            self.scene.add_connector(self.old_parent, self.child_item)
+        else:
+            # 恢复为无父级状态
+            self.child_item.setParentItem(None)
+            self.child_item.setPos(self.old_scene_pos)
 
 class UndoStack:
     """撤销栈管理器"""
@@ -1148,13 +1602,12 @@ class BaseElement(QGraphicsItem):
                 self.scene().remove_image_text_connectors(self)
         
         if action == unbind_action:
-            # 保存当前场景坐标
-            current_scene_pos = self.scenePos()
-            self.setParentItem(None)
-            # 恢复场景坐标
-            self.setPos(current_scene_pos)
-            # Remove connectors related to being a child
-            if self.scene(): self.scene().remove_child_connectors(self)
+            # 使用撤销命令解除父级绑定
+            if self.scene():
+                old_parent = self.parentItem() if isinstance(self.parentItem(), BaseElement) else None
+                if old_parent:
+                    command = SetParentCommand(self.scene(), self, None, old_parent)
+                    self.scene().undo_stack.push(command)
         elif action == set_parent_action:
              if self.scene(): self.scene().start_binding_mode(self)
 
@@ -1188,13 +1641,20 @@ class InlineTextEditor(QTextEdit):
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
         
-        # 设置样式
+        # 设置Fluent Design样式
         self.setStyleSheet("""
             QTextEdit {
-                border: 2px solid #4A90E2;
-                background-color: white;
+                background: rgba(255, 255, 255, 0.95);
+                border: 2px solid rgba(0, 120, 215, 0.8);
+                border-radius: 8px;
                 font-family: SimSun;
-                padding: 2px;
+                padding: 8px;
+                color: #323130;
+                box-shadow: 0px 4px 16px rgba(0, 0, 0, 0.15);
+            }
+            QTextEdit:focus {
+                border: 2px solid rgba(0, 120, 215, 1.0);
+                box-shadow: 0px 6px 20px rgba(0, 120, 215, 0.25);
             }
         """)
         
@@ -1527,10 +1987,12 @@ class VTextItem(BaseElement):
                 self.scene().remove_image_text_connectors(self)
         
         if action == unbind_action:
-            current_scene_pos = self.scenePos()
-            self.setParentItem(None)
-            self.setPos(current_scene_pos)
-            if self.scene(): self.scene().remove_child_connectors(self)
+            # 使用撤销命令解除父级绑定
+            if self.scene():
+                old_parent = self.parentItem() if isinstance(self.parentItem(), BaseElement) else None
+                if old_parent:
+                    command = SetParentCommand(self.scene(), self, None, old_parent)
+                    self.scene().undo_stack.push(command)
         elif action == set_parent_action:
              if self.scene(): self.scene().start_binding_mode(self)
 
@@ -1755,10 +2217,12 @@ class LayoutScene(QGraphicsScene):
                 item = item.parentItem()
             
             if item and item != self.binding_source:
-                old_pos = self.binding_source.scenePos()
-                self.binding_source.setParentItem(item)
-                self.binding_source.setPos(item.mapFromScene(old_pos))
-                self.add_connector(item, self.binding_source)
+                # 获取旧的父级
+                old_parent = self.binding_source.parentItem() if isinstance(self.binding_source.parentItem(), BaseElement) else None
+                
+                # 使用撤销命令设置父子关系
+                command = SetParentCommand(self, self.binding_source, item, old_parent)
+                self.undo_stack.push(command)
                 print(f"Bound {self.binding_source} to {item}")
             
             self.binding_source = None
@@ -1921,7 +2385,12 @@ class LayoutScene(QGraphicsScene):
             view = self.views()[0]
             widget = view
             while widget:
-                if hasattr(widget, 'asset_library'):
+                # 刷新新的停靠面板版本
+                if hasattr(widget, 'asset_library_dock'):
+                    widget.asset_library_dock.refresh_assets()
+                    break
+                # 兼容旧版本窗口版本
+                elif hasattr(widget, 'asset_library'):
                     if widget.asset_library and widget.asset_library.isVisible():
                         widget.asset_library.refresh_assets()
                     break
@@ -2433,18 +2902,31 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("VertiLayout Pro - 竖排排版引擎")
         self.setGeometry(100, 100, 1400, 900)
         
+        # 应用Fluent Design样式
+        self.apply_fluent_design_style()
+        
         self.scene = LayoutScene()
         self.scene.setSceneRect(0, 0, 7054, 5021)
         self.scene.selectionChanged.connect(self.on_selection_changed)
         self.view = LayoutView(self.scene)
-        self.asset_library = None 
         
+        # 创建停靠面板
+        # 右侧：层级 & 属性面板
         sidebar = QDockWidget("层级 & 属性", self)
         sidebar.setAllowedAreas(Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea)
         self.tree_widget = QTreeWidget()
         self.tree_widget.setHeaderLabel("排版元素")
         sidebar.setWidget(self.tree_widget)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, sidebar)
+        
+        # 左侧：素材库面板
+        self.asset_library_dock = AssetLibraryDockWidget(self.scene.asset_manager, self)
+        self.asset_library_dock.setMinimumWidth(250)  # 设置最小宽度
+        self.asset_library_dock.setMaximumWidth(400)  # 设置最大宽度
+        self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.asset_library_dock)
+        
+        # 保持对旧版本素材库的引用（用于兼容性）
+        self.asset_library = None
         
         self.setCentralWidget(self.view)
         self.create_menu_bar()
@@ -2466,144 +2948,185 @@ class MainWindow(QMainWindow):
         print("Vertical Layout Engine Started...")
     
     def create_toolbars(self):
-        toolbar1 = QToolBar("基本操作")
-        self.addToolBar(Qt.ToolBarArea.TopToolBarArea, toolbar1)
+        # 主工具栏 - 编辑和格式化
+        main_toolbar = QToolBar("编辑与格式")
+        self.addToolBar(Qt.ToolBarArea.TopToolBarArea, main_toolbar)
         
+        # === 基本编辑操作 ===
         btn_add_text = QAction("添加文本", self)
         btn_add_text.triggered.connect(self.add_text)
-        toolbar1.addAction(btn_add_text)
+        main_toolbar.addAction(btn_add_text)
 
         btn_add_img = QAction("插入图片", self)
         btn_add_img.triggered.connect(self.add_image)
-        toolbar1.addAction(btn_add_img)
+        main_toolbar.addAction(btn_add_img)
         
         btn_edit_text = QAction("编辑文字", self)
         btn_edit_text.triggered.connect(self.edit_selected_text)
-        toolbar1.addAction(btn_edit_text)
-        toolbar1.addSeparator()
+        main_toolbar.addAction(btn_edit_text)
         
-        toolbar1.addWidget(QLabel("字体:"))
+        main_toolbar.addSeparator()
+        
+        btn_undo = QAction("撤销", self)
+        btn_undo.setShortcut("Ctrl+Z")
+        btn_undo.triggered.connect(self.undo)
+        main_toolbar.addAction(btn_undo)
+        
+        btn_redo = QAction("重做", self)
+        btn_redo.setShortcut("Ctrl+Y")
+        btn_redo.triggered.connect(self.redo)
+        main_toolbar.addAction(btn_redo)
+        
+        main_toolbar.addSeparator()
+        
+        # === 字体格式 ===
+        main_toolbar.addWidget(QLabel("字体:"))
         self.font_combo = QFontComboBox()
         self.font_combo.setCurrentFont(QFont(DEFAULT_FONT))
         self.font_combo.currentFontChanged.connect(self.change_selected_font)
-        toolbar1.addWidget(self.font_combo)
+        main_toolbar.addWidget(self.font_combo)
         
-        toolbar1.addWidget(QLabel("大小:"))
+        main_toolbar.addWidget(QLabel("大小:"))
         self.font_size_spin = QSpinBox()
         self.font_size_spin.setRange(8, 200)
         self.font_size_spin.setValue(DEFAULT_FONT_SIZE)
         self.font_size_spin.setSuffix("px")
         self.font_size_spin.valueChanged.connect(self.change_selected_font_size)
-        toolbar1.addWidget(self.font_size_spin)
+        main_toolbar.addWidget(self.font_size_spin)
         
         self.color_button = QPushButton()
-        self.color_button.setFixedSize(30, 25)
-        self.color_button.setStyleSheet("background-color: black; border: 1px solid gray;")
+        self.color_button.setFixedSize(32, 28)
+        self.color_button.setStyleSheet("""
+            QPushButton {
+                background-color: black;
+                border: 2px solid rgba(255, 255, 255, 0.9);
+                border-radius: 6px;
+                box-shadow: 0px 2px 4px rgba(0, 0, 0, 0.1);
+            }
+            QPushButton:hover {
+                border: 2px solid rgba(0, 120, 215, 0.8);
+                box-shadow: 0px 3px 8px rgba(0, 0, 0, 0.15);
+            }
+            QPushButton:pressed {
+                box-shadow: 0px 1px 2px rgba(0, 0, 0, 0.2);
+            }
+        """)
         self.color_button.clicked.connect(self.change_selected_color)
-        toolbar1.addWidget(self.color_button)
-        toolbar1.addSeparator()
+        main_toolbar.addWidget(self.color_button)
         
-        toolbar1.addWidget(QLabel("每列字数:"))
+        main_toolbar.addSeparator()
+        
+        # === 竖排布局设置 ===
+        main_toolbar.addWidget(QLabel("每列字数:"))
         self.chars_per_column_spin = QSpinBox()
         self.chars_per_column_spin.setRange(5, 50)
         self.chars_per_column_spin.setValue(15)
         self.chars_per_column_spin.setSuffix("字")
         self.chars_per_column_spin.valueChanged.connect(self.change_chars_per_column)
-        toolbar1.addWidget(self.chars_per_column_spin)
+        main_toolbar.addWidget(self.chars_per_column_spin)
         
-        toolbar1.addWidget(QLabel("列间距:"))
+        main_toolbar.addWidget(QLabel("列间距:"))
         self.column_spacing_spin = QSpinBox()
         self.column_spacing_spin.setRange(0, 200)
         self.column_spacing_spin.setValue(COLUMN_SPACING)
         self.column_spacing_spin.setSuffix("px")
         self.column_spacing_spin.valueChanged.connect(self.change_column_spacing)
-        toolbar1.addWidget(self.column_spacing_spin)
+        main_toolbar.addWidget(self.column_spacing_spin)
         
         self.manual_line_break_btn = QPushButton("手动换行")
         self.manual_line_break_btn.setCheckable(True)
         self.manual_line_break_btn.setChecked(True)
+        self.manual_line_break_btn.setStyleSheet("""
+            QPushButton {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 rgba(255, 255, 255, 0.9),
+                    stop:1 rgba(249, 249, 249, 0.9));
+                border: 1px solid rgba(0, 0, 0, 0.1);
+                border-radius: 6px;
+                padding: 6px 12px;
+                font-weight: 500;
+            }
+            QPushButton:checked {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 rgba(0, 120, 215, 1.0),
+                    stop:1 rgba(0, 90, 158, 1.0));
+                color: white;
+                border: 1px solid rgba(0, 90, 158, 1.0);
+                font-weight: 600;
+            }
+            QPushButton:hover {
+                border: 1px solid rgba(0, 120, 215, 0.4);
+                box-shadow: 0px 2px 8px rgba(0, 0, 0, 0.1);
+            }
+        """)
         self.manual_line_break_btn.toggled.connect(self.toggle_manual_line_break)
-        toolbar1.addWidget(self.manual_line_break_btn)
-        toolbar1.addSeparator()
+        main_toolbar.addWidget(self.manual_line_break_btn)
         
-        btn_undo = QAction("撤销", self)
-        btn_undo.setShortcut("Ctrl+Z")
-        btn_undo.triggered.connect(self.undo)
-        toolbar1.addAction(btn_undo)
-        
-        btn_redo = QAction("重做", self)
-        btn_redo.setShortcut("Ctrl+Y")
-        btn_redo.triggered.connect(self.redo)
-        toolbar1.addAction(btn_redo)
-        
-        toolbar2 = QToolBar("图文连接")
+        # 视图与工程工具栏 - 视图控制、连接和文件操作
+        view_toolbar = QToolBar("视图与工程")
         self.addToolBarBreak(Qt.ToolBarArea.TopToolBarArea)
-        self.addToolBar(Qt.ToolBarArea.TopToolBarArea, toolbar2)
+        self.addToolBar(Qt.ToolBarArea.TopToolBarArea, view_toolbar)
         
-        btn_auto_connect = QAction("智能连接", self)
-        btn_auto_connect.triggered.connect(self.auto_connect_selected)
-        toolbar2.addAction(btn_auto_connect)
-        
-        btn_clear_connections = QAction("清除连接", self)
-        btn_clear_connections.triggered.connect(self.clear_all_connections)
-        toolbar2.addAction(btn_clear_connections)
-        
-        toolbar3 = QToolBar("素材和工程")
-        self.addToolBarBreak(Qt.ToolBarArea.TopToolBarArea)
-        self.addToolBar(Qt.ToolBarArea.TopToolBarArea, toolbar3)
-        
-        btn_asset_library = QAction("素材库", self)
-        btn_asset_library.triggered.connect(self.open_asset_library)
-        toolbar3.addAction(btn_asset_library)
-        
-        btn_save_group = QAction("保存组合", self)
-        btn_save_group.triggered.connect(self.save_selected_as_group)
-        toolbar3.addAction(btn_save_group)
-        
-        btn_save = QAction("保存工程", self)
-        btn_save.triggered.connect(self.save_proj)
-        toolbar3.addAction(btn_save)
-        
-        btn_export_img = QAction("导出图片", self)
-        btn_export_img.triggered.connect(self.export_image)
-        toolbar3.addAction(btn_export_img)
-        
-        # 视图工具栏
-        toolbar4 = QToolBar("视图缩放")
-        self.addToolBarBreak(Qt.ToolBarArea.TopToolBarArea)
-        self.addToolBar(Qt.ToolBarArea.TopToolBarArea, toolbar4)
-        
+        # === 视图缩放控制 ===
         btn_fit_view = QAction("合适屏幕", self)
         btn_fit_view.setShortcut("Ctrl+0")
         btn_fit_view.triggered.connect(self.fit_in_view)
-        toolbar4.addAction(btn_fit_view)
-        
-        btn_fill_view = QAction("填充屏幕", self)
-        btn_fill_view.setShortcut("Ctrl+Alt+0")
-        btn_fill_view.triggered.connect(self.fill_view)
-        toolbar4.addAction(btn_fill_view)
+        view_toolbar.addAction(btn_fit_view)
         
         btn_actual_size = QAction("实际大小", self)
         btn_actual_size.setShortcut("Ctrl+1")
         btn_actual_size.triggered.connect(self.actual_size)
-        toolbar4.addAction(btn_actual_size)
-        
-        toolbar4.addSeparator()
+        view_toolbar.addAction(btn_actual_size)
         
         btn_zoom_in = QAction("放大", self)
         btn_zoom_in.setShortcut("Ctrl+=")
         btn_zoom_in.triggered.connect(self.zoom_in)
-        toolbar4.addAction(btn_zoom_in)
+        view_toolbar.addAction(btn_zoom_in)
         
         btn_zoom_out = QAction("缩小", self)
         btn_zoom_out.setShortcut("Ctrl+-")
         btn_zoom_out.triggered.connect(self.zoom_out)
-        toolbar4.addAction(btn_zoom_out)
+        view_toolbar.addAction(btn_zoom_out)
         
         btn_zoom_selection = QAction("缩放到选中", self)
         btn_zoom_selection.setShortcut("Ctrl+2")
         btn_zoom_selection.triggered.connect(self.zoom_to_selection)
-        toolbar4.addAction(btn_zoom_selection)
+        view_toolbar.addAction(btn_zoom_selection)
+        
+        view_toolbar.addSeparator()
+        
+        # === 连接操作 ===
+        btn_auto_connect = QAction("智能连接", self)
+        btn_auto_connect.triggered.connect(self.auto_connect_selected)
+        view_toolbar.addAction(btn_auto_connect)
+        
+        btn_clear_connections = QAction("清除连接", self)
+        btn_clear_connections.triggered.connect(self.clear_all_connections)
+        view_toolbar.addAction(btn_clear_connections)
+        
+        view_toolbar.addSeparator()
+        
+        # === 素材和文件操作 ===
+        btn_asset_library = QAction("素材库", self)
+        btn_asset_library.setShortcut("F9")
+        btn_asset_library.triggered.connect(self.open_asset_library)
+        view_toolbar.addAction(btn_asset_library)
+        
+        btn_save_group = QAction("保存组合", self)
+        btn_save_group.triggered.connect(self.save_selected_as_group)
+        view_toolbar.addAction(btn_save_group)
+        
+        view_toolbar.addSeparator()
+        
+        btn_save = QAction("保存工程", self)
+        btn_save.setShortcut("Ctrl+S")
+        btn_save.triggered.connect(self.save_proj)
+        view_toolbar.addAction(btn_save)
+        
+        btn_export_img = QAction("导出图片", self)
+        btn_export_img.setShortcut("Ctrl+E")
+        btn_export_img.triggered.connect(self.export_image)
+        view_toolbar.addAction(btn_export_img)
 
     def create_menu_bar(self):
         menubar = self.menuBar()
@@ -2623,7 +3146,8 @@ class MainWindow(QMainWindow):
         save_group_action.triggered.connect(self.save_selected_as_group)
         asset_menu.addAction(save_group_action)
         
-        open_library_action = QAction('打开素材库', self)
+        open_library_action = QAction('切换素材库面板', self)
+        open_library_action.setShortcut('F9')
         open_library_action.triggered.connect(self.open_asset_library)
         asset_menu.addAction(open_library_action)
         
@@ -2744,9 +3268,13 @@ class MainWindow(QMainWindow):
         self.scene.toggle_connection_points()
     
     def open_asset_library(self):
-        if not self.asset_library:
-            self.asset_library = AssetLibraryWidget(self.scene.asset_manager, self)
-        self.asset_library.show()
+        """切换素材库面板的显示/隐藏"""
+        if self.asset_library_dock.isVisible():
+            self.asset_library_dock.hide()
+        else:
+            self.asset_library_dock.show()
+            # 刷新素材库内容
+            self.asset_library_dock.refresh_assets()
     
     def save_selected_as_group(self):
         self.scene.save_group_as_asset()
@@ -2872,10 +3400,319 @@ class MainWindow(QMainWindow):
     def load_proj(self):
         path, _ = QFileDialog.getOpenFileName(self, "Load Project", "", "VLayout (*.vlayout)")
         if path: ProjectData.load(self.scene, path)
+    
+    def apply_fluent_design_style(self):
+        """应用Fluent Design风格样式"""
+        fluent_style = """
+        /* 主窗口样式 */
+        QMainWindow {
+            background-color: #f3f3f3;
+            color: #323130;
+        }
+        
+        /* 工具栏样式 */
+        QToolBar {
+            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                stop:0 rgba(255, 255, 255, 0.95),
+                stop:1 rgba(245, 245, 245, 0.95));
+            border: none;
+            border-bottom: 1px solid rgba(0, 0, 0, 0.1);
+            spacing: 8px;
+            padding: 6px;
+        }
+        
+        QToolBar::separator {
+            background-color: rgba(0, 0, 0, 0.1);
+            width: 1px;
+            margin: 4px 2px;
+        }
+        
+        /* 按钮基础样式 - Fluent Design */
+        QPushButton, QToolButton {
+            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                stop:0 rgba(255, 255, 255, 0.9),
+                stop:1 rgba(249, 249, 249, 0.9));
+            border: 1px solid rgba(0, 0, 0, 0.1);
+            border-radius: 6px;
+            padding: 8px 16px;
+            font-size: 13px;
+            font-weight: 500;
+            color: #323130;
+            min-height: 20px;
+        }
+        
+        QPushButton:hover, QToolButton:hover {
+            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                stop:0 rgba(255, 255, 255, 1.0),
+                stop:1 rgba(245, 245, 245, 1.0));
+            border: 1px solid rgba(0, 120, 215, 0.4);
+            box-shadow: 0px 2px 8px rgba(0, 0, 0, 0.1);
+        }
+        
+        QPushButton:pressed, QToolButton:pressed {
+            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                stop:0 rgba(240, 240, 240, 1.0),
+                stop:1 rgba(230, 230, 230, 1.0));
+            border: 1px solid rgba(0, 120, 215, 0.6);
+        }
+        
+        /* 主要按钮样式 */
+        QPushButton[class="primary"] {
+            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                stop:0 rgba(0, 120, 215, 1.0),
+                stop:1 rgba(0, 90, 158, 1.0));
+            color: white;
+            border: 1px solid rgba(0, 90, 158, 1.0);
+            font-weight: 600;
+        }
+        
+        QPushButton[class="primary"]:hover {
+            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                stop:0 rgba(16, 132, 208, 1.0),
+                stop:1 rgba(0, 102, 180, 1.0));
+        }
+        
+        QPushButton[class="primary"]:pressed {
+            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                stop:0 rgba(0, 90, 158, 1.0),
+                stop:1 rgba(0, 78, 140, 1.0));
+        }
+        
+        /* 危险按钮样式 */
+        QPushButton[class="danger"] {
+            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                stop:0 rgba(196, 43, 28, 1.0),
+                stop:1 rgba(164, 38, 25, 1.0));
+            color: white;
+            border: 1px solid rgba(164, 38, 25, 1.0);
+        }
+        
+        QPushButton[class="danger"]:hover {
+            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                stop:0 rgba(200, 56, 39, 1.0),
+                stop:1 rgba(173, 45, 31, 1.0));
+        }
+        
+        /* 停靠面板样式 */
+        QDockWidget {
+            background: rgba(255, 255, 255, 0.95);
+            border: 1px solid rgba(0, 0, 0, 0.1);
+            border-radius: 8px;
+            titlebar-close-icon: none;
+            titlebar-normal-icon: none;
+        }
+        
+        QDockWidget::title {
+            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                stop:0 rgba(255, 255, 255, 0.95),
+                stop:1 rgba(248, 248, 248, 0.95));
+            border-bottom: 1px solid rgba(0, 0, 0, 0.1);
+            border-top-left-radius: 8px;
+            border-top-right-radius: 8px;
+            padding: 8px;
+            font-weight: 600;
+            color: #323130;
+        }
+        
+        /* 标签页样式 */
+        QTabWidget::pane {
+            border: 1px solid rgba(0, 0, 0, 0.1);
+            border-radius: 6px;
+            background: rgba(255, 255, 255, 0.9);
+        }
+        
+        QTabBar::tab {
+            background: rgba(245, 245, 245, 0.9);
+            border: 1px solid rgba(0, 0, 0, 0.1);
+            border-bottom: none;
+            border-top-left-radius: 6px;
+            border-top-right-radius: 6px;
+            padding: 8px 16px;
+            margin-right: 2px;
+            color: #605e5c;
+        }
+        
+        QTabBar::tab:selected {
+            background: rgba(255, 255, 255, 1.0);
+            color: #323130;
+            font-weight: 600;
+        }
+        
+        QTabBar::tab:hover:!selected {
+            background: rgba(250, 250, 250, 1.0);
+            color: #323130;
+        }
+        
+        /* 列表样式 */
+        QListWidget {
+            background: rgba(255, 255, 255, 0.9);
+            border: 1px solid rgba(0, 0, 0, 0.1);
+            border-radius: 6px;
+            padding: 4px;
+            selection-background-color: rgba(0, 120, 215, 0.2);
+        }
+        
+        QListWidget::item {
+            border-radius: 4px;
+            padding: 6px;
+            margin: 1px;
+        }
+        
+        QListWidget::item:hover {
+            background: rgba(0, 120, 215, 0.1);
+        }
+        
+        QListWidget::item:selected {
+            background: rgba(0, 120, 215, 0.2);
+            color: #323130;
+        }
+        
+        /* 树形控件样式 */
+        QTreeWidget {
+            background: rgba(255, 255, 255, 0.9);
+            border: 1px solid rgba(0, 0, 0, 0.1);
+            border-radius: 6px;
+            selection-background-color: rgba(0, 120, 215, 0.2);
+        }
+        
+        /* 输入框样式 */
+        QSpinBox, QLineEdit, QTextEdit {
+            background: rgba(255, 255, 255, 0.9);
+            border: 1px solid rgba(0, 0, 0, 0.2);
+            border-radius: 4px;
+            padding: 6px;
+            color: #323130;
+        }
+        
+        QSpinBox:focus, QLineEdit:focus, QTextEdit:focus {
+            border: 2px solid rgba(0, 120, 215, 0.8);
+        }
+        
+        /* 组合框样式 */
+        QComboBox {
+            background: rgba(255, 255, 255, 0.9);
+            border: 1px solid rgba(0, 0, 0, 0.2);
+            border-radius: 4px;
+            padding: 6px;
+            color: #323130;
+        }
+        
+        QComboBox:hover {
+            border: 1px solid rgba(0, 120, 215, 0.4);
+        }
+        
+        QComboBox::drop-down {
+            border: none;
+            width: 20px;
+        }
+        
+        /* 状态栏样式 */
+        QStatusBar {
+            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                stop:0 rgba(255, 255, 255, 0.95),
+                stop:1 rgba(245, 245, 245, 0.95));
+            border-top: 1px solid rgba(0, 0, 0, 0.1);
+            color: #605e5c;
+        }
+        
+        /* 菜单样式 */
+        QMenuBar {
+            background: rgba(255, 255, 255, 0.95);
+            border-bottom: 1px solid rgba(0, 0, 0, 0.1);
+            color: #323130;
+        }
+        
+        QMenuBar::item {
+            background: transparent;
+            padding: 8px 12px;
+            border-radius: 4px;
+        }
+        
+        QMenuBar::item:selected {
+            background: rgba(0, 120, 215, 0.1);
+        }
+        
+        QMenu {
+            background: rgba(255, 255, 255, 0.95);
+            border: 1px solid rgba(0, 0, 0, 0.1);
+            border-radius: 6px;
+            padding: 4px;
+        }
+        
+        QMenu::item {
+            padding: 8px 16px;
+            border-radius: 4px;
+        }
+        
+        QMenu::item:selected {
+            background: rgba(0, 120, 215, 0.1);
+        }
+        
+        /* 滚动条样式 */
+        QScrollBar:vertical {
+            background: rgba(245, 245, 245, 0.8);
+            width: 12px;
+            border-radius: 6px;
+        }
+        
+        QScrollBar::handle:vertical {
+            background: rgba(0, 0, 0, 0.3);
+            border-radius: 6px;
+            min-height: 20px;
+        }
+        
+        QScrollBar::handle:vertical:hover {
+            background: rgba(0, 0, 0, 0.5);
+        }
+        
+        QScrollBar:horizontal {
+            background: rgba(245, 245, 245, 0.8);
+            height: 12px;
+            border-radius: 6px;
+        }
+        
+        QScrollBar::handle:horizontal {
+            background: rgba(0, 0, 0, 0.3);
+            border-radius: 6px;
+            min-width: 20px;
+        }
+        
+        QScrollBar::handle:horizontal:hover {
+            background: rgba(0, 0, 0, 0.5);
+        }
+        """
+        
+        self.setStyleSheet(fluent_style)
+    
+    def set_button_style(self, button, style_class="default"):
+        """为按钮设置特定的Fluent Design样式"""
+        if style_class == "primary":
+            button.setProperty("class", "primary")
+        elif style_class == "danger":
+            button.setProperty("class", "danger")
+        
+        # 刷新样式
+        button.style().unpolish(button)
+        button.style().polish(button)
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
+    
+    # 设置应用属性以支持更好的视觉效果 (PyQt6兼容)
+    try:
+        app.setAttribute(Qt.ApplicationAttribute.AA_UseHighDpiPixmaps, True)
+    except AttributeError:
+        # 如果属性不存在，跳过设置
+        pass
+    
+    # 使用现代样式
     app.setStyle("Fusion")
+    
+    # 设置应用图标和信息
+    app.setApplicationName("VertiLayout Pro")
+    app.setApplicationVersion("1.0")
+    app.setOrganizationName("VertiLayout")
+    
     w = MainWindow()
     w.show()
     sys.exit(app.exec())
