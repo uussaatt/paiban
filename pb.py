@@ -16,10 +16,62 @@ COLUMN_SPACING = 10
 LINE_HEIGHT_RATIO = 1.2
 ASSETS_DIR = "assets"  # 素材库目录
 DEFAULT_LINE_WIDTH = 3  # 默认连接线粗细（像素）
+CONFIG_FILE = "config.json"  # 配置文件
 
 # Vertically sensitive characters (Simple Heuristic for demo)
 ROTATE_CHARS = {'—', '…', '(', ')', '[', ']', '{', '}', '《', '》', '-', '_'}
 OFFSET_CHARS = {'，', '。', '、', '：', '；', '！', '？', ',', '.', '!', '?'}
+
+class ConfigManager:
+    """配置管理器"""
+    def __init__(self):
+        self.config_file = CONFIG_FILE
+        self.config = self.load_config()
+    
+    def load_config(self):
+        """加载配置"""
+        if os.path.exists(self.config_file):
+            try:
+                with open(self.config_file, 'r', encoding='utf-8') as f:
+                    config = json.load(f)
+                print(f"配置已加载: {self.config_file}")
+                return config
+            except Exception as e:
+                print(f"加载配置失败: {e}")
+                return self.get_default_config()
+        else:
+            print("配置文件不存在，使用默认配置")
+            return self.get_default_config()
+    
+    def get_default_config(self):
+        """获取默认配置"""
+        return {
+            'default_background_image': '',  # 默认背景图片路径
+            'background_opacity': 0.3,  # 背景图片透明度 (0.0-1.0)
+            'background_scale_mode': 'fit',  # 缩放模式: 'fit', 'fill', 'stretch', 'tile'
+            'default_font_family': DEFAULT_FONT,  # 默认字体
+            'default_font_size': DEFAULT_FONT_SIZE  # 默认字体大小
+        }
+    
+    def save_config(self):
+        """保存配置"""
+        try:
+            with open(self.config_file, 'w', encoding='utf-8') as f:
+                json.dump(self.config, f, indent=2, ensure_ascii=False)
+            print(f"配置已保存: {self.config_file}")
+            return True
+        except Exception as e:
+            print(f"保存配置失败: {e}")
+            return False
+    
+    def get(self, key, default=None):
+        """获取配置项"""
+        return self.config.get(key, default)
+    
+    def set(self, key, value):
+        """设置配置项"""
+        self.config[key] = value
+        self.save_config()
 
 class AssetManager:
     """素材管理器"""
@@ -2555,23 +2607,60 @@ class LayoutScene(QGraphicsScene):
         self.show_connection_points = True  
         self.connection_mode = False  
         self.connection_source_point = None  
-        self.asset_manager = AssetManager()  
+        self.asset_manager = AssetManager()
+        self.config_manager = ConfigManager()  # 配置管理器
         self.image_text_binding_mode = False  
         self.image_text_source = None
         self.selection_order = []  # 记录选中顺序
+        self.background_pixmap = None  # 背景图片缓存
         
         # 连接选择改变信号
         self.selectionChanged.connect(self.on_selection_changed_track)
+        
+        # 加载背景图片
+        self.load_background_image()
+
+    def load_background_image(self):
+        """加载背景图片"""
+        bg_path = self.config_manager.get('default_background_image', '')
+        if bg_path and os.path.exists(bg_path):
+            self.background_pixmap = QPixmap(bg_path)
+            if self.background_pixmap.isNull():
+                print(f"无法加载背景图片: {bg_path}")
+                self.background_pixmap = None
+            else:
+                print(f"背景图片已加载: {bg_path}")
+        else:
+            self.background_pixmap = None
+    
+    def set_background_image(self, image_path):
+        """设置背景图片"""
+        if image_path and os.path.exists(image_path):
+            self.config_manager.set('default_background_image', image_path)
+            self.load_background_image()
+            self.update()
+            return True
+        else:
+            # 清除背景图片
+            self.config_manager.set('default_background_image', '')
+            self.background_pixmap = None
+            self.update()
+            return True
 
     def drawBackground(self, painter, rect):
+        # 绘制外部背景
         painter.fillRect(rect, QColor(60, 60, 60))
+        
         canvas_rect = self.sceneRect()
+        
+        # 绘制阴影
         shadow_rect = canvas_rect.translated(5, 5)
         painter.fillRect(shadow_rect, QColor(30, 30, 30, 150))
+        
+        # 绘制画布背景色
         painter.fillRect(canvas_rect, QColor(250, 250, 245))
-        painter.setPen(QPen(QColor(180, 180, 180), 1))
-        painter.drawRect(canvas_rect)
-
+        
+        # 绘制网格（在背景图片之前）
         if self.show_grid:
             painter.setPen(self.grid_pen)
             c_left = int(canvas_rect.left())
@@ -2583,6 +2672,58 @@ class LayoutScene(QGraphicsScene):
                 painter.drawLine(x, c_top, x, c_bottom)
             for y in range(c_top, c_bottom + 1, step):
                 painter.drawLine(c_left, y, c_right, y)
+        
+        # 绘制背景图片（在网格之上，元素之下）
+        if self.background_pixmap and not self.background_pixmap.isNull():
+            opacity = self.config_manager.get('background_opacity', 0.3)
+            scale_mode = self.config_manager.get('background_scale_mode', 'fit')
+            
+            # 保存当前透明度
+            old_opacity = painter.opacity()
+            painter.setOpacity(opacity)
+            
+            if scale_mode == 'fit':
+                # 适应画布，保持宽高比
+                scaled_pixmap = self.background_pixmap.scaled(
+                    canvas_rect.size().toSize(),
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation
+                )
+                # 居中绘制
+                x = canvas_rect.x() + (canvas_rect.width() - scaled_pixmap.width()) / 2
+                y = canvas_rect.y() + (canvas_rect.height() - scaled_pixmap.height()) / 2
+                painter.drawPixmap(int(x), int(y), scaled_pixmap)
+            
+            elif scale_mode == 'fill':
+                # 填充画布，保持宽高比，可能裁剪
+                scaled_pixmap = self.background_pixmap.scaled(
+                    canvas_rect.size().toSize(),
+                    Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                    Qt.TransformationMode.SmoothTransformation
+                )
+                x = canvas_rect.x() + (canvas_rect.width() - scaled_pixmap.width()) / 2
+                y = canvas_rect.y() + (canvas_rect.height() - scaled_pixmap.height()) / 2
+                painter.drawPixmap(int(x), int(y), scaled_pixmap)
+            
+            elif scale_mode == 'stretch':
+                # 拉伸填充，不保持宽高比
+                scaled_pixmap = self.background_pixmap.scaled(
+                    canvas_rect.size().toSize(),
+                    Qt.AspectRatioMode.IgnoreAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation
+                )
+                painter.drawPixmap(canvas_rect.toRect(), scaled_pixmap)
+            
+            elif scale_mode == 'tile':
+                # 平铺
+                painter.drawTiledPixmap(canvas_rect.toRect(), self.background_pixmap)
+            
+            # 恢复透明度
+            painter.setOpacity(old_opacity)
+        
+        # 绘制画布边框（最后绘制）
+        painter.setPen(QPen(QColor(180, 180, 180), 1))
+        painter.drawRect(canvas_rect)
     
     def on_selection_changed_track(self):
         """追踪选中顺序"""
@@ -3560,14 +3701,18 @@ class MainWindow(QMainWindow):
         # === 字体格式 ===
         main_toolbar.addWidget(QLabel("字体:"))
         self.font_combo = QFontComboBox()
-        self.font_combo.setCurrentFont(QFont(DEFAULT_FONT))
+        # 从配置加载默认字体
+        default_font = self.scene.config_manager.get('default_font_family', DEFAULT_FONT)
+        self.font_combo.setCurrentFont(QFont(default_font))
         self.font_combo.currentFontChanged.connect(self.change_selected_font)
         main_toolbar.addWidget(self.font_combo)
         
         main_toolbar.addWidget(QLabel("大小:"))
         self.font_size_spin = QSpinBox()
         self.font_size_spin.setRange(8, 200)
-        self.font_size_spin.setValue(DEFAULT_FONT_SIZE)
+        # 从配置加载默认字体大小
+        default_font_size = self.scene.config_manager.get('default_font_size', DEFAULT_FONT_SIZE)
+        self.font_size_spin.setValue(default_font_size)
         self.font_size_spin.setSuffix("px")
         self.font_size_spin.valueChanged.connect(self.change_selected_font_size)
         main_toolbar.addWidget(self.font_size_spin)
@@ -3744,6 +3889,13 @@ class MainWindow(QMainWindow):
         export_action.triggered.connect(self.export_image)
         file_menu.addAction(export_action)
         
+        file_menu.addSeparator()
+        
+        # 设置默认字体
+        set_default_font_action = QAction('设置默认字体...', self)
+        set_default_font_action.triggered.connect(self.set_default_font)
+        file_menu.addAction(set_default_font_action)
+        
         # 添加素材菜单
         asset_menu = menubar.addMenu('素材')
         save_group_action = QAction('保存组合素材', self)
@@ -3791,6 +3943,40 @@ class MainWindow(QMainWindow):
         zoom_selection_action.triggered.connect(self.zoom_to_selection)
         view_menu.addAction(zoom_selection_action)
         
+        view_menu.addSeparator()
+        
+        # 背景设置
+        set_background_action = QAction('设置默认背景图片...', self)
+        set_background_action.triggered.connect(self.set_background_image)
+        view_menu.addAction(set_background_action)
+        
+        clear_background_action = QAction('清除背景图片', self)
+        clear_background_action.triggered.connect(self.clear_background_image)
+        view_menu.addAction(clear_background_action)
+        
+        background_opacity_action = QAction('设置背景透明度...', self)
+        background_opacity_action.triggered.connect(self.set_background_opacity)
+        view_menu.addAction(background_opacity_action)
+        
+        # 背景缩放模式子菜单
+        scale_mode_menu = view_menu.addMenu('背景缩放模式')
+        
+        scale_fit_action = QAction('适应画布', self)
+        scale_fit_action.triggered.connect(lambda: self.set_background_scale_mode('fit'))
+        scale_mode_menu.addAction(scale_fit_action)
+        
+        scale_fill_action = QAction('填充画布', self)
+        scale_fill_action.triggered.connect(lambda: self.set_background_scale_mode('fill'))
+        scale_mode_menu.addAction(scale_fill_action)
+        
+        scale_stretch_action = QAction('拉伸填充', self)
+        scale_stretch_action.triggered.connect(lambda: self.set_background_scale_mode('stretch'))
+        scale_mode_menu.addAction(scale_stretch_action)
+        
+        scale_tile_action = QAction('平铺', self)
+        scale_tile_action.triggered.connect(lambda: self.set_background_scale_mode('tile'))
+        scale_mode_menu.addAction(scale_tile_action)
+        
         # 添加连线菜单
         connector_menu = menubar.addMenu('连线')
         
@@ -3829,7 +4015,13 @@ class MainWindow(QMainWindow):
         self.view.scale(0.95, 0.95)
 
     def add_text(self):
-        t = VTextItem("此处输入竖排文字\n支持自动换行\n从右向左排列", 24, 400)
+        # 从配置获取默认字体和大小
+        default_font = self.scene.config_manager.get('default_font_family', DEFAULT_FONT)
+        default_size = self.scene.config_manager.get('default_font_size', DEFAULT_FONT_SIZE)
+        
+        t = VTextItem("此处输入竖排文字\n支持自动换行\n从右向左排列", default_size, 400)
+        t.font_family = default_font
+        t.rebuild()
         t.setPos(500, 100)
         self.scene.add_item_with_undo(t)
         
@@ -4066,6 +4258,84 @@ class MainWindow(QMainWindow):
     def load_proj(self):
         path, _ = QFileDialog.getOpenFileName(self, "Load Project", "", "VLayout (*.vlayout)")
         if path: ProjectData.load(self.scene, path)
+    
+    def set_background_image(self):
+        """设置默认背景图片"""
+        path, _ = QFileDialog.getOpenFileName(
+            self, 
+            "选择背景图片", 
+            "", 
+            "Images (*.png *.jpg *.jpeg *.bmp *.gif)"
+        )
+        if path:
+            if self.scene.set_background_image(path):
+                QMessageBox.information(self, "成功", f"背景图片已设置\n{path}")
+    
+    def clear_background_image(self):
+        """清除背景图片"""
+        reply = QMessageBox.question(
+            self, 
+            "确认", 
+            "确定要清除背景图片吗？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            self.scene.set_background_image('')
+            QMessageBox.information(self, "成功", "背景图片已清除")
+    
+    def set_background_opacity(self):
+        """设置背景透明度"""
+        current_opacity = self.scene.config_manager.get('background_opacity', 0.3)
+        opacity, ok = QInputDialog.getDouble(
+            self,
+            "设置背景透明度",
+            "透明度 (0.0-1.0):",
+            current_opacity,
+            0.0,
+            1.0,
+            2
+        )
+        if ok:
+            self.scene.config_manager.set('background_opacity', opacity)
+            self.scene.update()
+            print(f"背景透明度已设置为: {opacity}")
+    
+    def set_background_scale_mode(self, mode):
+        """设置背景缩放模式"""
+        mode_names = {
+            'fit': '适应画布',
+            'fill': '填充画布',
+            'stretch': '拉伸填充',
+            'tile': '平铺'
+        }
+        self.scene.config_manager.set('background_scale_mode', mode)
+        self.scene.update()
+        print(f"背景缩放模式已设置为: {mode_names.get(mode, mode)}")
+    
+    def set_default_font(self):
+        """设置默认字体"""
+        # 获取当前默认字体
+        current_font_family = self.scene.config_manager.get('default_font_family', DEFAULT_FONT)
+        current_font_size = self.scene.config_manager.get('default_font_size', DEFAULT_FONT_SIZE)
+        current_font = QFont(current_font_family, current_font_size)
+        
+        # 打开字体选择对话框
+        font, ok = QFontDialog.getFont(current_font, self, "设置默认字体")
+        if ok:
+            # 保存到配置
+            self.scene.config_manager.set('default_font_family', font.family())
+            self.scene.config_manager.set('default_font_size', font.pointSize())
+            
+            # 更新工具栏显示
+            self.font_combo.setCurrentFont(font)
+            self.font_size_spin.setValue(font.pointSize())
+            
+            QMessageBox.information(
+                self,
+                "设置成功",
+                f"默认字体已设置为:\n字体: {font.family()}\n大小: {font.pointSize()}px\n\n新添加的文字将使用此字体。"
+            )
+            print(f"默认字体已设置: {font.family()}, {font.pointSize()}px")
     
     def apply_fluent_design_style(self):
         """应用Fluent Design风格样式"""
