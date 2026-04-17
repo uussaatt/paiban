@@ -425,13 +425,6 @@ class AssetLibraryDockWidget(QDockWidget):
         
         layout.addWidget(self.tab_widget)
         
-        # 底部刷新按钮
-        btn_refresh = QPushButton("刷新素材库")
-        btn_refresh.setMaximumHeight(30)
-        btn_refresh.setProperty("class", "primary")  # 添加主要样式
-        btn_refresh.clicked.connect(self.refresh_assets)
-        layout.addWidget(btn_refresh)
-        
         # 添加弹性空间
         layout.addStretch()
     
@@ -1977,7 +1970,7 @@ class BaseElement(QGraphicsItem):
         # 复制和删条
         copy_action = menu.addAction("复制 (Copy)")
         delete_action = menu.addAction("删除 (Delete)")
-        save_as_asset_action = menu.addAction("保存为素条(Save as Asset)")
+        save_as_asset_action = menu.addAction("保存组合")
         menu.addSeparator()
         
         # 对齐功能
@@ -2021,7 +2014,7 @@ class BaseElement(QGraphicsItem):
                 self.scene().delete_item(self)
         elif action == save_as_asset_action:
             if self.scene():
-                self.scene().save_item_as_asset(self)
+                self.scene().save_group_as_asset()
         elif len(selected_items) >= 2:
             if action == align_top_action:
                 self.scene().align_top(selected_items)
@@ -2365,7 +2358,7 @@ class VTextItem(BaseElement):
         
         copy_action = menu.addAction("复制 (Copy)")
         delete_action = menu.addAction("删除 (Delete)")
-        save_as_asset_action = menu.addAction("保存为素材(Save as Asset)")
+        save_as_asset_action = menu.addAction("保存组合")
         menu.addSeparator()
         
         selected_items = [item for item in self.scene().selectedItems() if isinstance(item, BaseElement)]
@@ -2418,7 +2411,7 @@ class VTextItem(BaseElement):
                 self.scene().delete_item(self)
         elif action == save_as_asset_action:
             if self.scene():
-                self.scene().save_item_as_asset(self)
+                self.scene().save_group_as_asset()
         elif len(selected_items) >= 2:
             if action == align_top_action:
                 self.scene().align_top(selected_items)
