@@ -1530,7 +1530,7 @@ class ConnectionPoint(QGraphicsEllipseItem):
         self.setAcceptHoverEvents(True)
         
     def update_position(self):
-        """更新连接点位置"""
+        """更新连接点位置（仅更新自身坐标，连线由父元素的 itemChange 统一更新）"""
         if not self.parent_element:
             return
             
@@ -1542,10 +1542,6 @@ class ConnectionPoint(QGraphicsEllipseItem):
         elif self.point_type == "text_bottom":
             # 文字底部中点
             self.setPos(rect.width()/2, rect.height())
-        
-        # 更新与此连接点相关的所有连接线
-        if self.scene() and self.parent_element:
-            self.scene().update_image_text_connectors(self.parent_element)
     
     def hoverEnterEvent(self, event):
         """鼠标悬停进入"""
@@ -1716,6 +1712,11 @@ class VGenericConnector(QGraphicsPathItem):
     
     def get_connection_point(self, item):
         """获取元素的连接点"""
+        # 优先使用属性
+        if hasattr(item, 'connection_point') and item.connection_point:
+            return item.connection_point
+            
+        # 备选：从子项目中查找
         for child in item.childItems():
             if isinstance(child, ConnectionPoint):
                 return child
@@ -1826,20 +1827,22 @@ class VImageTextConnector(QGraphicsPathItem):
             return
 
         # 从连接点获取位置
-        img_point = None
-        text_point = None
+        img_point = getattr(self.image_item, 'connection_point', None)
+        text_point = getattr(self.text_item, 'connection_point', None)
         
-        # 查找图片的连接点
-        for child in self.image_item.childItems():
-            if isinstance(child, ConnectionPoint) and child.point_type == "image_top":
-                img_point = child
-                break
-        
-        # 查找文字的连接点
-        for child in self.text_item.childItems():
-            if isinstance(child, ConnectionPoint) and child.point_type == "text_bottom":
-                text_point = child
-                break
+        if not img_point or not text_point:
+            # 如果没有找到属性，尝试从子项目中查找
+            if not img_point:
+                for child in self.image_item.childItems():
+                    if isinstance(child, ConnectionPoint) and child.point_type == "image_top":
+                        img_point = child
+                        break
+            
+            if not text_point:
+                for child in self.text_item.childItems():
+                    if isinstance(child, ConnectionPoint) and child.point_type == "text_bottom":
+                        text_point = child
+                        break
         
         if not img_point or not text_point:
             # 如果没有连接点，使用原来的计算方条
@@ -1921,11 +1924,26 @@ class BaseElement(QGraphicsItem):
 
     def itemChange(self, change, value):
         if change == QGraphicsItem.GraphicsItemChange.ItemPositionHasChanged:
-            # Update connectors
+            # 先更新连接点位置，再更新连线，确保连线使用最新的连接点坐标
+            if hasattr(self, 'connection_point') and self.connection_point:
+                self.connection_point.update_position()
             if self.scene():
                 self.scene().update_connectors(self)
                 self.scene().update_image_text_connectors(self)
+                # 递归更新所有子元素的连线（父级移动时子元素不会触发自己的 itemChange）
+                self._update_children_connectors()
         return super().itemChange(change, value)
+
+    def _update_children_connectors(self):
+        """递归更新所有子元素的连线"""
+        for child in self.childItems():
+            if isinstance(child, BaseElement):
+                if hasattr(child, 'connection_point') and child.connection_point:
+                    child.connection_point.update_position()
+                if self.scene():
+                    self.scene().update_connectors(child)
+                    self.scene().update_image_text_connectors(child)
+                child._update_children_connectors()
 
     def mousePressEvent(self, event):
         """记录拖动开始时的位置"""
@@ -1968,6 +1986,8 @@ class BaseElement(QGraphicsItem):
             align_menu = menu.addMenu("对齐 (Align)")
             align_top_action = align_menu.addAction("顶部对齐")
             align_right_action = align_menu.addAction("右对齐")
+            align_center_h_action = align_menu.addAction("水平居中对齐")
+            align_center_v_action = align_menu.addAction("垂直居中对齐")
             menu.addSeparator()
         
         unbind_action = menu.addAction("解除父级绑定 (Unbind)")
@@ -2007,6 +2027,10 @@ class BaseElement(QGraphicsItem):
                 self.scene().align_top(selected_items)
             elif action == align_right_action:
                 self.scene().align_right(selected_items)
+            elif action == align_center_h_action:
+                self.scene().align_center_horizontal(selected_items)
+            elif action == align_center_v_action:
+                self.scene().align_center_vertical(selected_items)
             elif action == auto_connect_action:
                 self.scene().auto_connect_selected_items()
             elif action == position_connect_action:
@@ -2079,11 +2103,9 @@ class InlineTextEditor(QTextEdit):
                 font-family: SimSun;
                 padding: 8px;
                 color: #323130;
-                box-shadow: 0px 4px 16px rgba(0, 0, 0, 0.15);
             }
             QTextEdit:focus {
                 border: 2px solid rgba(0, 120, 215, 1.0);
-                box-shadow: 0px 6px 20px rgba(0, 120, 215, 0.25);
             }
         """)
         
@@ -2301,6 +2323,8 @@ class VTextItem(BaseElement):
         
         if self.connection_point:
             self.connection_point.update_position()
+            if self.scene():
+                self.scene().update_image_text_connectors(self)
     
     def create_connection_point(self):
         """创建文字的连接点(底部中点)"""
@@ -2349,6 +2373,8 @@ class VTextItem(BaseElement):
             align_menu = menu.addMenu("对齐 (Align)")
             align_top_action = align_menu.addAction("顶部对齐")
             align_right_action = align_menu.addAction("右对齐")
+            align_center_h_action = align_menu.addAction("水平居中对齐")
+            align_center_v_action = align_menu.addAction("垂直居中对齐")
             menu.addSeparator()
         
         unbind_action = menu.addAction("解除父级绑定 (Unbind)")
@@ -2398,6 +2424,10 @@ class VTextItem(BaseElement):
                 self.scene().align_top(selected_items)
             elif action == align_right_action:
                 self.scene().align_right(selected_items)
+            elif action == align_center_h_action:
+                self.scene().align_center_horizontal(selected_items)
+            elif action == align_center_v_action:
+                self.scene().align_center_vertical(selected_items)
             elif action == auto_connect_action:
                 self.scene().auto_connect_selected_items()
             elif action == position_connect_action:
@@ -2432,7 +2462,9 @@ class VTextItem(BaseElement):
             self.font_family = font.family()
             self.font_size = font.pointSize()
             self.rebuild()
-            if self.scene(): self.scene().update_connectors(self)
+            if self.scene(): 
+                self.scene().update_connectors(self)
+                self.scene().update_image_text_connectors(self)
 
     def change_color_settings(self):
         color = QColorDialog.getColor(self.text_color, None, "选择颜色")
@@ -2448,6 +2480,7 @@ class VTextItem(BaseElement):
             self.rebuild()
             if self.scene(): 
                 self.scene().update_connectors(self)
+                self.scene().update_image_text_connectors(self)
     
     def change_column_spacing_settings(self):
         """设置列间距"""
@@ -2457,6 +2490,7 @@ class VTextItem(BaseElement):
             self.rebuild()
             if self.scene():
                 self.scene().update_connectors(self)
+                self.scene().update_image_text_connectors(self)
             print(f"列间距已设置为: {self.column_spacing}px")
     
     def toggle_connection_point(self):
@@ -2504,6 +2538,7 @@ class VTextItem(BaseElement):
             self.rebuild()
             if self.scene():
                 self.scene().update_connectors(self)
+                self.scene().update_image_text_connectors(self)
     
     def cancel_inline_editing(self):
         """取消内联编辑"""
@@ -2529,6 +2564,7 @@ class VTextItem(BaseElement):
             self.rebuild()
             if self.scene():
                 self.scene().update_connectors(self)
+                self.scene().update_image_text_connectors(self)
     
     def keyPressEvent(self, event):
         """处理键盘事件"""
@@ -3458,7 +3494,10 @@ class LayoutScene(QGraphicsScene):
     def align_top(self, items=None):
         if items is None: items = [item for item in self.selectedItems() if isinstance(item, BaseElement)]
         if len(items) < 2: return
-        min_y = min(item.scenePos().y() for item in items)
+        # 以第一个选中的元素为基准
+        ref_items = [i for i in self.selection_order if i in items]
+        ref = ref_items[0] if ref_items else items[0]
+        min_y = ref.scenePos().y()
         for item in items:
             current_pos = item.scenePos()
             new_scene_pos = QPointF(current_pos.x(), min_y)
@@ -3467,17 +3506,19 @@ class LayoutScene(QGraphicsScene):
             else:
                 item.setPos(new_scene_pos)
         
-        # 更新所有移动元素的连接线
         for item in items:
             self.update_connectors(item)
             self.update_image_text_connectors(item)
         
-        print(f"已对齐到顶部")
+        print(f"已对齐到顶部（基准: {ref}）")
     
     def align_right(self, items=None):
         if items is None: items = [item for item in self.selectedItems() if isinstance(item, BaseElement)]
         if len(items) < 2: return
-        max_right = max(item.scenePos().x() + item.boundingRect().width() for item in items)
+        # 以第一个选中的元素为基准
+        ref_items = [i for i in self.selection_order if i in items]
+        ref = ref_items[0] if ref_items else items[0]
+        max_right = ref.scenePos().x() + ref.boundingRect().width()
         for item in items:
             current_pos = item.scenePos()
             new_x = max_right - item.boundingRect().width()
@@ -3487,12 +3528,55 @@ class LayoutScene(QGraphicsScene):
             else:
                 item.setPos(new_scene_pos)
         
-        # 更新所有移动元素的连接线
         for item in items:
             self.update_connectors(item)
             self.update_image_text_connectors(item)
         
-        print(f"已对齐到右边")
+        print(f"已对齐到右边（基准: {ref}）")
+    
+    def align_center_horizontal(self, items=None):
+        if items is None: items = [item for item in self.selectedItems() if isinstance(item, BaseElement)]
+        if len(items) < 2: return
+        # 以第一个选中的元素为基准
+        ref_items = [i for i in self.selection_order if i in items]
+        ref = ref_items[0] if ref_items else items[0]
+        center_x = ref.scenePos().x() + ref.boundingRect().width() / 2
+        for item in items:
+            current_pos = item.scenePos()
+            new_x = center_x - item.boundingRect().width() / 2
+            new_scene_pos = QPointF(new_x, current_pos.y())
+            if item.parentItem():
+                item.setPos(item.parentItem().mapFromScene(new_scene_pos))
+            else:
+                item.setPos(new_scene_pos)
+        
+        for item in items:
+            self.update_connectors(item)
+            self.update_image_text_connectors(item)
+        
+        print(f"已水平居中对齐（基准: {ref}）")
+    
+    def align_center_vertical(self, items=None):
+        if items is None: items = [item for item in self.selectedItems() if isinstance(item, BaseElement)]
+        if len(items) < 2: return
+        # 以第一个选中的元素为基准
+        ref_items = [i for i in self.selection_order if i in items]
+        ref = ref_items[0] if ref_items else items[0]
+        center_y = ref.scenePos().y() + ref.boundingRect().height() / 2
+        for item in items:
+            current_pos = item.scenePos()
+            new_y = center_y - item.boundingRect().height() / 2
+            new_scene_pos = QPointF(current_pos.x(), new_y)
+            if item.parentItem():
+                item.setPos(item.parentItem().mapFromScene(new_scene_pos))
+            else:
+                item.setPos(new_scene_pos)
+        
+        for item in items:
+            self.update_connectors(item)
+            self.update_image_text_connectors(item)
+        
+        print(f"已垂直居中对齐（基准: {ref}）")
     
 class LayoutView(QGraphicsView):
     transformChanged = pyqtSignal()  # 变换改变信号
@@ -3724,14 +3808,11 @@ class MainWindow(QMainWindow):
                 background-color: black;
                 border: 2px solid rgba(255, 255, 255, 0.9);
                 border-radius: 6px;
-                box-shadow: 0px 2px 4px rgba(0, 0, 0, 0.1);
             }
             QPushButton:hover {
                 border: 2px solid rgba(0, 120, 215, 0.8);
-                box-shadow: 0px 3px 8px rgba(0, 0, 0, 0.15);
             }
             QPushButton:pressed {
-                box-shadow: 0px 1px 2px rgba(0, 0, 0, 0.2);
             }
         """)
         self.color_button.clicked.connect(self.change_selected_color)
@@ -3779,7 +3860,6 @@ class MainWindow(QMainWindow):
             }
             QPushButton:hover {
                 border: 1px solid rgba(0, 120, 215, 0.4);
-                box-shadow: 0px 2px 8px rgba(0, 0, 0, 0.1);
             }
         """)
         self.manual_line_break_btn.toggled.connect(self.toggle_manual_line_break)
@@ -3820,6 +3900,25 @@ class MainWindow(QMainWindow):
         btn_zoom_selection.setShortcut("Ctrl+2")
         btn_zoom_selection.triggered.connect(self.zoom_to_selection)
         view_toolbar.addAction(btn_zoom_selection)
+        
+        view_toolbar.addSeparator()
+        
+        # === 对齐操作 ===
+        btn_align_top = QAction("顶部对齐", self)
+        btn_align_top.triggered.connect(self.align_top)
+        view_toolbar.addAction(btn_align_top)
+        
+        btn_align_right = QAction("右对齐", self)
+        btn_align_right.triggered.connect(self.align_right)
+        view_toolbar.addAction(btn_align_right)
+        
+        btn_align_center_h = QAction("水平居中", self)
+        btn_align_center_h.triggered.connect(self.align_center_horizontal)
+        view_toolbar.addAction(btn_align_center_h)
+        
+        btn_align_center_v = QAction("垂直居中", self)
+        btn_align_center_v.triggered.connect(self.align_center_vertical)
+        view_toolbar.addAction(btn_align_center_v)
         
         view_toolbar.addSeparator()
         
@@ -4022,14 +4121,16 @@ class MainWindow(QMainWindow):
         t = VTextItem("此处输入竖排文字\n支持自动换行\n从右向左排列", default_size, 400)
         t.font_family = default_font
         t.rebuild()
-        t.setPos(500, 100)
+        center = self.view.mapToScene(self.view.viewport().rect().center())
+        t.setPos(center)
         self.scene.add_item_with_undo(t)
         
     def add_image(self):
         path, _ = QFileDialog.getOpenFileName(self, "选择图片", "", "Images (*.png *.jpg *.jpeg *.bmp)")
         if path:
             img = VImageItem(path, target_width=DEFAULT_FONT_SIZE*4)
-            img.setPos(500, 300)
+            center = self.view.mapToScene(self.view.viewport().rect().center())
+            img.setPos(center)
             self.scene.add_item_with_undo(img)
     
     def edit_selected_text(self):
@@ -4052,6 +4153,12 @@ class MainWindow(QMainWindow):
     
     def align_right(self):
         self.scene.align_right()
+    
+    def align_center_horizontal(self):
+        self.scene.align_center_horizontal()
+    
+    def align_center_vertical(self):
+        self.scene.align_center_vertical()
     
     # 视图缩放方法
     def fit_in_view(self):
@@ -4237,6 +4344,10 @@ class MainWindow(QMainWindow):
             # 图文连接器保持可见，不隐藏
             
             try:
+                # 临时清除选中状态，避免选中框被渲染到图片中
+                selected_items = self.scene.selectedItems()
+                self.scene.clearSelection()
+                
                 rect = self.scene.sceneRect()
                 img = QImage(rect.size().toSize(), QImage.Format.Format_ARGB32)
                 img.fill(Qt.GlobalColor.white)
@@ -4245,6 +4356,10 @@ class MainWindow(QMainWindow):
                 p.end()
                 img.save(path)
                 print(f"图片已导出到: {path}")
+                
+                # 恢复选中状态
+                for item in selected_items:
+                    item.setSelected(True)
             finally:
                 # 恢复原始设置
                 self.scene.show_grid = original_show_grid
@@ -4382,7 +4497,6 @@ class MainWindow(QMainWindow):
                 stop:0 rgba(255, 255, 255, 1.0),
                 stop:1 rgba(245, 245, 245, 1.0));
             border: 1px solid rgba(0, 120, 215, 0.4);
-            box-shadow: 0px 2px 8px rgba(0, 0, 0, 0.1);
         }
         
         QPushButton:pressed, QToolButton:pressed {
