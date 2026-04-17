@@ -408,15 +408,23 @@ class AssetLibraryDockWidget(QDockWidget):
         
         self.group_list = QListWidget()
         self.group_list.setDragDropMode(QAbstractItemView.DragDropMode.DragOnly)
-        self.group_list.itemDoubleClicked.connect(self.use_group_asset)
+        self.group_list.itemDoubleClicked.connect(self.rename_group_asset)
         self.group_list.setMaximumHeight(200)
         group_layout.addWidget(self.group_list)
         
         # 组合操作按钮
         group_btn_layout = QHBoxLayout()
+        btn_use_group = QPushButton("使用")
+        btn_use_group.setMaximumHeight(25)
+        btn_use_group.clicked.connect(self.use_group_asset_selected)
+        group_btn_layout.addWidget(btn_use_group)
+        btn_rename_group = QPushButton("重命名")
+        btn_rename_group.setMaximumHeight(25)
+        btn_rename_group.clicked.connect(self.rename_group_asset_selected)
+        group_btn_layout.addWidget(btn_rename_group)
         btn_delete_group = QPushButton("删除")
         btn_delete_group.setMaximumHeight(25)
-        btn_delete_group.setProperty("class", "danger")  # 添加危险样式
+        btn_delete_group.setProperty("class", "danger")
         btn_delete_group.clicked.connect(self.delete_group_asset)
         group_btn_layout.addWidget(btn_delete_group)
         group_layout.addLayout(group_btn_layout)
@@ -638,6 +646,34 @@ class AssetLibraryDockWidget(QDockWidget):
             if reply == QMessageBox.StandardButton.Yes:
                 self.asset_manager.remove_group_asset(asset['id'])
                 self.refresh_assets()
+
+    def use_group_asset_selected(self):
+        """使用选中的组合素材"""
+        current_item = self.group_list.currentItem()
+        if current_item:
+            self.use_group_asset(current_item)
+
+    def rename_group_asset(self, item):
+        """双击重命名组合素材"""
+        asset = item.data(Qt.ItemDataRole.UserRole)
+        if not asset:
+            return
+        new_name, ok = QInputDialog.getText(self, "重命名", "请输入新名称:", text=asset['name'])
+        if ok and new_name.strip():
+            asset['name'] = new_name.strip()
+            # 更新 assets.json
+            for a in self.asset_manager.assets['groups']:
+                if a['id'] == asset['id']:
+                    a['name'] = new_name.strip()
+                    break
+            self.asset_manager.save_assets()
+            self.refresh_assets()
+
+    def rename_group_asset_selected(self):
+        """按钮触发重命名"""
+        current_item = self.group_list.currentItem()
+        if current_item:
+            self.rename_group_asset(current_item)
 
 class AssetLibraryWidget(QWidget):
     """素材库窗口"""
