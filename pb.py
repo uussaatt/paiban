@@ -334,85 +334,14 @@ class AssetLibraryDockWidget(QDockWidget):
         layout = QVBoxLayout(self.content_widget)
         layout.setContentsMargins(5, 5, 5, 5)
         layout.setSpacing(5)
-        
-        # 标签页
-        self.tab_widget = QTabWidget()
-        self.tab_widget.setTabPosition(QTabWidget.TabPosition.North)
-        
-        # 文字素材标签页
-        self.text_tab = QWidget()
-        text_layout = QVBoxLayout(self.text_tab)
-        text_layout.setContentsMargins(2, 2, 2, 2)
-        
-        # 文字素材列表
-        text_label = QLabel("文字素材:")
-        text_label.setStyleSheet("font-weight: bold; margin: 2px;")
-        text_layout.addWidget(text_label)
-        
-        self.text_list = QListWidget()
-        self.text_list.setDragDropMode(QAbstractItemView.DragDropMode.DragOnly)
-        self.text_list.itemDoubleClicked.connect(self.use_text_asset)
-        self.text_list.setMaximumHeight(200)  # 限制高度以节省空间
-        text_layout.addWidget(self.text_list)
-        
-        # 文字操作按钮
-        text_btn_layout = QHBoxLayout()
-        btn_delete_text = QPushButton("删除")
-        btn_delete_text.setMaximumHeight(25)
-        btn_delete_text.setProperty("class", "danger")  # 添加危险样式
-        btn_delete_text.clicked.connect(self.delete_text_asset)
-        text_btn_layout.addWidget(btn_delete_text)
-        text_layout.addLayout(text_btn_layout)
-        
-        self.tab_widget.addTab(self.text_tab, "文字")
-        
-        # 图片素材标签页
-        self.image_tab = QWidget()
-        image_layout = QVBoxLayout(self.image_tab)
-        image_layout.setContentsMargins(2, 2, 2, 2)
-        
-        # 图片素材列表
-        image_label = QLabel("图片素材:")
-        image_label.setStyleSheet("font-weight: bold; margin: 2px;")
-        image_layout.addWidget(image_label)
-        
-        self.image_list = QListWidget()
-        self.image_list.setDragDropMode(QAbstractItemView.DragDropMode.DragOnly)
-        self.image_list.setViewMode(QListView.ViewMode.IconMode)
-        self.image_list.setIconSize(QSize(60, 60))  # 稍小的图标以适应面板
-        self.image_list.setGridSize(QSize(70, 80))
-        self.image_list.itemDoubleClicked.connect(self.use_image_asset)
-        self.image_list.setMaximumHeight(200)
-        image_layout.addWidget(self.image_list)
-        
-        # 图片操作按钮
-        image_btn_layout = QHBoxLayout()
-        btn_delete_image = QPushButton("删除")
-        btn_delete_image.setMaximumHeight(25)
-        btn_delete_image.setProperty("class", "danger")  # 添加危险样式
-        btn_delete_image.clicked.connect(self.delete_image_asset)
-        image_btn_layout.addWidget(btn_delete_image)
-        image_layout.addLayout(image_btn_layout)
-        
-        self.tab_widget.addTab(self.image_tab, "图片")
-        
-        # 组合素材标签页
-        self.group_tab = QWidget()
-        group_layout = QVBoxLayout(self.group_tab)
-        group_layout.setContentsMargins(2, 2, 2, 2)
-        
+
         # 组合素材列表
-        group_label = QLabel("组合素材:")
-        group_label.setStyleSheet("font-weight: bold; margin: 2px;")
-        group_layout.addWidget(group_label)
-        
         self.group_list = QListWidget()
         self.group_list.setDragDropMode(QAbstractItemView.DragDropMode.DragOnly)
         self.group_list.itemDoubleClicked.connect(self.rename_group_asset)
-        self.group_list.setMaximumHeight(200)
-        group_layout.addWidget(self.group_list)
-        
-        # 组合操作按钮
+        layout.addWidget(self.group_list)
+
+        # 操作按钮
         group_btn_layout = QHBoxLayout()
         btn_use_group = QPushButton("使用")
         btn_use_group.setMaximumHeight(25)
@@ -427,69 +356,19 @@ class AssetLibraryDockWidget(QDockWidget):
         btn_delete_group.setProperty("class", "danger")
         btn_delete_group.clicked.connect(self.delete_group_asset)
         group_btn_layout.addWidget(btn_delete_group)
-        group_layout.addLayout(group_btn_layout)
-        
-        self.tab_widget.addTab(self.group_tab, "组合")
-        
-        layout.addWidget(self.tab_widget)
-        
-        # 添加弹性空间
-        layout.addStretch()
+        layout.addLayout(group_btn_layout)
     
     def refresh_assets(self):
         """刷新素材列表"""
-        print("开始刷新素材库显示")
-        
-        # 重新加载素材数据
         self.asset_manager.load_assets()
-        
-        # 刷新文字素材
-        self.text_list.clear()
-        text_assets = self.asset_manager.get_text_assets()
-        print(f"加载文字素材: {len(text_assets)} 条")
-        for asset in text_assets:
-            item = QListWidgetItem(asset['name'])
-            item.setData(Qt.ItemDataRole.UserRole, asset)
-            item.setToolTip(f"文字: {asset['text'][:50]}...\n字体: {asset['font_family']}\n大小: {asset['font_size']}")
-            self.text_list.addItem(item)
-        
-        # 刷新图片素材
-        self.image_list.clear()
-        image_assets = self.asset_manager.get_image_assets()
-        print(f"加载图片素材: {len(image_assets)} 条")
-        for asset in image_assets:
-            item = QListWidgetItem(asset['name'])
-            item.setData(Qt.ItemDataRole.UserRole, asset)
-            
-            # 设置缩略图
-            if os.path.exists(asset['path']):
-                pixmap = QPixmap(asset['path'])
-                if not pixmap.isNull():
-                    scaled_pixmap = pixmap.scaled(60, 60, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
-                    item.setIcon(QIcon(scaled_pixmap))
-            
-            item.setToolTip(f"图片: {asset['name']}\n尺寸: {asset['width']}px")
-            self.image_list.addItem(item)
-        
-        # 刷新组合素材
         self.group_list.clear()
-        group_assets = self.asset_manager.get_group_assets()
-        print(f"加载组合素材: {len(group_assets)} 条")
-        for asset in group_assets:
+        for asset in self.asset_manager.get_group_assets():
             item = QListWidgetItem(asset['name'])
             item.setData(Qt.ItemDataRole.UserRole, asset)
-            
-            # 创建详细信息
-            details = f"包含 {asset['item_count']} 个元素\n"
-            text_count = sum(1 for item_data in asset['items'] if item_data['type'] == 'VTextItem')
-            image_count = sum(1 for item_data in asset['items'] if item_data['type'] == 'VImageItem')
-            details += f"文字: {text_count} 条 图片: {image_count} 个\n"
-            details += f"连接: {len(asset['image_text_connections'])} 条"
-            
-            item.setToolTip(details)
+            text_count = sum(1 for d in asset['items'] if d['type'] == 'VTextItem')
+            image_count = sum(1 for d in asset['items'] if d['type'] == 'VImageItem')
+            item.setToolTip(f"文字: {text_count} 条  图片: {image_count} 个  连接: {len(asset['image_text_connections'])} 条")
             self.group_list.addItem(item)
-        
-        print("素材库刷新完成")
     
     def use_text_asset(self, item):
         """使用文字素材"""
@@ -3769,6 +3648,11 @@ class MainWindow(QMainWindow):
         self.zoom_label = QLabel("缩放: 100%")
         self.status_bar.addPermanentWidget(self.zoom_label)
         
+        # 快捷键提示
+        hint = QLabel("  放大: Ctrl+=   缩小: Ctrl+-   合适屏幕: Ctrl+0   撤销: Ctrl+Z   保存: Ctrl+S   导出: Ctrl+E   素材库: F9")
+        hint.setStyleSheet("color: gray; font-size: 11px;")
+        self.status_bar.addWidget(hint)
+        
         # 连接视图变换信号来更新缩放显示
         self.view.transformChanged.connect(self.update_zoom_display)
         
@@ -3893,101 +3777,6 @@ class MainWindow(QMainWindow):
         """)
         self.manual_line_break_btn.toggled.connect(self.toggle_manual_line_break)
         main_toolbar.addWidget(self.manual_line_break_btn)
-        
-        # 视图与工程工具栏 - 视图控制、连接和文件操作
-        view_toolbar = QToolBar("视图与工程")
-        self.addToolBarBreak(Qt.ToolBarArea.TopToolBarArea)
-        self.addToolBar(Qt.ToolBarArea.TopToolBarArea, view_toolbar)
-        
-        # === 视图缩放控制 ===
-        btn_fit_view = QAction("合适屏幕", self)
-        btn_fit_view.setShortcut("Ctrl+0")
-        btn_fit_view.triggered.connect(self.fit_in_view)
-        view_toolbar.addAction(btn_fit_view)
-        
-        btn_fill_view = QAction("填充屏幕", self)
-        btn_fill_view.setShortcut("Ctrl+Alt+0")
-        btn_fill_view.triggered.connect(self.fill_view)
-        view_toolbar.addAction(btn_fill_view)
-        
-        btn_actual_size = QAction("实际大小", self)
-        btn_actual_size.setShortcut("Ctrl+1")
-        btn_actual_size.triggered.connect(self.actual_size)
-        view_toolbar.addAction(btn_actual_size)
-        
-        btn_zoom_in = QAction("放大", self)
-        btn_zoom_in.setShortcut("Ctrl+=")
-        btn_zoom_in.triggered.connect(self.zoom_in)
-        view_toolbar.addAction(btn_zoom_in)
-        
-        btn_zoom_out = QAction("缩小", self)
-        btn_zoom_out.setShortcut("Ctrl+-")
-        btn_zoom_out.triggered.connect(self.zoom_out)
-        view_toolbar.addAction(btn_zoom_out)
-        
-        btn_zoom_selection = QAction("缩放到选中", self)
-        btn_zoom_selection.setShortcut("Ctrl+2")
-        btn_zoom_selection.triggered.connect(self.zoom_to_selection)
-        view_toolbar.addAction(btn_zoom_selection)
-        
-        view_toolbar.addSeparator()
-        
-        # === 对齐操作 ===
-        btn_align_top = QAction("顶部对齐", self)
-        btn_align_top.triggered.connect(self.align_top)
-        view_toolbar.addAction(btn_align_top)
-        
-        btn_align_right = QAction("右对齐", self)
-        btn_align_right.triggered.connect(self.align_right)
-        view_toolbar.addAction(btn_align_right)
-        
-        btn_align_center_h = QAction("水平居中", self)
-        btn_align_center_h.triggered.connect(self.align_center_horizontal)
-        view_toolbar.addAction(btn_align_center_h)
-        
-        btn_align_center_v = QAction("垂直居中", self)
-        btn_align_center_v.triggered.connect(self.align_center_vertical)
-        view_toolbar.addAction(btn_align_center_v)
-        
-        view_toolbar.addSeparator()
-        
-        # === 连接操作 ===
-        btn_auto_connect = QAction("智能连接", self)
-        btn_auto_connect.triggered.connect(self.auto_connect_selected)
-        view_toolbar.addAction(btn_auto_connect)
-        
-        btn_clear_connections = QAction("清除连接", self)
-        btn_clear_connections.triggered.connect(self.clear_all_connections)
-        view_toolbar.addAction(btn_clear_connections)
-        
-        view_toolbar.addSeparator()
-        
-        # === 素材和文件操作 ===
-        btn_asset_library = QAction("素材库", self)
-        btn_asset_library.setShortcut("F9")
-        btn_asset_library.triggered.connect(self.open_asset_library)
-        view_toolbar.addAction(btn_asset_library)
-        
-        btn_save_group = QAction("保存组合", self)
-        btn_save_group.triggered.connect(self.save_selected_as_group)
-        view_toolbar.addAction(btn_save_group)
-        
-        view_toolbar.addSeparator()
-        
-        btn_open = QAction("打开工程", self)
-        btn_open.setShortcut("Ctrl+O")
-        btn_open.triggered.connect(self.load_proj)
-        view_toolbar.addAction(btn_open)
-        
-        btn_save = QAction("保存工程", self)
-        btn_save.setShortcut("Ctrl+S")
-        btn_save.triggered.connect(self.save_proj)
-        view_toolbar.addAction(btn_save)
-        
-        btn_export_img = QAction("导出图片", self)
-        btn_export_img.setShortcut("Ctrl+E")
-        btn_export_img.triggered.connect(self.export_image)
-        view_toolbar.addAction(btn_export_img)
 
     def create_menu_bar(self):
         menubar = self.menuBar()

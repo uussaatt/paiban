@@ -1,0 +1,135 @@
+{
+  "texts": [
+    {
+      "id": 1,
+      "name": "庆旦",
+      "text": "庆旦",
+      "font_size": 84,
+      "box_height": 400,
+      "font_family": "SimSun",
+      "text_color": "#000000",
+      "created_time": "Fri Apr 17 21:44:52 2026"
+    },
+    {
+      "id": 5,
+      "name": "庆旦",
+      "text": "庆旦",
+      "font_size": 84,
+      "box_height": 400,
+      "font_family": "SimSun",
+      "text_color": "#000000",
+      "created_time": "Fri Apr 17 21:59:55 2026"
+    },
+    {
+      "id": 2,
+      "name": "记录庆旦",
+      "text": "记录庆旦",
+      "font_size": 84,
+      "box_height": 400,
+      "font_family": "SimSun",
+      "text_color": "#000000",
+      "created_time": "Fri Apr 17 22:07:37 2026"
+    },
+    {
+      "id": 3,
+      "name": "记录庆旦",
+      "text": "记录庆旦",
+      "font_size": 84,
+      "box_height": 400,
+      "font_family": "SimSun",
+      "text_color": "#000000",
+      "created_time": "Sat Apr 18 07:16:36 2026"
+    }
+  ],
+  "images": [
+    {
+      "id": 0,
+      "name": "Snipaste_2026-04-09_15-20-36.png",
+      "path": "assets\\img_0_Snipaste_2026-04-09_15-20-36.png",
+      "original_path": "C:/Users/a/Desktop/Snipaste_2026-04-09_15-20-36.png",
+      "width": 96,
+      "created_time": "Thu Apr 16 17:29:54 2026"
+    },
+    {
+      "id": 2,
+      "name": "img_0_Snipaste_2026-04-09_15-20-36.png",
+      "path": "assets\\img_2_img_0_Snipaste_2026-04-09_15-20-36.png",
+      "original_path": "assets\\img_0_Snipaste_2026-04-09_15-20-36.png",
+      "width": 96,
+      "created_time": "Fri Apr 17 21:59:36 2026"
+    },
+    {
+      "id": 4,
+      "name": "img_0_Snipaste_2026-04-09_15-20-36.png",
+      "path": "assets\\img_4_img_0_Snipaste_2026-04-09_15-20-36.png",
+      "original_path": "assets\\img_0_Snipaste_2026-04-09_15-20-36.png",
+      "width": 96,
+      "created_time": "Fri Apr 17 22:03:28 2026"
+    },
+    {
+      "id": 6,
+      "name": "img_0_Snipaste_2026-04-09_15-20-36.png",
+      "path": "assets\\img_6_img_0_Snipaste_2026-04-09_15-20-36.png",
+      "original_path": "assets\\img_0_Snipaste_2026-04-09_15-20-36.png",
+      "width": 96,
+      "created_time": "Fri Apr 17 22:06:26 2026"
+    },
+    {
+      "id": 4,
+      "name": "img_0_Snipaste_2026-04-09_15-20-36.png",
+      "path": "assets\\img_4_img_0_Snipaste_2026-04-09_15-20-36.png",
+      "original_path": "assets\\img_0_Snipaste_2026-04-09_15-20-36.png",
+      "width": 96,
+      "created_time": "Fri Apr 17 22:07:20 2026"
+    }
+  ],
+  "groups": [
+    {
+      "id": 0,
+      "name": "组合_1文字_1图片",
+      "items": [
+        {
+          "type": "VTextItem",
+          "text": "庆旦",
+          "font_size": 84,
+          "box_height": 400,
+          "font_family": "SimSun",
+          "text_color": "#000000",
+          "chars_per_column": 15,
+          "column_spacing": 10,
+          "auto_height": true,
+          "manual_line_break": true,
+          "connection_point_visible": true,
+          "scene_pos": [
+            4676.147869674186,
+            2192.220551378446
+          ],
+          "local_pos": [
+            -8.83959899749425,
+            114.91478696741842
+          ],
+          "parent_index": 1
+        },
+        {
+          "type": "VImageItem",
+          "path": "assets\\group_0_1_img_0_Snipaste_2026-04-09_15-20-36.png",
+          "original_path": "assets\\img_0_Snipaste_2026-04-09_15-20-36.png",
+          "width": 96,
+          "connection_point_visible": true,
+          "scene_pos": [
+            4684.98746867168,
+            2077.3057644110277
+          ],
+          "local_pos": [
+            4684.98746867168,
+            2077.3057644110277
+          ],
+          "parent_index": -1
+        }
+      ],
+      "image_text_connections": [],
+      "item_count": 2,
+      "created_time": "Sat Apr 18 07:24:41 2026"
+    }
+  ]
+}
