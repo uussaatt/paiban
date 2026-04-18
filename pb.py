@@ -337,8 +337,11 @@ class AssetLibraryDockWidget(QDockWidget):
 
         # 组合素材列表
         self.group_list = QListWidget()
+        self.group_list.setDragEnabled(True)
         self.group_list.setDragDropMode(QAbstractItemView.DragDropMode.DragOnly)
+        self.group_list.setDefaultDropAction(Qt.DropAction.CopyAction)
         self.group_list.itemDoubleClicked.connect(self.rename_group_asset)
+        self.group_list.startDrag = self._start_group_drag
         layout.addWidget(self.group_list)
 
         # 操作按钮
@@ -357,7 +360,33 @@ class AssetLibraryDockWidget(QDockWidget):
         btn_delete_group.clicked.connect(self.delete_group_asset)
         group_btn_layout.addWidget(btn_delete_group)
         layout.addLayout(group_btn_layout)
+
     
+        """自定义拖拽，携带组合 id"""
+    def _start_group_drag(self, supported_actions):
+        item = self.group_list.currentItem()
+        if not item:
+            return
+        asset = item.data(Qt.ItemDataRole.UserRole)
+        if not asset:
+            return
+        mime = QMimeData()
+        mime.setData('application/x-group-asset-id', str(asset['id']).encode())
+        drag = QDrag(self.group_list)
+        drag.setMimeData(mime)
+        
+        # 这一段是新增的预览图逻辑
+        pixmap = QPixmap(120, 30)
+        pixmap.fill(QColor(0, 120, 215, 180))
+        painter = QPainter(pixmap)
+        painter.setPen(Qt.GlobalColor.white)
+        painter.drawText(pixmap.rect(), Qt.AlignmentFlag.AlignCenter, "放置组合素材")
+        painter.end()
+        drag.setPixmap(pixmap)
+        drag.setHotSpot(QPoint(60, 15))
+        
+        drag.exec(Qt.DropAction.CopyAction)
+
     def refresh_assets(self):
         """刷新素材列表"""
         self.asset_manager.load_assets()
@@ -404,97 +433,68 @@ class AssetLibraryDockWidget(QDockWidget):
             print(f"已添加图片素材 {asset['name']}")
     
     def use_group_asset(self, item):
-        """使用组合素材"""
+        """使用组合素材（放到画布中央）"""
         asset = item.data(Qt.ItemDataRole.UserRole)
         if asset:
-            # 获取粘贴位置
             center = self.main_window.view.mapToScene(self.main_window.view.viewport().rect().center())
-            
-            # 计算所有项目的边界框，用于确定粘贴位置
-            if asset['items']:
-                min_x = min(item_data['scene_pos'][0] for item_data in asset['items'])
-                min_y = min(item_data['scene_pos'][1] for item_data in asset['items'])
-            else:
-                min_x = min_y = 0
-            
-            base_x, base_y = center.x(), center.y()
-            new_items = []
-            
-            # 第一步：创建所有项目
-            for idx, item_data in enumerate(asset['items']):
-                new_item = None
+            self._place_group_at(asset, center)
+    def _place_group_at(self, asset, base_pos):
+        """在鼠标指定位置精准放置组合素材"""
+        if not asset or not asset['items']: return
+        
+        # 1. 计算原始组合保存时的边界，用于计算偏移
+        min_x = min(d['scene_pos'][0] for d in asset['items'])
+        min_y = min(d['scene_pos'][1] for d in asset['items'])
+        
+        new_items = []
+        scene = self.main_window.scene
+
+        # 2. 创建元素并对齐到鼠标落点 (base_pos)
+        for idx, item_data in enumerate(asset['items']):
+            new_item = None
+            if item_data['type'] == 'VTextItem':
+                new_item = VTextItem(item_data['text'], item_data['font_size'], item_data['box_height'])
+                new_item.font_family = item_data['font_family']
+                new_item.text_color = QColor(item_data['text_color'])
+                for k in ('chars_per_column', 'column_spacing', 'auto_height', 'manual_line_break'):
+                    if k in item_data: setattr(new_item, k, item_data[k])
+                new_item.rebuild() 
+            elif item_data['type'] == 'VImageItem':
+                if os.path.exists(item_data['path']):
+                    new_item = VImageItem(item_data['path'], item_data['width'])
+
+            if new_item:
+                # 关键：根据鼠标位置计算每个元素的最终位置
+                off_x = item_data['scene_pos'][0] - min_x
+                off_y = item_data['scene_pos'][1] - min_y
+                new_item.setPos(base_pos.x() + off_x, base_pos.y() + off_y)
+                new_item.setZValue(10) # 确保显示在最前
                 
-                if item_data['type'] == 'VTextItem':
-                    new_item = VTextItem(
-                        item_data['text'],
-                        item_data['font_size'],
-                        item_data['box_height']
-                    )
-                    new_item.font_family = item_data['font_family']
-                    new_item.text_color = QColor(item_data['text_color'])
-                    
-                    # 恢复其他属性
-                    if 'chars_per_column' in item_data:
-                        new_item.chars_per_column = item_data['chars_per_column']
-                    if 'column_spacing' in item_data:
-                        new_item.column_spacing = item_data['column_spacing']
-                    if 'auto_height' in item_data:
-                        new_item.auto_height = item_data['auto_height']
-                    if 'manual_line_break' in item_data:
-                        new_item.manual_line_break = item_data['manual_line_break']
-                    
-                    new_item.rebuild()
-                        
-                elif item_data['type'] == 'VImageItem':
-                    if os.path.exists(item_data['path']):
-                        new_item = VImageItem(item_data['path'], item_data['width'])
+                # 添加到场景
+                command = AddItemCommand(scene, new_item)
+                scene.undo_stack.push(command)
                 
-                if new_item:
-                    # 计算相对于原始组合的偏移量，然后应用到新的基准位置
-                    offset_x = item_data['scene_pos'][0] - min_x
-                    offset_y = item_data['scene_pos'][1] - min_y
-                    new_item.setPos(base_x + offset_x, base_y + offset_y)
-                    
-                    # 使用撤销系统添加元素
-                    command = AddItemCommand(self.main_window.scene, new_item)
-                    self.main_window.scene.undo_stack.push(command)
-                    
-                    # 在AddItemCommand执行后，重新设置连接点可见性
-                    # 因为AddItemCommand.execute()会使用场景的全局设置覆盖个别设置
-                    if 'connection_point_visible' in item_data and new_item.connection_point:
-                        new_item.connection_point.setVisible(item_data['connection_point_visible'])
-                    
-                    new_items.append(new_item)
-            
-            # 第二步：恢复父子关系
-            for idx, item_data in enumerate(asset['items']):
-                if item_data['parent_index'] != -1 and item_data['parent_index'] < len(new_items):
-                    child_item = new_items[idx]
-                    parent_item = new_items[item_data['parent_index']]
-                    
-                    # 保存当前场景坐标
-                    current_scene_pos = child_item.scenePos()
-                    # 设置父子关系
-                    child_item.setParentItem(parent_item)
-                    # 将场景坐标转换为父级的本地坐标
-                    local_pos = parent_item.mapFromScene(current_scene_pos)
-                    child_item.setPos(local_pos)
-                    
-                    # 创建父子连接线
-                    self.main_window.scene.add_connector(parent_item, child_item)
-            
-            # 第三步：恢复图文连接
-            for img_idx, text_idx in asset['image_text_connections']:
-                if img_idx < len(new_items) and text_idx < len(new_items):
-                    img_item = new_items[img_idx]
-                    text_item = new_items[text_idx]
-                    # 确保是正确的类型
-                    if isinstance(img_item, VImageItem) and isinstance(text_item, VTextItem):
-                        self.main_window.scene.add_image_text_connector(img_item, text_item)
-                    elif isinstance(img_item, VTextItem) and isinstance(text_item, VImageItem):
-                        self.main_window.scene.add_image_text_connector(text_item, img_item)
-            
-            print(f"已添加组合素材 {asset['name']} ({len(new_items)} 个元素)")
+                if 'connection_point_visible' in item_data and new_item.connection_point:
+                    new_item.connection_point.setVisible(item_data['connection_point_visible'])
+                new_items.append(new_item)
+
+        # 3. 恢复连接关系
+        for idx, item_data in enumerate(asset['items']):
+            if item_data['parent_index'] != -1 and item_data['parent_index'] < len(new_items):
+                child, parent = new_items[idx], new_items[item_data['parent_index']]
+                sp = child.scenePos()
+                child.setParentItem(parent)
+                child.setPos(parent.mapFromScene(sp))
+                scene.add_connector(parent, child)
+
+        for img_idx, text_idx in asset['image_text_connections']:
+            if img_idx < len(new_items) and text_idx < len(new_items):
+                scene.add_image_text_connector(new_items[img_idx], new_items[text_idx])
+
+        # 选中新元素并刷新
+        scene.clearSelection()
+        for i in new_items: i.setSelected(True)
+        scene.update()
     
     def delete_text_asset(self):
         """删除选中的文字素材"""
@@ -2134,28 +2134,32 @@ class VTextItem(BaseElement):
         self.create_connection_point()
 
     def rebuild(self):
-        old_rect = self.boundingRect()
+        # 记录旧宽度用于位置补偿
+        old_width = self._rect.width()
         
-        # Clear child text items only
+        # 1. 清理旧的子项
         scene = self.scene()
-        child_items = self.childItems()
-        for child in child_items:
+        for child in self.childItems():
             if not isinstance(child, (BaseElement, ConnectionPoint)):
-                if scene:
-                    scene.removeItem(child)
-                else:
-                    child.setParentItem(None)
+                if scene: scene.removeItem(child)
+                else: child.setParentItem(None)
             
-        font = QFont(self.font_family, self.font_size)
-        fm = QFontMetrics(font)
-        char_h = fm.height()
+        # 2. 准备基础字体
+        main_font = QFont(self.font_family, self.font_size)
+        small_font = QFont(self.font_family, int(self.font_size * 0.5))
         
-        # 计算每列的步长（字体大小 + 列间距）
+        main_fm = QFontMetrics(main_font)
+        small_fm = QFontMetrics(small_font)
+        
+        char_h_main = main_fm.height()
+        char_h_small = small_fm.height()
+        
+        # 列宽依然以主字号为准
         col_step = self.font_size + self.column_spacing
         
-        # 计算每列的实际高度限制
+        # 换行高度限制
         if self.auto_height:
-            effective_height = self.chars_per_column * char_h * LINE_HEIGHT_RATIO
+            effective_height = self.chars_per_column * char_h_main * LINE_HEIGHT_RATIO
         else:
             effective_height = self.box_height
         
@@ -2163,72 +2167,104 @@ class VTextItem(BaseElement):
         col_idx = 0
         generated_items = []
         
-        for char in self.full_text:
-            if char == '\n' and self.manual_line_break:
+        # --- 核心逻辑：精准匹配“十一”和“十二” ---
+        text_content = self.full_text
+        i = 0
+        SPECIAL_WORDS = ["十一", "十二"]
+
+        while i < len(text_content):
+            char = text_content[i]
+            
+            # 处理换行
+            if char == '\n':
+                if self.manual_line_break:
+                    cursor_y = 0
+                    col_idx += 1
+                i += 1
+                continue
+
+            # 检查当前位置是否是“十一”或“十二”
+            is_special = False
+            if i + 1 < len(text_content) and text_content[i:i+2] in SPECIAL_WORDS:
+                is_special = True
+            elif i > 0 and text_content[i-1:i+1] in SPECIAL_WORDS:
+                is_special = True
+
+            # 根据是否是特殊字符选择字体和高度
+            if is_special:
+                current_font = small_font
+                current_h = char_h_small
+            else:
+                current_font = main_font
+                current_h = char_h_main
+
+            # 换列判断
+            if cursor_y + current_h > effective_height:
                 cursor_y = 0
                 col_idx += 1
-                continue 
-            elif char == '\n' and not self.manual_line_break:
-                continue 
             
-            is_rotated = char in ROTATE_CHARS
-            is_offset = char in OFFSET_CHARS
-            
+            # 创建字符项
             t = QGraphicsSimpleTextItem(char)
-            t.setFont(font)
+            t.setFont(current_font)
             t.setBrush(QBrush(self.text_color))
             
-            if cursor_y + char_h > effective_height:
-                cursor_y = 0
-                col_idx += 1
-            
-            # 计算列的x位置（从右到左排列）
+            # 计算 X 偏移（相对于右侧第一列）
             x_local = -(col_idx * col_step)
-            y_pos = cursor_y
             
-            if is_rotated:
+            # 旋转特殊符号
+            if char in ROTATE_CHARS:
                 t.setTransformOriginPoint(t.boundingRect().center())
                 t.setRotation(90)
             
+            # 基础坐标
             final_x = x_local
-            final_y = y_pos
+            final_y = cursor_y
             
-            if is_offset:
+            # 标点符号偏移
+            if char in OFFSET_CHARS:
                 final_x += self.font_size * 0.4
                 final_y -= self.font_size * 0.4
                 
+            # --- 关键：缩小字号后的居中修正 ---
+            if is_special:
+                # 使缩小的字在当前列的横向中间
+                final_x += (self.font_size - t.boundingRect().width()) / 2
+
             t.setParentItem(self) 
             t.setPos(final_x, final_y)
             generated_items.append(t)
-            cursor_y += char_h * LINE_HEIGHT_RATIO
-
-        total_cols = col_idx + 1
-        total_width = total_cols * col_step
-        
-        # 调整所有字符位置，使第一列保持在右侧
-        shift_x = total_width - col_step
-        
-        for item in generated_items:
-            item.moveBy(shift_x, 0)
-        
-        if generated_items:
-            max_y = 0
-            for item in generated_items:
-                item_bottom = item.y() + item.boundingRect().height()
-                max_y = max(max_y, item_bottom)
-            actual_height = max(max_y + 5, char_h) 
-        else:
-            actual_height = char_h
             
-        self._rect = QRectF(0, 0, total_width, actual_height)
-        
-        new_width = total_width
-        old_width = old_rect.width()
+            # 累加 Y 坐标
+            cursor_y += current_h * LINE_HEIGHT_RATIO
+            i += 1
+
+        # 3. 重新对齐并计算方框 (Bounding Rect)
+        if generated_items:
+            # 找到当前生成的最小 X（最左边那一列的 X）
+            min_x = min(item.pos().x() for item in generated_items)
+            # 将所有文字右移，使左边界从 0 开始
+            for item in generated_items:
+                item.setX(item.x() - min_x)
+            
+            # 自动计算一个能包裹所有文字的矩形作为方框
+            combined_rect = QRectF()
+            for item in generated_items:
+                # 获取每个字符在父级坐标系下的矩形并合并
+                combined_rect = combined_rect.united(item.mapRectToParent(item.boundingRect()))
+            
+            # 更新方框尺寸（留出2像素呼吸空间）
+            self._rect = combined_rect.adjusted(-2, -2, 2, 2)
+        else:
+            self._rect = QRectF(0, 0, col_step, char_h_main)
+
+        # 4. 锚点补偿：如果文字变宽/变窄，自动调整位置保持右对齐
+        new_width = self._rect.width()
         dx = old_width - new_width
-        
-        if abs(dx) > 0.1: 
+        if abs(dx) > 0.1:
             self.moveBy(dx, 0)
         
+        # 5. 通知场景并更新连接点
+        self.prepareGeometryChange()
         if self.connection_point:
             self.connection_point.update_position()
             if self.scene():
@@ -3591,19 +3627,62 @@ class LayoutView(QGraphicsView):
                     selection_rect.adjust(-margin, -margin, margin, margin)
                     self.fitInView(selection_rect, Qt.AspectRatioMode.KeepAspectRatio)
                     self.transformChanged.emit()
-
     def dragEnterEvent(self, event):
-        if event.mimeData().hasUrls(): event.accept()
-        else: event.ignore()
+        # 允许组合素材或文件进入
+        if event.mimeData().hasFormat('application/x-group-asset-id') or event.mimeData().hasUrls():
+            event.acceptProposedAction()
+        else:
+            super().dragEnterEvent(event)
+
+    def dragMoveEvent(self, event):
+        # 必须实现移动事件，否则鼠标会显示禁止图标
+        if event.mimeData().hasFormat('application/x-group-asset-id') or event.mimeData().hasUrls():
+            event.acceptProposedAction()
+        else:
+            super().dragMoveEvent(event)
 
     def dropEvent(self, event):
-        for url in event.mimeData().urls():
-            path = url.toLocalFile()
-            if path.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp')):
-                img = VImageItem(path, target_width=DEFAULT_FONT_SIZE*4) 
-                pos = self.mapToScene(event.position().toPoint())
-                img.setPos(pos)
-                self.scene().addItem(img)
+        # 处理素材库组合
+        if event.mimeData().hasFormat('application/x-group-asset-id'):
+            data = event.mimeData().data('application/x-group-asset-id')
+            asset_id = int(data.data().decode())
+            
+            # 转换为画布精确坐标
+            drop_pos = self.mapToScene(event.position().toPoint())
+            
+            scene = self.scene()
+            asset = next((a for a in scene.asset_manager.get_group_assets() if a['id'] == asset_id), None)
+            
+            if asset:
+                main_win = self.window()
+                while main_win and not hasattr(main_win, 'asset_library_dock'):
+                    main_win = main_win.parent()
+                
+                if main_win:
+                    # 放置素材
+                    main_win.asset_library_dock._place_group_at(asset, drop_pos)
+                    # 自动让画面跳到放置点
+                    self.centerOn(drop_pos)
+                    scene.update()
+            
+            event.acceptProposedAction()
+            return
+
+        # 处理图片文件
+        if event.mimeData().hasUrls():
+            for url in event.mimeData().urls():
+                path = url.toLocalFile()
+                if path.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp')):
+                    pos = self.mapToScene(event.position().toPoint())
+                    img = VImageItem(path, target_width=DEFAULT_FONT_SIZE*4)
+                    img.setPos(pos)
+                    self.scene().add_item_with_undo(img)
+            event.acceptProposedAction()
+    
+
+   
+
+        
 
 # --- Main Window ---
 
