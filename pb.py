@@ -47,7 +47,7 @@ class ConfigManager:
         """获取默认配置"""
         return {
             'default_background_image': '',  # 默认背景图片路径
-            'background_opacity': 0.3,  # 背景图片透明度 (0.0-1.0)
+            'background_opacity': 1.0,  # 背景图片透明度 (0.0-1.0)
             'background_scale_mode': 'fit',  # 缩放模式: 'fit', 'fill', 'stretch', 'tile'
             'default_font_family': DEFAULT_FONT,  # 默认字体
             'default_font_size': DEFAULT_FONT_SIZE  # 默认字体大小
@@ -1831,6 +1831,11 @@ class BaseElement(QGraphicsItem):
         self._drag_start_pos_scene = QPointF() # 记录拖动开始时的场景位置 
 
     def itemChange(self, change, value):
+        if change == QGraphicsItem.GraphicsItemChange.ItemPositionChange:
+            # 吸附到辅助线（仅顶级元素，避免子元素重复处理）
+            if self.scene() and not self.parentItem() and self.scene().guides:
+                value = self._snap_to_guides(value)
+
         if change == QGraphicsItem.GraphicsItemChange.ItemPositionHasChanged:
             # 先更新连接点位置，再更新连线，确保连线使用最新的连接点坐标
             if hasattr(self, 'connection_point') and self.connection_point:
@@ -1838,9 +1843,46 @@ class BaseElement(QGraphicsItem):
             if self.scene():
                 self.scene().update_connectors(self)
                 self.scene().update_image_text_connectors(self)
-                # 递归更新所有子元素的连线（父级移动时子元素不会触发自己的 itemChange）
                 self._update_children_connectors()
+
         return super().itemChange(change, value)
+
+    def _snap_to_guides(self, new_pos, threshold=None):
+        """将位置吸附到最近的辅助线"""
+        scene = self.scene()
+        if threshold is None:
+            threshold = scene.snap_threshold
+        rect = self.boundingRect()
+        x, y = new_pos.x(), new_pos.y()
+
+        # 元素的关键边：左、右、水平中心 / 上、下、垂直中心
+        x_edges = [x, x + rect.width(), x + rect.width() / 2]
+        y_edges = [y, y + rect.height(), y + rect.height() / 2]
+
+        best_dx, best_dy = threshold + 1, threshold + 1
+
+        for guide in scene.guides:
+            if not guide.isVisible():
+                continue
+            if guide.orientation == Qt.Orientation.Vertical:
+                gx = guide.pos_value
+                for ex in x_edges:
+                    d = abs(ex - gx)
+                    if d < abs(best_dx):
+                        best_dx = gx - ex  # 需要移动的量
+            else:
+                gy = guide.pos_value
+                for ey in y_edges:
+                    d = abs(ey - gy)
+                    if d < abs(best_dy):
+                        best_dy = gy - ey
+
+        if abs(best_dx) <= threshold:
+            x += best_dx
+        if abs(best_dy) <= threshold:
+            y += best_dy
+
+        return QPointF(x, y)
 
     def _update_children_connectors(self):
         """递归更新所有子元素的连线"""
@@ -1853,12 +1895,6 @@ class BaseElement(QGraphicsItem):
                     self.scene().update_image_text_connectors(child)
                 child._update_children_connectors()
 
-    def mousePressEvent(self, event):
-        """记录拖动开始时的位置"""
-        if event.button() == Qt.MouseButton.LeftButton:
-            self._drag_start_pos_scene = self.scenePos()
-        super().mousePressEvent(event)
-
     def mouseReleaseEvent(self, event):
         """记录移动命令到撤销栈"""
         if event.button() == Qt.MouseButton.LeftButton:
@@ -1870,8 +1906,13 @@ class BaseElement(QGraphicsItem):
                 self.scene().undo_stack.push(command)
         
         super().mouseReleaseEvent(event)
+
     
-    def contextMenuEvent(self, event):
+    def _show_context_menu(self, global_pos):
+        """供外部直接调用的右键菜单入口"""
+        self._build_base_context_menu(global_pos)
+
+    def _build_base_context_menu(self, global_pos):
         menu = QMenu()
         
         # 添加隐藏/显示连接点选项
@@ -1882,7 +1923,7 @@ class BaseElement(QGraphicsItem):
                 toggle_connection_point_action = menu.addAction("显示连接点 (Show Connection Point)")
             menu.addSeparator()
         
-        # 复制和删条
+        # 复制和删除
         copy_action = menu.addAction("复制 (Copy)")
         delete_action = menu.addAction("删除 (Delete)")
         save_as_asset_action = menu.addAction("保存组合")
@@ -1916,7 +1957,7 @@ class BaseElement(QGraphicsItem):
             batch_menu.addSeparator()
             clear_connections_action = batch_menu.addAction("清除所有连接")
         
-        action = menu.exec(event.screenPos())
+        action = menu.exec(global_pos)
         
         # 处理隐藏/显示连接点
         if hasattr(self, 'connection_point') and self.connection_point and action == toggle_connection_point_action:
@@ -1965,6 +2006,9 @@ class BaseElement(QGraphicsItem):
                     self.scene().undo_stack.push(command)
         elif action == set_parent_action:
              if self.scene(): self.scene().start_binding_mode(self)
+
+    def contextMenuEvent(self, event):
+        self._build_base_context_menu(event.screenPos())
 
     def paint(self, painter, option, widget):
         # Draw orange dashed selection border
@@ -2048,6 +2092,18 @@ class InlineTextEditor(QTextEdit):
             item_rect = text_item.boundingRect()
             scene_rect = QRectF(text_item.scenePos(), item_rect.size())
             view_rect = view.mapFromScene(scene_rect).boundingRect()
+            
+            # --- 新增补丁：确保宽度和高度适合横向多行输入 ---
+            # 1. 强制最小宽度为 500，方便看清长句子
+            if view_rect.width() < 500:
+                view_rect.setWidth(500)
+            
+            # 2. 动态计算高度：至少显示 3 行文字的空间，或者保留原有的高度（取较大者）
+            line_height = QFontMetrics(font).lineSpacing()
+            min_height_for_lines = line_height * 4  # 预留 4 行的高度
+            if view_rect.height() < min_height_for_lines:
+                view_rect.setHeight(min_height_for_lines)
+            # ----------------------------------------------------
             
             # 调整编辑器大小，给一些额外空间
             margin = 10
@@ -2230,7 +2286,10 @@ class VTextItem(BaseElement):
                 # 使缩小的字在当前列的横向中间
                 final_x += (self.font_size - t.boundingRect().width()) / 2
 
-            t.setParentItem(self) 
+            t.setParentItem(self)
+            t.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, False)
+            t.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, False)
+            t.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
             t.setPos(final_x, final_y)
             generated_items.append(t)
             
@@ -2285,7 +2344,13 @@ class VTextItem(BaseElement):
         if self.connection_point:
             self.connection_point.setVisible(visible)
         
+    def _show_context_menu(self, global_pos):
+        self._build_text_context_menu(global_pos)
+
     def contextMenuEvent(self, event):
+        self._build_text_context_menu(event.screenPos())
+
+    def _build_text_context_menu(self, global_pos):
         menu = QMenu()
         
         # 编辑选项
@@ -2336,7 +2401,7 @@ class VTextItem(BaseElement):
             batch_menu.addSeparator()
             clear_connections_action = batch_menu.addAction("清除所有连接")
         
-        action = menu.exec(event.screenPos())
+        action = menu.exec(global_pos)
         
         if action == action_inline_edit:
             self.start_inline_editing()
@@ -2390,14 +2455,13 @@ class VTextItem(BaseElement):
                 self.scene().remove_image_text_connectors(self)
         
         if action == unbind_action:
-            # 使用撤销命令解除父级绑定
             if self.scene():
                 old_parent = self.parentItem() if isinstance(self.parentItem(), BaseElement) else None
                 if old_parent:
                     command = SetParentCommand(self.scene(), self, None, old_parent)
                     self.scene().undo_stack.push(command)
         elif action == set_parent_action:
-             if self.scene(): self.scene().start_binding_mode(self)
+            if self.scene(): self.scene().start_binding_mode(self)
 
     def change_font_settings(self):
         current_font = QFont(self.font_family, self.font_size)
@@ -2564,11 +2628,180 @@ class VImageItem(BaseElement):
                 print("图片连接点已隐藏")
             else:
                 print("图片连接点已显示")
-    
+
+    def _get_child_texts(self):
+        """获取直接子文字元素列表"""
+        return [c for c in self.childItems() if isinstance(c, VTextItem)]
+
+    def _build_image_context_menu(self, global_pos):
+        menu = QMenu()
+        child_texts = self._get_child_texts()
+
+        # 子文字编辑区
+        if child_texts:
+            text_menu = menu.addMenu(f"编辑子文字 ({len(child_texts)} 个)")
+            for idx, txt in enumerate(child_texts):
+                label = txt.full_text[:12] + ('…' if len(txt.full_text) > 12 else '')
+                t_menu = text_menu.addMenu(f"[{idx+1}] {label}")
+                t_menu.addAction("内联编辑").triggered.connect(lambda _, t=txt: t.start_inline_editing())
+                t_menu.addAction("对话框编辑").triggered.connect(lambda _, t=txt: t.start_dialog_editing())
+                t_menu.addSeparator()
+                t_menu.addAction("设置字体").triggered.connect(lambda _, t=txt: t.change_font_settings())
+                t_menu.addAction("设置颜色").triggered.connect(lambda _, t=txt: t.change_color_settings())
+                t_menu.addAction("每列字数").triggered.connect(lambda _, t=txt: t.change_chars_per_column_settings())
+                t_menu.addAction("列间距").triggered.connect(lambda _, t=txt: t.change_column_spacing_settings())
+                t_menu.addSeparator()
+                t_menu.addAction("解除父级绑定").triggered.connect(
+                    lambda _, t=txt: self.scene().undo_stack.push(
+                        SetParentCommand(self.scene(), t, None, self)
+                    ) if self.scene() else None
+                )
+            menu.addSeparator()
+
+        # 图片自身操作
+        if self.connection_point:
+            lbl = "隐藏连接点" if self.connection_point.isVisible() else "显示连接点"
+            menu.addAction(lbl).triggered.connect(self.toggle_connection_point)
+            menu.addSeparator()
+
+        menu.addAction("复制").triggered.connect(lambda: self.scene().copy_item(self) if self.scene() else None)
+        menu.addAction("删除").triggered.connect(lambda: self.scene().delete_item(self) if self.scene() else None)
+        menu.addAction("保存组合").triggered.connect(lambda: self.scene().save_group_as_asset() if self.scene() else None)
+        menu.addSeparator()
+
+        selected_items = [i for i in self.scene().selectedItems() if isinstance(i, BaseElement)] if self.scene() else []
+        if len(selected_items) >= 2:
+            align_menu = menu.addMenu("对齐")
+            align_menu.addAction("顶部对齐").triggered.connect(lambda: self.scene().align_top(selected_items))
+            align_menu.addAction("右对齐").triggered.connect(lambda: self.scene().align_right(selected_items))
+            align_menu.addAction("水平居中").triggered.connect(lambda: self.scene().align_center_horizontal(selected_items))
+            align_menu.addAction("垂直居中").triggered.connect(lambda: self.scene().align_center_vertical(selected_items))
+            batch_menu = menu.addMenu("批量连接")
+            batch_menu.addAction("智能连接").triggered.connect(lambda: self.scene().auto_connect_selected_items())
+            batch_menu.addAction("清除所有连接").triggered.connect(lambda: self.scene().remove_all_image_text_connections())
+            menu.addSeparator()
+
+        menu.addAction("解除父级绑定").triggered.connect(
+            lambda: self.scene().undo_stack.push(
+                SetParentCommand(self.scene(), self, None, self.parentItem())
+            ) if self.scene() and isinstance(self.parentItem(), BaseElement) else None
+        )
+        menu.addAction("设置父级").triggered.connect(lambda: self.scene().start_binding_mode(self) if self.scene() else None)
+        menu.addSeparator()
+        menu.addAction("图文连接").triggered.connect(lambda: self.scene().start_image_text_binding(self) if self.scene() else None)
+        menu.addAction("断开图文连接").triggered.connect(lambda: self.scene().remove_image_text_connectors(self) if self.scene() else None)
+
+        menu.exec(global_pos)
+
+    def _show_context_menu(self, global_pos):
+        self._build_image_context_menu(global_pos)
+
+    def contextMenuEvent(self, event):
+        self._build_image_context_menu(event.screenPos())
+
     def boundingRect(self):
         return self._rect
 
 # --- Canvas & Scene ---
+
+class GuideItem(QGraphicsItem):
+    """辅助线（水平或垂直），可拖动，双击删除"""
+    RULER_SIZE = 20  # 标尺宽度（像素，视图坐标）
+
+    def __init__(self, orientation, pos_value, scene_rect):
+        super().__init__()
+        # orientation: Qt.Orientation.Horizontal | Vertical
+        self.orientation = orientation
+        self.pos_value = pos_value      # 场景坐标中的位置值
+        self.scene_rect = scene_rect    # 用于计算绘制范围
+        self._dragging = False
+
+        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, False)
+        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, False)
+        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations, False)
+        self.setAcceptHoverEvents(True)
+        self.setZValue(1000)  # 始终在最上层
+
+        self._hovered = False
+        self._update_pos()
+
+    def _update_pos(self):
+        r = self.scene_rect
+        if self.orientation == Qt.Orientation.Horizontal:
+            self.setPos(r.left(), self.pos_value)
+        else:
+            self.setPos(self.pos_value, r.top())
+
+    def boundingRect(self):
+        r = self.scene_rect
+        if self.orientation == Qt.Orientation.Horizontal:
+            return QRectF(0, -4, r.width(), 8)
+        else:
+            return QRectF(-4, 0, 8, r.height())
+
+    def paint(self, painter, option, widget):
+        color = QColor(0, 210, 255, 255) if self._hovered else QColor(0, 180, 255, 220)
+        pen = QPen(color, 2, Qt.PenStyle.SolidLine)
+        painter.setPen(pen)
+        r = self.scene_rect
+        if self.orientation == Qt.Orientation.Horizontal:
+            painter.drawLine(QPointF(0, 0), QPointF(r.width(), 0))
+        else:
+            painter.drawLine(QPointF(0, 0), QPointF(0, r.height()))
+
+    def hoverEnterEvent(self, event):
+        self._hovered = True
+        if self.orientation == Qt.Orientation.Horizontal:
+            self.setCursor(Qt.CursorShape.SizeVerCursor)
+        else:
+            self.setCursor(Qt.CursorShape.SizeHorCursor)
+        self.update()
+        super().hoverEnterEvent(event)
+
+    def hoverLeaveEvent(self, event):
+        self._hovered = False
+        self.update()
+        super().hoverLeaveEvent(event)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._dragging = True
+            self._drag_start = event.scenePos()
+            self._start_value = self.pos_value
+            event.accept()
+        else:
+            super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._dragging:
+            delta = event.scenePos() - self._drag_start
+            if self.orientation == Qt.Orientation.Horizontal:
+                self.pos_value = self._start_value + delta.y()
+            else:
+                self.pos_value = self._start_value + delta.x()
+            self._update_pos()
+            self.update()
+            event.accept()
+        else:
+            super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        self._dragging = False
+        event.accept()
+
+    def mouseDoubleClickEvent(self, event):
+        """双击删除辅助线"""
+        if self.scene():
+            self.scene().remove_guide(self)
+        event.accept()
+
+    def contextMenuEvent(self, event):
+        menu = QMenu()
+        menu.addAction("删除此辅助线").triggered.connect(
+            lambda: self.scene().remove_guide(self) if self.scene() else None
+        )
+        menu.exec(event.screenPos())
+
 
 class LayoutScene(QGraphicsScene):
     def __init__(self, parent=None):
@@ -2593,12 +2826,18 @@ class LayoutScene(QGraphicsScene):
         self.image_text_source = None
         self.selection_order = []  # 记录选中顺序
         self.background_pixmap = None  # 背景图片缓存
+        self.guides = []          # 辅助线列表
+        self.show_guides = True   # 辅助线显示开关
+        self.snap_threshold = 20  # 辅助线吸附距离（场景像素）
         
         # 连接选择改变信号
         self.selectionChanged.connect(self.on_selection_changed_track)
         
         # 加载背景图片
         self.load_background_image()
+
+         # --- 新增：初始化辅助线管理器 ---
+        #self.guides = guides_manager.GuidesManager(self)
 
     def load_background_image(self):
         """加载背景图片"""
@@ -2626,6 +2865,33 @@ class LayoutScene(QGraphicsScene):
             self.background_pixmap = None
             self.update()
             return True
+
+    # --- 辅助线管理 ---
+    def add_guide(self, orientation, pos_value):
+        """添加一条辅助线"""
+        guide = GuideItem(orientation, pos_value, self.sceneRect())
+        self.addItem(guide)
+        self.guides.append(guide)
+        guide.setVisible(self.show_guides)
+        return guide
+
+    def remove_guide(self, guide):
+        """删除指定辅助线"""
+        if guide in self.guides:
+            self.removeItem(guide)
+            self.guides.remove(guide)
+
+    def clear_guides(self):
+        """清除所有辅助线"""
+        for g in self.guides[:]:
+            self.removeItem(g)
+        self.guides.clear()
+
+    def set_guides_visible(self, visible):
+        """显示/隐藏所有辅助线"""
+        self.show_guides = visible
+        for g in self.guides:
+            g.setVisible(visible)
 
     def drawBackground(self, painter, rect):
         # 绘制外部背景
@@ -2730,49 +2996,35 @@ class LayoutScene(QGraphicsScene):
             views[0].setCursor(Qt.CursorShape.CrossCursor)
         print("Select parent for binding...")
 
-    def mousePressEvent(self, event):
-        if self.binding_source:
-            item = self.itemAt(event.scenePos(), QTransform())
-            while item and not isinstance(item, BaseElement):
-                item = item.parentItem()
-            
-            if item and item != self.binding_source:
-                # 获取旧的父级
-                old_parent = self.binding_source.parentItem() if isinstance(self.binding_source.parentItem(), BaseElement) else None
-                
-                # 使用撤销命令设置父子关系
-                command = SetParentCommand(self, self.binding_source, item, old_parent)
-                self.undo_stack.push(command)
-                print(f"Bound {self.binding_source} to {item}")
-            
-            self.binding_source = None
-            if self.views(): self.views()[0].setCursor(Qt.CursorShape.ArrowCursor)
-            return
+    def contextMenuEvent(self, event):
+        """右键菜单：仅处理元素菜单"""
+        item = self.itemAt(event.scenePos(), QTransform())
         
-        if self.image_text_binding_mode:
-            item = self.itemAt(event.scenePos(), QTransform())
-            while item and not isinstance(item, BaseElement):
-                item = item.parentItem()
-            
-            if item and item != self.image_text_source:
-                source_is_image = isinstance(self.image_text_source, VImageItem)
-                target_is_text = isinstance(item, VTextItem)
-                source_is_text = isinstance(self.image_text_source, VTextItem)
-                target_is_image = isinstance(item, VImageItem)
-                
-                if (source_is_image and target_is_text) or (source_is_text and target_is_image):
-                    if source_is_image:
-                        self.add_image_text_connector(self.image_text_source, item)
-                    else:
-                        self.add_image_text_connector(item, self.image_text_source)
-                else:
-                    print("图文连接只能在图片和文字之间建立")
-            
-            self.image_text_binding_mode = False
-            self.image_text_source = None
-            if self.views(): self.views()[0].setCursor(Qt.CursorShape.ArrowCursor)
+        # 如果右键点击的是普通物体（文字/图片），调用 BaseElement 的右键菜单
+        if item and isinstance(item, BaseElement):
+            super().contextMenuEvent(event)
+
+    def mousePressEvent(self, event):
+        """鼠标按下事件：处理元素点击和父子绑定"""
+        if self.binding_source:
+            # itemAt 可能返回字符子项/连接点等，需向上找到真正的 BaseElement
+            raw = self.itemAt(event.scenePos(), QTransform())
+            target_item = raw
+            while target_item is not None and not isinstance(target_item, BaseElement):
+                target_item = target_item.parentItem()
+
+            if target_item and isinstance(target_item, BaseElement) and target_item != self.binding_source:
+                command = SetParentCommand(self, self.binding_source, target_item)
+                self.undo_stack.push(command)
+                print(f"已设置父级: {type(target_item).__name__}")
+            else:
+                print("已取消设置父级")
+
+            self.binding_source = None
+            if self.views():
+                self.views()[0].setCursor(Qt.CursorShape.ArrowCursor)
             return
-            
+
         super().mousePressEvent(event)
 
     def add_connector(self, parent, child):
@@ -3524,7 +3776,8 @@ class LayoutScene(QGraphicsScene):
     
 class LayoutView(QGraphicsView):
     transformChanged = pyqtSignal()  # 变换改变信号
-    
+    RULER_SIZE = 20  # 标尺厚度（像素）
+
     def __init__(self, scene):
         super().__init__(scene)
         self.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -3532,8 +3785,152 @@ class LayoutView(QGraphicsView):
         self.setAcceptDrops(True)
         self._is_panning = False
         self._pan_start = QPoint()
+        self._main_window = None
+        # 辅助线拖拽状态
+        self._guide_dragging = False       # 正在从标尺拖出辅助线
+        self._guide_orientation = None     # 拖出方向
+        self._guide_preview = None         # 预览辅助线对象
+        # 为标尺留出边距
+        self.setViewportMargins(self.RULER_SIZE, self.RULER_SIZE, 0, 0)
+
+    def set_main_window(self, mw):
+        self._main_window = mw
+
+    def _in_h_ruler(self, pos):
+        """鼠标是否在水平标尺区域（顶部）"""
+        return pos.y() < self.RULER_SIZE and pos.x() >= self.RULER_SIZE
+
+    def _in_v_ruler(self, pos):
+        """鼠标是否在垂直标尺区域（左侧）"""
+        return pos.x() < self.RULER_SIZE and pos.y() >= self.RULER_SIZE
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        painter = QPainter(self.viewport())
+        self._draw_rulers(painter)
+        painter.end()
+
+    def _draw_rulers(self, painter):
+        """在 viewport 上绘制标尺"""
+        R = self.RULER_SIZE
+        vp = self.viewport().rect()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+
+        # 背景
+        ruler_color = QColor(50, 50, 55)
+        tick_color = QColor(180, 180, 180)
+        text_color = QColor(200, 200, 200)
+        corner_color = QColor(40, 40, 45)
+
+        # 水平标尺（顶部）
+        painter.fillRect(R, 0, vp.width() - R, R, ruler_color)
+        # 垂直标尺（左侧）
+        painter.fillRect(0, R, R, vp.height() - R, ruler_color)
+        # 左上角
+        painter.fillRect(0, 0, R, R, corner_color)
+
+        painter.setPen(QPen(tick_color, 1))
+        font = QFont("Arial", 7)
+        painter.setFont(font)
+        painter.setPen(text_color)
+
+        # 水平刻度
+        scene_left = self.mapToScene(QPoint(R, 0)).x()
+        scene_right = self.mapToScene(QPoint(vp.width(), 0)).x()
+        step = self._ruler_step()
+        x = math.floor(scene_left / step) * step
+        while x <= scene_right:
+            vx = self.mapFromScene(QPointF(x, 0)).x()
+            painter.setPen(QPen(tick_color, 1))
+            painter.drawLine(vx, R - 6, vx, R)
+            if vx > R + 2:
+                painter.setPen(text_color)
+                painter.drawText(vx + 2, R - 2, str(int(x)))
+            x += step
+
+        # 垂直刻度
+        scene_top = self.mapToScene(QPoint(0, R)).y()
+        scene_bottom = self.mapToScene(QPoint(0, vp.height())).y()
+        y = math.floor(scene_top / step) * step
+        while y <= scene_bottom:
+            vy = self.mapFromScene(QPointF(0, y)).y()
+            painter.setPen(QPen(tick_color, 1))
+            painter.drawLine(R - 6, vy, R, vy)
+            if vy > R + 2:
+                painter.setPen(text_color)
+                painter.drawText(2, vy - 1, str(int(y)))
+            y += step
+
+        # 鼠标位置十字线（在标尺上）
+        cursor_vp = self.viewport().mapFromGlobal(self.cursor().pos())
+        if vp.contains(cursor_vp):
+            painter.setPen(QPen(QColor(0, 180, 255, 200), 1))
+            painter.drawLine(cursor_vp.x(), 0, cursor_vp.x(), R)   # 水平标尺上的竖线
+            painter.drawLine(0, cursor_vp.y(), R, cursor_vp.y())   # 垂直标尺上的横线
+
+    def _ruler_step(self):
+        """根据当前缩放计算合适的标尺刻度间距"""
+        scale = self.transform().m11()
+        for step in [5, 10, 25, 50, 100, 200, 500, 1000]:
+            if step * scale >= 40:
+                return step
+        return 1000
+
+    def contextMenuEvent(self, event):
+        """右键：点到元素交给元素处理，空白处弹画布菜单"""
+        scene_pos = self.mapToScene(event.pos())
+
+        # 遍历该点所有 items，优先找最顶层的 VTextItem，其次 VImageItem
+        items_at = self.scene().items(scene_pos)
+        target = None
+        for it in items_at:
+            if isinstance(it, VTextItem):
+                target = it
+                break
+        if target is None:
+            for it in items_at:
+                if isinstance(it, VImageItem):
+                    target = it
+                    break
+        if target is None:
+            for it in items_at:
+                if isinstance(it, BaseElement):
+                    target = it
+                    break
+
+        if target is not None:
+            # 直接调用目标元素的右键菜单方法，传入全局坐标
+            target._show_context_menu(event.globalPos())
+            event.accept()
+            return
+
+        # 空白处
+        if self._main_window:
+            self._main_window.show_canvas_context_menu(event.pos())
+        event.accept()
 
     def mousePressEvent(self, event):
+        pos = event.pos()
+        if event.button() == Qt.MouseButton.LeftButton:
+            if self._in_h_ruler(pos):
+                # 从水平标尺拖出水平辅助线
+                self._guide_dragging = True
+                self._guide_orientation = Qt.Orientation.Horizontal
+                scene_y = self.mapToScene(pos).y()
+                self._guide_preview = self.scene().add_guide(Qt.Orientation.Horizontal, scene_y)
+                self.setDragMode(QGraphicsView.DragMode.NoDrag)
+                event.accept()
+                return
+            elif self._in_v_ruler(pos):
+                # 从垂直标尺拖出垂直辅助线
+                self._guide_dragging = True
+                self._guide_orientation = Qt.Orientation.Vertical
+                scene_x = self.mapToScene(pos).x()
+                self._guide_preview = self.scene().add_guide(Qt.Orientation.Vertical, scene_x)
+                self.setDragMode(QGraphicsView.DragMode.NoDrag)
+                event.accept()
+                return
+
         if event.button() == Qt.MouseButton.MiddleButton:
             self._is_panning = True
             self._pan_start = event.pos()
@@ -3543,6 +3940,19 @@ class LayoutView(QGraphicsView):
             super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
+        # 辅助线拖拽中
+        if self._guide_dragging and self._guide_preview:
+            scene_pos = self.mapToScene(event.pos())
+            if self._guide_orientation == Qt.Orientation.Horizontal:
+                self._guide_preview.pos_value = scene_pos.y()
+            else:
+                self._guide_preview.pos_value = scene_pos.x()
+            self._guide_preview._update_pos()
+            self._guide_preview.update()
+            self.viewport().update()  # 刷新标尺上的光标线
+            event.accept()
+            return
+
         if self._is_panning:
             delta = event.pos() - self._pan_start
             self._pan_start = event.pos()
@@ -3550,9 +3960,27 @@ class LayoutView(QGraphicsView):
             self.verticalScrollBar().setValue(self.verticalScrollBar().value() - delta.y())
             event.accept()
         else:
+            # 更新标尺光标线
+            self.viewport().update()
+            # 鼠标在标尺区域时改变光标
+            pos = event.pos()
+            if self._in_h_ruler(pos):
+                self.setCursor(Qt.CursorShape.SizeVerCursor)
+            elif self._in_v_ruler(pos):
+                self.setCursor(Qt.CursorShape.SizeHorCursor)
+            else:
+                self.setCursor(Qt.CursorShape.ArrowCursor)
             super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
+        if self._guide_dragging:
+            self._guide_dragging = False
+            self._guide_preview = None
+            self._guide_orientation = None
+            self.setDragMode(QGraphicsView.DragMode.RubberBandDrag)
+            event.accept()
+            return
+
         if event.button() == Qt.MouseButton.MiddleButton:
             self._is_panning = False
             self.setCursor(Qt.CursorShape.ArrowCursor)
@@ -3699,6 +4127,7 @@ class MainWindow(QMainWindow):
         self.scene.setSceneRect(0, 0, 7054, 5021)
         self.scene.selectionChanged.connect(self.on_selection_changed)
         self.view = LayoutView(self.scene)
+        self.view.set_main_window(self)
         
         # 创建停靠面板
         # 右侧：层级 & 属性面板
@@ -3972,6 +4401,21 @@ class MainWindow(QMainWindow):
         scale_tile_action = QAction('平铺', self)
         scale_tile_action.triggered.connect(lambda: self.set_background_scale_mode('tile'))
         scale_mode_menu.addAction(scale_tile_action)
+
+        # 辅助线菜单
+        view_menu.addSeparator()
+        toggle_guides_action = QAction('显示/隐藏辅助线', self)
+        toggle_guides_action.setShortcut('Ctrl+;')
+        toggle_guides_action.triggered.connect(self.toggle_guides)
+        view_menu.addAction(toggle_guides_action)
+
+        clear_guides_action = QAction('清除所有辅助线', self)
+        clear_guides_action.triggered.connect(self.clear_guides)
+        view_menu.addAction(clear_guides_action)
+
+        snap_threshold_action = QAction('设置吸附距离...', self)
+        snap_threshold_action.triggered.connect(self.set_snap_threshold)
+        view_menu.addAction(snap_threshold_action)
         
         # 添加连线菜单
         connector_menu = menubar.addMenu('连线')
@@ -4002,6 +4446,17 @@ class MainWindow(QMainWindow):
         set_width_8_action = QAction('所有连线 - 很粗 (8px)', self)
         set_width_8_action.triggered.connect(lambda: self.set_all_connector_width(8))
         connector_menu.addAction(set_width_8_action)
+
+    def show_canvas_context_menu(self, pos):
+        """画布空白处右键菜单"""
+        menu = QMenu(self)
+        menu.addAction("添加文本", self.add_text)
+        menu.addAction("插入图片", self.add_image)
+        menu.addSeparator()
+        menu.addAction("打开工程\tCtrl+O", self.load_proj)
+        menu.addAction("保存工程\tCtrl+S", self.save_proj)
+        menu.addAction("导出图片\tCtrl+E", self.export_image)
+        menu.exec(self.view.mapToGlobal(pos))
 
     def fit_view(self):
         """初始化时适应视图"""
@@ -4233,12 +4688,13 @@ class MainWindow(QMainWindow):
             original_show_grid = self.scene.show_grid
             original_show_connectors = self.scene.show_connectors
             original_show_connection_points = self.scene.show_connection_points
-            
-            # 导出时的设置：隐藏网格、父子连线和连接点，但保持图文连接线可见
+            original_show_guides = self.scene.show_guides
+
+            # 导出时隐藏网格、父子连线、连接点、辅助线
             self.scene.show_grid = False
-            self.scene.set_connectors_visible(False)  # 隐藏父子关系连线
-            self.scene.set_connection_points_visible(False)  # 隐藏连接点
-            # 图文连接器保持可见，不隐藏
+            self.scene.set_connectors_visible(False)
+            self.scene.set_connection_points_visible(False)
+            self.scene.set_guides_visible(False)
             
             try:
                 # 临时清除选中状态，避免选中框被渲染到图片中
@@ -4262,6 +4718,7 @@ class MainWindow(QMainWindow):
                 self.scene.show_grid = original_show_grid
                 self.scene.set_connectors_visible(original_show_connectors)
                 self.scene.set_connection_points_visible(original_show_connection_points)
+                self.scene.set_guides_visible(original_show_guides)
 
     def save_proj(self):
         path, _ = QFileDialog.getSaveFileName(self, "Save Project", "", "VLayout (*.vlayout)")
@@ -4286,14 +4743,31 @@ class MainWindow(QMainWindow):
     def clear_background_image(self):
         """清除背景图片"""
         reply = QMessageBox.question(
-            self, 
-            "确认", 
+            self,
+            "确认",
             "确定要清除背景图片吗？",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
         )
         if reply == QMessageBox.StandardButton.Yes:
             self.scene.set_background_image('')
             QMessageBox.information(self, "成功", "背景图片已清除")
+
+    def toggle_guides(self):
+        """切换辅助线显示/隐藏"""
+        self.scene.set_guides_visible(not self.scene.show_guides)
+
+    def clear_guides(self):
+        """清除所有辅助线"""
+        self.scene.clear_guides()
+
+    def set_snap_threshold(self):
+        """设置辅助线吸附距离"""
+        val, ok = QInputDialog.getInt(
+            self, "吸附距离", "吸附距离（场景像素）:",
+            self.scene.snap_threshold, 1, 200
+        )
+        if ok:
+            self.scene.snap_threshold = val
     
     def set_background_opacity(self):
         """设置背景透明度"""
