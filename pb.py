@@ -309,6 +309,139 @@ class AssetManager:
             self.assets['images'] = [a for a in self.assets['images'] if a['id'] != asset_id]
             self.save_assets()
 
+class BatchCopyDialog(QDialog):
+    """步长和重复 - 仿 CDR 风格"""
+    SPINBOX_STYLE = """
+        QSpinBox, QDoubleSpinBox {
+            background: white; border: 1px solid #aaa; border-radius: 4px;
+            padding: 3px 22px 3px 6px; min-height: 22px; color: #323130;
+        }
+        QSpinBox::up-button, QDoubleSpinBox::up-button {
+            subcontrol-origin: border; subcontrol-position: top right; width: 18px;
+        }
+        QSpinBox::down-button, QDoubleSpinBox::down-button {
+            subcontrol-origin: border; subcontrol-position: bottom right; width: 18px;
+        }
+        QGroupBox { font-weight: bold; margin-top: 6px; padding-top: 10px; }
+        QGroupBox::title { subcontrol-origin: margin; left: 8px; }
+        QRadioButton { spacing: 5px; }
+        QLabel { color: #323130; }
+    """
+
+    def __init__(self, item_w=0, item_h=0, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("步长和重复")
+        self.setFixedWidth(340)
+        self.setStyleSheet(self.SPINBOX_STYLE)
+        self.item_w = item_w  # 选中元素宽度，用于"按对象尺寸"预设
+        self.item_h = item_h
+
+        root = QVBoxLayout(self)
+        root.setSpacing(8)
+
+        # ── 副本数量 ──────────────────────────────
+        count_group = QGroupBox("副本数量")
+        cg = QFormLayout(count_group)
+        self.spin_count = QSpinBox()
+        self.spin_count.setRange(1, 999)
+        self.spin_count.setValue(3)
+        cg.addRow("份数:", self.spin_count)
+        root.addWidget(count_group)
+
+        # ── 水平偏移 ──────────────────────────────
+        h_group = QGroupBox("水平设置")
+        hg = QVBoxLayout(h_group)
+
+        h_mode_layout = QHBoxLayout()
+        self.rb_h_none   = QRadioButton("不偏移")
+        self.rb_h_offset = QRadioButton("指定偏移")
+        self.rb_h_space  = QRadioButton("按间距")
+        self.rb_h_obj    = QRadioButton("按对象宽度")
+        self.rb_h_offset.setChecked(True)
+        for rb in (self.rb_h_none, self.rb_h_offset, self.rb_h_space, self.rb_h_obj):
+            h_mode_layout.addWidget(rb)
+        hg.addLayout(h_mode_layout)
+
+        h_val_layout = QFormLayout()
+        self.dspin_h_offset = QDoubleSpinBox()
+        self.dspin_h_offset.setRange(-9999, 9999); self.dspin_h_offset.setValue(100); self.dspin_h_offset.setSuffix(" px")
+        self.dspin_h_space  = QDoubleSpinBox()
+        self.dspin_h_space.setRange(-9999, 9999);  self.dspin_h_space.setValue(20);  self.dspin_h_space.setSuffix(" px")
+        h_val_layout.addRow("X 偏移量:", self.dspin_h_offset)
+        h_val_layout.addRow("间距:", self.dspin_h_space)
+        hg.addLayout(h_val_layout)
+        root.addWidget(h_group)
+
+        # ── 垂直偏移 ──────────────────────────────
+        v_group = QGroupBox("垂直设置")
+        vg = QVBoxLayout(v_group)
+
+        v_mode_layout = QHBoxLayout()
+        self.rb_v_none   = QRadioButton("不偏移")
+        self.rb_v_offset = QRadioButton("指定偏移")
+        self.rb_v_space  = QRadioButton("按间距")
+        self.rb_v_obj    = QRadioButton("按对象高度")
+        self.rb_v_none.setChecked(True)
+        for rb in (self.rb_v_none, self.rb_v_offset, self.rb_v_space, self.rb_v_obj):
+            v_mode_layout.addWidget(rb)
+        vg.addLayout(v_mode_layout)
+
+        v_val_layout = QFormLayout()
+        self.dspin_v_offset = QDoubleSpinBox()
+        self.dspin_v_offset.setRange(-9999, 9999); self.dspin_v_offset.setValue(0); self.dspin_v_offset.setSuffix(" px")
+        self.dspin_v_space  = QDoubleSpinBox()
+        self.dspin_v_space.setRange(-9999, 9999);  self.dspin_v_space.setValue(20);  self.dspin_v_space.setSuffix(" px")
+        v_val_layout.addRow("Y 偏移量:", self.dspin_v_offset)
+        v_val_layout.addRow("间距:", self.dspin_v_space)
+        vg.addLayout(v_val_layout)
+        root.addWidget(v_group)
+
+        # ── 按钮 ──────────────────────────────────
+        btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        btns.accepted.connect(self.accept)
+        btns.rejected.connect(self.reject)
+        root.addWidget(btns)
+
+        # 联动
+        for rb in (self.rb_h_none, self.rb_h_offset, self.rb_h_space, self.rb_h_obj):
+            rb.toggled.connect(self._update_controls)
+        for rb in (self.rb_v_none, self.rb_v_offset, self.rb_v_space, self.rb_v_obj):
+            rb.toggled.connect(self._update_controls)
+        self._update_controls()
+
+    def _update_controls(self):
+        h_off = self.rb_h_offset.isChecked()
+        h_sp  = self.rb_h_space.isChecked()
+        self.dspin_h_offset.setEnabled(h_off)
+        self.dspin_h_space.setEnabled(h_sp)
+
+        v_off = self.rb_v_offset.isChecked()
+        v_sp  = self.rb_v_space.isChecked()
+        self.dspin_v_offset.setEnabled(v_off)
+        self.dspin_v_space.setEnabled(v_sp)
+
+    def _h_step(self):
+        if self.rb_h_none.isChecked():   return 0
+        if self.rb_h_offset.isChecked(): return self.dspin_h_offset.value()
+        if self.rb_h_space.isChecked():  return self.item_w + self.dspin_h_space.value()
+        if self.rb_h_obj.isChecked():    return self.item_w
+        return 0
+
+    def _v_step(self):
+        if self.rb_v_none.isChecked():   return 0
+        if self.rb_v_offset.isChecked(): return self.dspin_v_offset.value()
+        if self.rb_v_space.isChecked():  return self.item_h + self.dspin_v_space.value()
+        if self.rb_v_obj.isChecked():    return self.item_h
+        return 0
+
+    def get_params(self):
+        return {
+            'count': self.spin_count.value(),
+            'step_x': self._h_step(),
+            'step_y': self._v_step(),
+        }
+
+
 class AssetLibraryDockWidget(QDockWidget):
     """素材库停靠面板"""
     def __init__(self, asset_manager, main_window):
@@ -3773,7 +3906,41 @@ class LayoutScene(QGraphicsScene):
             self.update_image_text_connectors(item)
         
         print(f"已垂直居中对齐（基准: {ref}）")
-    
+
+    def batch_copy(self, params):
+        """步长和重复复制"""
+        items = [i for i in self.selectedItems() if isinstance(i, BaseElement)]
+        if not items:
+            return
+
+        if params['step_x'] == 0 and params['step_y'] == 0:
+            print("警告：X和Y偏移均为0，副本将叠在原位")
+
+        # 先把当前选中存入剪贴板
+        self.copy_items(items)
+
+        # 计算选中组合左上角作为基准
+        combined = QRectF()
+        for item in items:
+            combined = combined.united(QRectF(item.scenePos(), item.boundingRect().size()))
+
+        step_x = params['step_x']
+        step_y = params['step_y']
+        count  = params['count']
+
+        new_items = []
+        for n in range(1, count + 1):
+            paste_pos = QPointF(combined.left() + step_x * n,
+                                combined.top()  + step_y * n)
+            pasted = self.paste_items(paste_pos)
+            new_items.extend(pasted)
+
+        self.clearSelection()
+        for i in new_items:
+            i.setSelected(True)
+        print(f"步长复制完成：{len(new_items)} 个新元素，step=({step_x}, {step_y})")
+
+
 class LayoutView(QGraphicsView):
     transformChanged = pyqtSignal()  # 变换改变信号
     RULER_SIZE = 20  # 标尺厚度（像素）
@@ -4327,7 +4494,13 @@ class MainWindow(QMainWindow):
         save_group_action.setShortcut('Ctrl+G')
         save_group_action.triggered.connect(self.save_selected_as_group)
         asset_menu.addAction(save_group_action)
-        
+
+        asset_menu.addSeparator()
+        batch_copy_action = QAction('批量复制...', self)
+        batch_copy_action.setShortcut('Ctrl+Shift+D')
+        batch_copy_action.triggered.connect(self.batch_copy)
+        asset_menu.addAction(batch_copy_action)
+
         open_library_action = QAction('切换素材库面板', self)
         open_library_action.setShortcut('F9')
         open_library_action.triggered.connect(self.open_asset_library)
@@ -4564,6 +4737,21 @@ class MainWindow(QMainWindow):
     
     def save_selected_as_group(self):
         self.scene.save_group_as_asset()
+
+    def batch_copy(self):
+        """步长和重复复制"""
+        items = [i for i in self.scene.selectedItems() if isinstance(i, BaseElement)]
+        if not items:
+            QMessageBox.information(self, "步长和重复", "请先选中要复制的元素")
+            return
+        combined = QRectF()
+        for item in items:
+            combined = combined.united(QRectF(item.scenePos(), item.boundingRect().size()))
+        dlg = BatchCopyDialog(item_w=combined.width(), item_h=combined.height(), parent=self)
+        # 用元素宽度作为默认水平偏移
+        dlg.dspin_h_offset.setValue(combined.width() + 20)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            self.scene.batch_copy(dlg.get_params())
     
     def change_selected_font(self, font):
         selected_items = [item for item in self.scene.selectedItems() if isinstance(item, VTextItem)]
