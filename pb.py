@@ -632,13 +632,7 @@ class AssetLibraryDockWidget(QDockWidget):
 
         # 打包为一次撤销
         if sub_commands:
-            macro = MacroCommand(scene, sub_commands)
-            scene.undo_stack.commands = scene.undo_stack.commands[:scene.undo_stack.current_index + 1]
-            scene.undo_stack.commands.append(macro)
-            scene.undo_stack.current_index += 1
-            if len(scene.undo_stack.commands) > scene.undo_stack.max_size:
-                scene.undo_stack.commands.pop(0)
-                scene.undo_stack.current_index -= 1
+            scene.undo_stack.push(MacroCommand(scene, sub_commands))
 
         scene.clearSelection()
         for i in new_items:
@@ -1238,54 +1232,18 @@ class AddItemCommand(UndoCommand):
     def __init__(self, scene, item):
         super().__init__(scene)
         self.item = item
-        self.item_data = None
-        self.parent_item = None
-        self.child_connectors = []  # 保存作为父级的连接器
-        self.parent_connector = None  # 保存作为子级的连接器
-        self.image_text_connectors = []  # 保存图文连接器
-    
+
     def execute(self):
-        self.scene.addItem(self.item)
-        # 确保连接点可见性正确设置
+        """redo 时重新添加元素"""
+        if not self.item.scene():
+            self.scene.addItem(self.item)
         if isinstance(self.item, (VTextItem, VImageItem)):
             self.item.set_connection_points_visible(self.scene.show_connection_points)
-        # 保存状态用于撤销
-        self.save_item_state()
-    
+
     def undo(self):
-        # 删除与此元素相关的所有连接器
         self.scene.remove_all_connectors_for_item(self.item)
-        # 删除与此元素相关的图文连接器
         self.scene.remove_image_text_connectors(self.item)
-        # 删除元素本身
         self.scene.removeItem(self.item)
-    
-    def save_item_state(self):
-        """保存元素状态"""
-        # 保存父子关系
-        if self.item.parentItem() and isinstance(self.item.parentItem(), BaseElement):
-            self.parent_item = self.item.parentItem()
-        
-        # 保存基本属性
-        if isinstance(self.item, VTextItem):
-            self.item_data = {
-                'type': 'VTextItem',
-                'text': self.item.full_text,
-                'font_size': self.item.font_size,
-                'box_height': self.item.box_height,
-                'font_family': self.item.font_family,
-                'text_color': self.item.text_color.name(),
-                'pos': (self.item.x(), self.item.y()),
-                'scene_pos': (self.item.scenePos().x(), self.item.scenePos().y())
-            }
-        elif isinstance(self.item, VImageItem):
-            self.item_data = {
-                'type': 'VImageItem',
-                'path': self.item.file_path,
-                'width': self.item.target_width,
-                'pos': (self.item.x(), self.item.y()),
-                'scene_pos': (self.item.scenePos().x(), self.item.scenePos().y())
-            }
 
 class DeleteItemCommand(UndoCommand):
     """删除元素命令"""
@@ -1452,20 +1410,23 @@ class MoveItemCommand(UndoCommand):
         self.item = item
         self.old_scene_pos = old_pos
         self.new_scene_pos = new_pos
-        self._first_execute = True
 
     def execute(self):
-        if self._first_execute:
-            # 第一次：元素已在新位置，只更新连线
-            self._first_execute = False
+        """redo：移到新位置"""
+        if self.item.parentItem():
+            self.item.setPos(self.item.parentItem().mapFromScene(self.new_scene_pos))
         else:
-            # redo 时才真正移动
-            if self.item.parentItem():
-                local_pos = self.item.parentItem().mapFromScene(self.new_scene_pos)
-                self.item.setPos(local_pos)
-            else:
-                self.item.setPos(self.new_scene_pos)
+            self.item.setPos(self.new_scene_pos)
+        self._update_connectors()
 
+    def undo(self):
+        if self.item.parentItem():
+            self.item.setPos(self.item.parentItem().mapFromScene(self.old_scene_pos))
+        else:
+            self.item.setPos(self.old_scene_pos)
+        self._update_connectors()
+
+    def _update_connectors(self):
         if self.item.scene():
             self.item.scene().update_connectors(self.item)
             self.item.scene().update_image_text_connectors(self.item)
@@ -1490,6 +1451,29 @@ class MoveItemCommand(UndoCommand):
                 if isinstance(child, BaseElement):
                     self.item.scene().update_connectors(child)
                     self.item.scene().update_image_text_connectors(child)
+
+class EditTextCommand(UndoCommand):
+    """文字编辑命令"""
+    def __init__(self, scene, item, old_text, new_text):
+        super().__init__(scene)
+        self.item = item
+        self.old_text = old_text
+        self.new_text = new_text
+
+    def execute(self):
+        self.item.full_text = self.new_text
+        self.item.rebuild()
+        if self.item.scene():
+            self.item.scene().update_connectors(self.item)
+            self.item.scene().update_image_text_connectors(self.item)
+
+    def undo(self):
+        self.item.full_text = self.old_text
+        self.item.rebuild()
+        if self.item.scene():
+            self.item.scene().update_connectors(self.item)
+            self.item.scene().update_image_text_connectors(self.item)
+
 
 class AddConnectorCommand(UndoCommand):
     """添加图文/通用连接线命令"""
@@ -1531,52 +1515,42 @@ class UndoStack:
         self.commands = []
         self.current_index = -1
         self.max_size = max_size
-    
+
     def push(self, command):
-        """添加新命令"""
-        # 删除当前位置之后的所有命令
+        """记录已执行的命令（不再调用 execute）"""
         self.commands = self.commands[:self.current_index + 1]
-        
-        # 添加新命令
         self.commands.append(command)
         self.current_index += 1
-        
-        # 限制栈大小
         if len(self.commands) > self.max_size:
             self.commands.pop(0)
             self.current_index -= 1
-        
-        # 执行命令
+
+    def push_and_execute(self, command):
+        """执行命令并记录（用于需要立即执行的场景）"""
         command.execute()
-    
+        self.push(command)
+
     def undo(self):
-        """撤销"""
         if self.can_undo():
-            command = self.commands[self.current_index]
-            command.undo()
+            self.commands[self.current_index].undo()
             self.current_index -= 1
             return True
         return False
-    
+
     def redo(self):
-        """重做"""
         if self.can_redo():
             self.current_index += 1
-            command = self.commands[self.current_index]
-            command.execute()
+            self.commands[self.current_index].execute()
             return True
         return False
-    
+
     def can_undo(self):
-        """是否可以撤销"""
         return self.current_index >= 0
-    
+
     def can_redo(self):
-        """是否可以重做"""
         return self.current_index < len(self.commands) - 1
-    
+
     def clear(self):
-        """清空栈"""
         self.commands.clear()
         self.current_index = -1
 
@@ -2202,6 +2176,7 @@ class BaseElement(QGraphicsItem):
                 old_parent = self.parentItem() if isinstance(self.parentItem(), BaseElement) else None
                 if old_parent:
                     command = SetParentCommand(self.scene(), self, None, old_parent)
+                    command.execute()
                     self.scene().undo_stack.push(command)
         elif action == set_parent_action:
              if self.scene(): self.scene().start_binding_mode(self)
@@ -2658,6 +2633,7 @@ class VTextItem(BaseElement):
                 old_parent = self.parentItem() if isinstance(self.parentItem(), BaseElement) else None
                 if old_parent:
                     command = SetParentCommand(self.scene(), self, None, old_parent)
+                    command.execute()
                     self.scene().undo_stack.push(command)
         elif action == set_parent_action:
             if self.scene(): self.scene().start_binding_mode(self)
@@ -2738,40 +2714,35 @@ class VTextItem(BaseElement):
     
     def finish_inline_editing(self, new_text):
         """完成内联编辑"""
-        print(f"完成内联编辑: {new_text[:20]}...")
         self.is_editing = False
-        if new_text != self.full_text:
-            self.full_text = new_text
-            self.rebuild()
-            if self.scene():
-                self.scene().update_connectors(self)
-                self.scene().update_image_text_connectors(self)
-    
+        if new_text != self.full_text and self.scene():
+            old_text = self.full_text
+            cmd = EditTextCommand(self.scene(), self, old_text, new_text)
+            cmd.execute()
+            self.scene().undo_stack.push(cmd)
+
     def cancel_inline_editing(self):
         """取消内联编辑"""
-        print("取消内联编辑")
         self.is_editing = False
         if self.inline_editor:
             self.inline_editor.hide()
-    
+
     def reset_editing_state(self):
         """强制重置编辑状态"""
-        print("强制重置编辑状态")
         self.is_editing = False
         if self.inline_editor:
             self.inline_editor.hide()
             self.inline_editor.text_item = None
             self.inline_editor.original_text = ""
-    
+
     def start_dialog_editing(self):
-        """开始对话框编辑（原来的方式）"""
+        """开始对话框编辑"""
         text, ok = QInputDialog.getMultiLineText(None, "编辑文本", "请输入排版内容", self.full_text)
-        if ok:
-            self.full_text = text
-            self.rebuild()
-            if self.scene():
-                self.scene().update_connectors(self)
-                self.scene().update_image_text_connectors(self)
+        if ok and text != self.full_text and self.scene():
+            old_text = self.full_text
+            cmd = EditTextCommand(self.scene(), self, old_text, text)
+            cmd.execute()
+            self.scene().undo_stack.push(cmd)
     
     def keyPressEvent(self, event):
         """处理键盘事件"""
@@ -2785,25 +2756,55 @@ class VTextItem(BaseElement):
     def boundingRect(self):
         return self._rect
 
-class ResizeHandle(QGraphicsRectItem):
-    """图片缩放控制点"""
-    SIZE = 8  # 控制点大小
+class ResizeHandle(QGraphicsItem):
+    """图片缩放控制点：角点=方形(等比)，边中点=圆形(单向)"""
+    SIZE = 10
+
+    TOOLTIPS = {
+        'tl': '等比缩放', 'tr': '等比缩放',
+        'bl': '等比缩放', 'br': '等比缩放',
+        'tc': '上下拉伸', 'bc': '上下拉伸',
+        'ml': '左右拉伸', 'mr': '左右拉伸',
+    }
 
     def __init__(self, parent_image, role):
-        s = self.SIZE
-        super().__init__(-s/2, -s/2, s, s, parent_image)
+        super().__init__(parent_image)
         self.parent_image = parent_image
-        self.role = role  # 'tl','tc','tr','ml','mr','bl','bc','br'
-        self.setBrush(QBrush(QColor(255, 255, 255)))
-        self.setPen(QPen(QColor(0, 120, 215), 1.5))
+        self.role = role
+        self.is_corner = role in ('tl', 'tr', 'bl', 'br')
+        self._hovered = False
         self.setZValue(200)
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, False)
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, False)
         self.setAcceptHoverEvents(True)
+        self.setToolTip(self.TOOLTIPS.get(role, ''))
         self._dragging = False
-        self._drag_start = QPointF()
         self._orig_rect = QRectF()
         self._update_cursor()
+
+    def boundingRect(self):
+        s = self._screen_size()
+        return QRectF(-s/2, -s/2, s, s)
+
+    def _screen_size(self):
+        """计算在当前视图缩放下，屏幕上固定10px对应的场景尺寸"""
+        if self.scene() and self.scene().views():
+            scale = self.scene().views()[0].transform().m11()
+            if scale > 0:
+                return self.SIZE / scale
+        return self.SIZE
+
+    def paint(self, painter, option, widget):
+        s = self._screen_size()
+        fill = QColor(0, 120, 215) if self._hovered else QColor(255, 255, 255)
+        border = QColor(0, 90, 180)
+        pen = QPen(border, 1.5 / (self.scene().views()[0].transform().m11() if self.scene() and self.scene().views() else 1))
+        painter.setPen(pen)
+        painter.setBrush(QBrush(fill))
+        if self.is_corner:
+            painter.drawRect(QRectF(-s/2, -s/2, s, s))
+        else:
+            painter.drawEllipse(QRectF(-s/2, -s/2, s, s))
 
     def _update_cursor(self):
         cursors = {
@@ -2815,28 +2816,42 @@ class ResizeHandle(QGraphicsRectItem):
         self.setCursor(cursors.get(self.role, Qt.CursorShape.SizeAllCursor))
 
     def hoverEnterEvent(self, event):
-        self.setBrush(QBrush(QColor(0, 120, 215)))
+        self._hovered = True
+        self.update()
         super().hoverEnterEvent(event)
 
     def hoverLeaveEvent(self, event):
-        self.setBrush(QBrush(QColor(255, 255, 255)))
+        self._hovered = False
+        self.update()
         super().hoverLeaveEvent(event)
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
             self._dragging = True
-            self._drag_start = event.scenePos()
             self._orig_rect = QRectF(self.parent_image._rect)
             self._orig_pos = self.parent_image.scenePos()
+            self._orig_pos_local = self.parent_image.pos()
+            # 记录按下时在图片本地坐标系的位置
+            self._drag_start_local = self.parent_image.mapFromScene(event.scenePos())
             event.accept()
 
     def mouseMoveEvent(self, event):
         if not self._dragging:
             return
-        delta = event.scenePos() - self._drag_start
         img = self.parent_image
+        # 用原始场景坐标系计算 delta，避免 img 位置变化导致坐标系偏移
+        scene_start = self._drag_start_local  # 这是原始本地坐标
+        # 将当前鼠标场景坐标转到原始位置的本地坐标系
+        # 用 orig_pos 重建变换，避免 img 已经移动的影响
+        cur_scene = event.scenePos()
+        # 直接用场景坐标差值（不依赖 img 当前位置）
+        orig_scene = self._orig_pos + scene_start  # 近似：orig_scene_pos + local_offset
+        dx = cur_scene.x() - orig_scene.x()
+        dy = cur_scene.y() - orig_scene.y()
+
         r = QRectF(self._orig_rect)
-        dx, dy = delta.x(), delta.y()
+
+        r = QRectF(self._orig_rect)
 
         # 根据角色调整矩形
         if 'r' in self.role:
@@ -2947,20 +2962,22 @@ class VImageItem(BaseElement):
                                 Qt.TransformationMode.SmoothTransformation)
             self.p_item.setPixmap(scaled)
 
+        # 位置补偿：拖左/上边时，元素需要移动以保持右/下边不动
+        # new_rect 的 topLeft 是相对于原始 (0,0) 的偏移
+        offset_local = new_rect.topLeft()
+        if abs(offset_local.x()) > 0.1 or abs(offset_local.y()) > 0.1:
+            # 将本地偏移转换为场景偏移
+            if self.parentItem():
+                offset_scene = self.parentItem().mapToScene(self.pos() + offset_local) - self.parentItem().mapToScene(self.pos())
+                new_scene_pos = orig_scene_pos + offset_scene
+                self.setPos(self.parentItem().mapFromScene(new_scene_pos))
+            else:
+                self.setPos(orig_scene_pos + offset_local)
+
         self.prepareGeometryChange()
         self._rect = QRectF(0, 0, w, h)
         self.target_width = w
         self._update_handles()
-
-        # 补偿位置（左/上边拖动时需要移动元素本身）
-        offset = new_rect.topLeft()
-        if abs(offset.x()) > 0.1 or abs(offset.y()) > 0.1:
-            if self.parentItem():
-                scene_tl = self.parentItem().mapToScene(
-                    self.pos() + offset)
-                self.setPos(self.parentItem().mapFromScene(scene_tl))
-            else:
-                self.setPos(orig_scene_pos + offset)
 
         if self.connection_point:
             self.connection_point.update_position()
@@ -2969,7 +2986,11 @@ class VImageItem(BaseElement):
 
     def itemChange(self, change, value):
         if change == QGraphicsItem.GraphicsItemChange.ItemSelectedHasChanged:
-            self._show_handles(bool(value))
+            # 只有在调整大小模式下才随选中状态显示控制点
+            if self.scene() and getattr(self.scene(), 'resize_mode', False):
+                self._show_handles(bool(value))
+            else:
+                self._show_handles(False)
         return super().itemChange(change, value)
     
     def create_connection_point(self):
@@ -3020,9 +3041,10 @@ class VImageItem(BaseElement):
                 t_menu.addAction("列间距").triggered.connect(lambda _, t=txt: t.change_column_spacing_settings())
                 t_menu.addSeparator()
                 t_menu.addAction("解除父级绑定").triggered.connect(
-                    lambda _, t=txt: self.scene().undo_stack.push(
-                        SetParentCommand(self.scene(), t, None, self)
-                    ) if self.scene() else None
+                    lambda _, t=txt: (
+                        lambda cmd: (cmd.execute(), self.scene().undo_stack.push(cmd))
+                    )(SetParentCommand(self.scene(), t, None, self))
+                    if self.scene() else None
                 )
             menu.addSeparator()
 
@@ -3054,9 +3076,10 @@ class VImageItem(BaseElement):
             menu.addSeparator()
 
         menu.addAction("解除父级绑定").triggered.connect(
-            lambda: self.scene().undo_stack.push(
-                SetParentCommand(self.scene(), self, None, self.parentItem())
-            ) if self.scene() and isinstance(self.parentItem(), BaseElement) else None
+            lambda: (
+                lambda cmd: (cmd.execute(), self.scene().undo_stack.push(cmd))
+            )(SetParentCommand(self.scene(), self, None, self.parentItem()))
+            if self.scene() and isinstance(self.parentItem(), BaseElement) else None
         )
         menu.addAction("设置父级").triggered.connect(lambda: self.scene().start_binding_mode(self) if self.scene() else None)
         menu.addSeparator()
@@ -3210,6 +3233,7 @@ class LayoutScene(QGraphicsScene):
         self.guides = []          # 辅助线列表
         self.show_guides = True   # 辅助线显示开关
         self.snap_threshold = 20  # 辅助线吸附距离（场景像素）
+        self.resize_mode = False  # 图片调整大小模式
         
         # 连接选择改变信号
         self.selectionChanged.connect(self.on_selection_changed_track)
@@ -3273,6 +3297,13 @@ class LayoutScene(QGraphicsScene):
         self.show_guides = visible
         for g in self.guides:
             g.setVisible(visible)
+
+    def set_resize_mode(self, enabled):
+        """切换图片调整大小模式"""
+        self.resize_mode = enabled
+        for item in self.items():
+            if isinstance(item, VImageItem):
+                item._show_handles(enabled and item.isSelected())
 
     def drawBackground(self, painter, rect):
         # 绘制外部背景
@@ -3396,6 +3427,7 @@ class LayoutScene(QGraphicsScene):
 
             if target_item and isinstance(target_item, BaseElement) and target_item != self.binding_source:
                 command = SetParentCommand(self, self.binding_source, target_item)
+                command.execute()
                 self.undo_stack.push(command)
                 print(f"已设置父级: {type(target_item).__name__}")
             else:
@@ -3583,7 +3615,7 @@ class LayoutScene(QGraphicsScene):
                     return
 
         conn = VImageTextConnector(image_item, text_item, self.config_manager.get('default_line_width', DEFAULT_LINE_WIDTH))
-        self.undo_stack.push(AddConnectorCommand(self, conn))
+        self.undo_stack.push_and_execute(AddConnectorCommand(self, conn))
         print("图文连接已创建")
     
     def add_image_image_connector(self, image1, image2):
@@ -3601,7 +3633,7 @@ class LayoutScene(QGraphicsScene):
                     return
 
         conn = VGenericConnector(image1, image2, "image-image", self.config_manager.get('default_line_width', DEFAULT_LINE_WIDTH))
-        self.undo_stack.push(AddConnectorCommand(self, conn))
+        self.undo_stack.push_and_execute(AddConnectorCommand(self, conn))
         print("图片-图片连接已创建")
 
     def add_text_text_connector(self, text1, text2):
@@ -3619,7 +3651,7 @@ class LayoutScene(QGraphicsScene):
                     return
 
         conn = VGenericConnector(text1, text2, "text-text", self.config_manager.get('default_line_width', DEFAULT_LINE_WIDTH))
-        self.undo_stack.push(AddConnectorCommand(self, conn))
+        self.undo_stack.push_and_execute(AddConnectorCommand(self, conn))
         print("文字-文字连接已创建")
     
     def remove_image_text_connectors(self, item):
@@ -3989,14 +4021,7 @@ class LayoutScene(QGraphicsScene):
 
         # 整体打包为一次撤销
         if sub_commands:
-            macro = MacroCommand(self, sub_commands)
-            # 直接加入栈，不再 execute（已经执行过了）
-            self.undo_stack.commands = self.undo_stack.commands[:self.undo_stack.current_index + 1]
-            self.undo_stack.commands.append(macro)
-            self.undo_stack.current_index += 1
-            if len(self.undo_stack.commands) > self.undo_stack.max_size:
-                self.undo_stack.commands.pop(0)
-                self.undo_stack.current_index -= 1
+            self.undo_stack.push(MacroCommand(self, sub_commands))
 
         return new_items
 
@@ -4025,9 +4050,13 @@ class LayoutScene(QGraphicsScene):
         return items[0] if items else None
     
     def delete_item(self, item):
-        self.undo_stack.push(DeleteItemCommand(self, item))
-    
+        self.undo_stack.push_and_execute(DeleteItemCommand(self, item))
+
     def add_item_with_undo(self, item):
+        """添加元素到场景并记录撤销"""
+        self.addItem(item)
+        if isinstance(item, (VTextItem, VImageItem)):
+            item.set_connection_points_visible(self.show_connection_points)
         self.undo_stack.push(AddItemCommand(self, item))
     
     def undo(self):
@@ -4619,10 +4648,16 @@ class MainWindow(QMainWindow):
         btn_add_img = QAction("插入图片", self)
         btn_add_img.triggered.connect(self.add_image)
         main_toolbar.addAction(btn_add_img)
-        
+
         btn_edit_text = QAction("编辑文字", self)
         btn_edit_text.triggered.connect(self.edit_selected_text)
         main_toolbar.addAction(btn_edit_text)
+
+        self.btn_resize = QAction("调整图片大小", self)
+        self.btn_resize.setCheckable(True)
+        self.btn_resize.setToolTip("开启后选中图片会显示缩放控制点")
+        self.btn_resize.toggled.connect(self.toggle_resize_mode)
+        main_toolbar.addAction(self.btn_resize)
         
         main_toolbar.addSeparator()
         
@@ -4917,10 +4952,17 @@ class MainWindow(QMainWindow):
         """编辑选中的文字"""
         selected_items = [item for item in self.scene.selectedItems() if isinstance(item, VTextItem)]
         if selected_items:
-            # 编辑第一个选中的文字项目
             selected_items[0].start_inline_editing()
         else:
             print("请先选择一个文字元素")
+
+    def toggle_resize_mode(self, enabled):
+        """切换图片调整大小模式"""
+        self.scene.set_resize_mode(enabled)
+        if enabled:
+            self.status_bar.showMessage("调整大小模式：选中图片后拖拽控制点缩放  方块=等比  圆点=单向  再次点击按钮退出")
+        else:
+            self.status_bar.showMessage("已退出调整大小模式")
     
     def undo(self):
         self.scene.undo()
@@ -5077,7 +5119,20 @@ class MainWindow(QMainWindow):
             self.column_spacing_spin.blockSignals(False)
     
     def on_selection_changed(self):
-        if hasattr(self, 'font_combo'): self.update_font_controls()
+        if hasattr(self, 'font_combo'):
+            self.update_font_controls()
+        # 状态栏提示
+        selected = self.scene.selectedItems()
+        images = [i for i in selected if isinstance(i, VImageItem)]
+        texts = [i for i in selected if isinstance(i, VTextItem)]
+        if images and not texts:
+            self.status_bar.showMessage("拖拽蓝色控制点可缩放图片  角点=等比缩放  边中点=单向拉伸  右键=更多选项")
+        elif texts and not images:
+            self.status_bar.showMessage("双击文字可编辑  右键=字体/颜色/列间距等设置")
+        elif images and texts:
+            self.status_bar.showMessage("右键=批量连接/对齐  Ctrl+G=保存组合")
+        else:
+            self.status_bar.showMessage("")
     
     def set_line_width(self):
         """设置连线粗细，同时更新默认值和所有现有连线"""

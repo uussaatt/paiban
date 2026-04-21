@@ -130,6 +130,279 @@
       "image_text_connections": [],
       "item_count": 2,
       "created_time": "Sat Apr 18 07:24:41 2026"
+    },
+    {
+      "id": 1,
+      "name": "组合_3文字",
+      "items": [
+        {
+          "type": "VTextItem",
+          "text": "庆旦",
+          "font_size": 32,
+          "box_height": 400,
+          "font_family": "SimSun",
+          "text_color": "#000000",
+          "chars_per_column": 15,
+          "column_spacing": 10,
+          "auto_height": true,
+          "manual_line_break": true,
+          "connection_point_visible": true,
+          "scene_pos": [
+            4599.367740429396,
+            2372.0710138292047
+          ],
+          "local_pos": [
+            47.0114263127698,
+            397.35909067172406
+          ],
+          "parent_index": 1
+        },
+        {
+          "type": "VImageItem",
+          "path": "assets\\group_1_1_group_0_1_img_0_Snipaste_2026-04-09_15-20-36.png",
+          "original_path": "assets\\group_0_1_img_0_Snipaste_2026-04-09_15-20-36.png",
+          "width": 96,
+          "connection_point_visible": true,
+          "scene_pos": [
+            4552.356314116626,
+            1974.7119231574807
+          ],
+          "local_pos": [
+            4552.356314116626,
+            1974.7119231574807
+          ],
+          "parent_index": -1
+        },
+        {
+          "type": "VTextItem",
+          "text": "庆旦",
+          "font_size": 84,
+          "box_height": 400,
+          "font_family": "SimSun",
+          "text_color": "#000000",
+          "chars_per_column": 15,
+          "column_spacing": 10,
+          "auto_height": true,
+          "manual_line_break": true,
+          "connection_point_visible": true,
+          "scene_pos": [
+            4543.516715119132,
+            2089.626710124899
+          ],
+          "local_pos": [
+            -8.83959899749425,
+            114.91478696741842
+          ],
+          "parent_index": 1
+        },
+        {
+          "type": "VTextItem",
+          "text": "庆旦",
+          "font_size": 32,
+          "box_height": 400,
+          "font_family": "SimSun",
+          "text_color": "#000000",
+          "chars_per_column": 15,
+          "column_spacing": 10,
+          "auto_height": true,
+          "manual_line_break": true,
+          "connection_point_visible": true,
+          "scene_pos": [
+            4473.479276851881,
+            2138.204857536185
+          ],
+          "local_pos": [
+            -78.87703726474501,
+            163.49293437870438
+          ],
+          "parent_index": 1
+        }
+      ],
+      "image_text_connections": [],
+      "item_count": 4,
+      "created_time": "Sun Apr 19 16:18:41 2026"
+    },
+    {
+      "id": 2,
+      "name": "组合_3文字_1图片",
+      "items": [
+        {
+          "type": "VTextItem",
+          "text": "庆旦",
+          "font_size": 32,
+          "box_height": 400,
+          "font_family": "SimSun",
+          "text_color": "#000000",
+          "chars_per_column": 15,
+          "column_spacing": 10,
+          "auto_height": true,
+          "manual_line_break": true,
+          "connection_point_visible": true,
+          "scene_pos": [
+            2823.3409371993894,
+            2396.355865311971
+          ],
+          "local_pos": [
+            -78.87703726474501,
+            163.49293437870438
+          ],
+          "parent_index": 3
+        },
+        {
+          "type": "VTextItem",
+          "text": "庆旦",
+          "font_size": 32,
+          "box_height": 400,
+          "font_family": "SimSun",
+          "text_color": "#000000",
+          "chars_per_column": 15,
+          "column_spacing": 10,
+          "auto_height": true,
+          "manual_line_break": true,
+          "connection_point_visible": true,
+          "scene_pos": [
+            2949.229400776904,
+            2630.2220216049905
+          ],
+          "local_pos": [
+            47.0114263127698,
+            397.35909067172406
+          ],
+          "parent_index": 3
+        },
+        {
+          "type": "VTextItem",
+          "text": "庆旦",
+          "font_size": 84,
+          "box_height": 400,
+          "font_family": "SimSun",
+          "text_color": "#000000",
+          "chars_per_column": 15,
+          "column_spacing": 10,
+          "auto_height": true,
+          "manual_line_break": true,
+          "connection_point_visible": true,
+          "scene_pos": [
+            2892.2179744641344,
+            2347.777717900685
+          ],
+          "local_pos": [
+            -10.0,
+            114.91478696741842
+          ],
+          "parent_index": 3
+        },
+        {
+          "type": "VImageItem",
+          "path": "assets\\group_2_3_group_1_1_group_0_1_img_0_Snipaste_2026-04-09_15-20-36.png",
+          "original_path": "assets\\group_1_1_group_0_1_img_0_Snipaste_2026-04-09_15-20-36.png",
+          "width": 96,
+          "connection_point_visible": true,
+          "scene_pos": [
+            2902.2179744641344,
+            2232.8629309332664
+          ],
+          "local_pos": [
+            2902.2179744641344,
+            2232.8629309332664
+          ],
+          "parent_index": -1
+        }
+      ],
+      "image_text_connections": [],
+      "item_count": 4,
+      "created_time": "Mon Apr 20 20:16:55 2026"
+    },
+    {
+      "id": 3,
+      "name": "3w1z",
+      "items": [
+        {
+          "type": "VTextItem",
+          "text": "庆旦",
+          "font_size": 84,
+          "box_height": 400,
+          "font_family": "SimSun",
+          "text_color": "#000000",
+          "chars_per_column": 15,
+          "column_spacing": 10,
+          "auto_height": true,
+          "manual_line_break": true,
+          "connection_point_visible": true,
+          "scene_pos": [
+            5962.3349229684145,
+            595.6604713059221
+          ],
+          "local_pos": [
+            -10.0,
+            114.91478696741842
+          ],
+          "parent_index": 1
+        },
+        {
+          "type": "VImageItem",
+          "path": "assets\\group_3_1_group_2_3_group_1_1_group_0_1_img_0_Snipaste_2026-04-09_15-20-36.png",
+          "original_path": "assets\\group_2_3_group_1_1_group_0_1_img_0_Snipaste_2026-04-09_15-20-36.png",
+          "width": 96,
+          "connection_point_visible": true,
+          "scene_pos": [
+            5972.3349229684145,
+            480.7456843385037
+          ],
+          "local_pos": [
+            5972.3349229684145,
+            480.7456843385037
+          ],
+          "parent_index": -1
+        },
+        {
+          "type": "VTextItem",
+          "text": "庆旦",
+          "font_size": 32,
+          "box_height": 400,
+          "font_family": "SimSun",
+          "text_color": "#000000",
+          "chars_per_column": 15,
+          "column_spacing": 10,
+          "auto_height": true,
+          "manual_line_break": true,
+          "connection_point_visible": false,
+          "scene_pos": [
+            5893.4578857036695,
+            644.238618717208
+          ],
+          "local_pos": [
+            -78.87703726474501,
+            163.49293437870438
+          ],
+          "parent_index": 1
+        },
+        {
+          "type": "VTextItem",
+          "text": "庆旦",
+          "font_size": 32,
+          "box_height": 400,
+          "font_family": "SimSun",
+          "text_color": "#000000",
+          "chars_per_column": 15,
+          "column_spacing": 10,
+          "auto_height": true,
+          "manual_line_break": true,
+          "connection_point_visible": false,
+          "scene_pos": [
+            6019.346349281184,
+            878.1047750102277
+          ],
+          "local_pos": [
+            47.0114263127698,
+            397.35909067172406
+          ],
+          "parent_index": 1
+        }
+      ],
+      "image_text_connections": [],
+      "item_count": 4,
+      "created_time": "Tue Apr 21 15:35:33 2026"
     }
   ]
 }
