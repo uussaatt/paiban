@@ -573,17 +573,18 @@ class AssetLibraryDockWidget(QDockWidget):
             center = self.main_window.view.mapToScene(self.main_window.view.viewport().rect().center())
             self._place_group_at(asset, center)
     def _place_group_at(self, asset, base_pos):
-        """在鼠标指定位置精准放置组合素材"""
-        if not asset or not asset['items']: return
-        
-        # 1. 计算原始组合保存时的边界，用于计算偏移
+        """在鼠标指定位置精准放置组合素材（整体作为一次撤销）"""
+        if not asset or not asset['items']:
+            return
+
         min_x = min(d['scene_pos'][0] for d in asset['items'])
         min_y = min(d['scene_pos'][1] for d in asset['items'])
-        
+
         new_items = []
         scene = self.main_window.scene
+        sub_commands = []
 
-        # 2. 创建元素并对齐到鼠标落点 (base_pos)
+        # 创建元素
         for idx, item_data in enumerate(asset['items']):
             new_item = None
             if item_data['type'] == 'VTextItem':
@@ -591,28 +592,28 @@ class AssetLibraryDockWidget(QDockWidget):
                 new_item.font_family = item_data['font_family']
                 new_item.text_color = QColor(item_data['text_color'])
                 for k in ('chars_per_column', 'column_spacing', 'auto_height', 'manual_line_break'):
-                    if k in item_data: setattr(new_item, k, item_data[k])
-                new_item.rebuild() 
+                    if k in item_data:
+                        setattr(new_item, k, item_data[k])
+                new_item.rebuild()
             elif item_data['type'] == 'VImageItem':
                 if os.path.exists(item_data['path']):
                     new_item = VImageItem(item_data['path'], item_data['width'])
 
             if new_item:
-                # 关键：根据鼠标位置计算每个元素的最终位置
                 off_x = item_data['scene_pos'][0] - min_x
                 off_y = item_data['scene_pos'][1] - min_y
                 new_item.setPos(base_pos.x() + off_x, base_pos.y() + off_y)
-                new_item.setZValue(10) # 确保显示在最前
-                
-                # 添加到场景
-                command = AddItemCommand(scene, new_item)
-                scene.undo_stack.push(command)
-                
+                new_item.setZValue(10)
+
+                cmd = AddItemCommand(scene, new_item)
+                cmd.execute()
+                sub_commands.append(cmd)
+
                 if 'connection_point_visible' in item_data and new_item.connection_point:
                     new_item.connection_point.setVisible(item_data['connection_point_visible'])
                 new_items.append(new_item)
 
-        # 3. 恢复连接关系
+        # 恢复父子关系
         for idx, item_data in enumerate(asset['items']):
             if item_data['parent_index'] != -1 and item_data['parent_index'] < len(new_items):
                 child, parent = new_items[idx], new_items[item_data['parent_index']]
@@ -621,13 +622,27 @@ class AssetLibraryDockWidget(QDockWidget):
                 child.setPos(parent.mapFromScene(sp))
                 scene.add_connector(parent, child)
 
+        # 恢复图文连接
         for img_idx, text_idx in asset['image_text_connections']:
             if img_idx < len(new_items) and text_idx < len(new_items):
-                scene.add_image_text_connector(new_items[img_idx], new_items[text_idx])
+                conn_cmd = scene._make_connector_command(new_items[img_idx], new_items[text_idx])
+                if conn_cmd:
+                    conn_cmd.execute()
+                    sub_commands.append(conn_cmd)
 
-        # 选中新元素并刷新
+        # 打包为一次撤销
+        if sub_commands:
+            macro = MacroCommand(scene, sub_commands)
+            scene.undo_stack.commands = scene.undo_stack.commands[:scene.undo_stack.current_index + 1]
+            scene.undo_stack.commands.append(macro)
+            scene.undo_stack.current_index += 1
+            if len(scene.undo_stack.commands) > scene.undo_stack.max_size:
+                scene.undo_stack.commands.pop(0)
+                scene.undo_stack.current_index -= 1
+
         scene.clearSelection()
-        for i in new_items: i.setSelected(True)
+        for i in new_items:
+            i.setSelected(True)
         scene.update()
     
     def delete_text_asset(self):
