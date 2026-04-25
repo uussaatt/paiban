@@ -1054,6 +1054,7 @@ class ProjectData:
                 data['path'] = item.file_path
                 data['width'] = item.target_width
                 data['opacity'] = item.image_opacity
+                data['locked'] = item.locked
                 if item.connection_point:
                     data['connection_point_visible'] = item.connection_point.isVisible()
             
@@ -1147,6 +1148,8 @@ class ProjectData:
                 item = VImageItem(d['path'], d['width'])
                 if 'opacity' in d:
                     item.set_opacity(d['opacity'])
+                if d.get('locked', False):
+                    item.set_locked(True)
             
             if item:
                 # 使用场景坐标（如果有的话）
@@ -2898,6 +2901,7 @@ class VImageItem(BaseElement):
         self._handles = []
         self._orig_ratio = 1.0
         self.image_opacity = 1.0  # 图片透明度 0.0-1.0
+        self.locked = False       # 锁定状态
 
         pix = QPixmap(path)
         if not pix.isNull():
@@ -2922,6 +2926,17 @@ class VImageItem(BaseElement):
         self.image_opacity = max(0.0, min(1.0, opacity))
         if hasattr(self, 'p_item'):
             self.p_item.setOpacity(self.image_opacity)
+        self.update()
+
+    def set_locked(self, locked):
+        """锁定/解锁图片"""
+        self.locked = locked
+        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, not locked)
+        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, not locked)
+        self._show_handles(False)
+        # 锁定时显示半透明遮罩提示
+        if hasattr(self, 'p_item'):
+            self.p_item.setOpacity(self.image_opacity * (0.6 if locked else 1.0))
         self.update()
 
     def _create_handles(self):
@@ -3047,6 +3062,11 @@ class VImageItem(BaseElement):
                     if self.scene() else None
                 )
             menu.addSeparator()
+
+        # 锁定/解锁
+        lock_lbl = "🔓 解锁图片" if self.locked else "🔒 锁定图片"
+        menu.addAction(lock_lbl).triggered.connect(lambda: self.set_locked(not self.locked))
+        menu.addSeparator()
 
         # 图片自身操作
         if self.connection_point:
@@ -4344,8 +4364,9 @@ class LayoutView(QGraphicsView):
         """右键：点到元素交给元素处理，空白处弹画布菜单"""
         scene_pos = self.mapToScene(event.pos())
 
-        # 遍历该点所有 items，优先找最顶层的 VTextItem，其次 VImageItem
-        items_at = self.scene().items(scene_pos)
+        # 遍历该点所有 items（包括锁定的不可选元素）
+        items_at = self.scene().items(scene_pos, Qt.ItemSelectionMode.IntersectsItemShape,
+                                      Qt.SortOrder.DescendingOrder, self.transform())
         target = None
         for it in items_at:
             if isinstance(it, VTextItem):
@@ -4363,12 +4384,10 @@ class LayoutView(QGraphicsView):
                     break
 
         if target is not None:
-            # 直接调用目标元素的右键菜单方法，传入全局坐标
             target._show_context_menu(event.globalPos())
             event.accept()
             return
 
-        # 空白处
         if self._main_window:
             self._main_window.show_canvas_context_menu(event.pos())
         event.accept()
