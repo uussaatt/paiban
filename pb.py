@@ -52,6 +52,8 @@ class ConfigManager:
             'default_font_family': DEFAULT_FONT,
             'default_font_size': DEFAULT_FONT_SIZE,
             'default_line_width': DEFAULT_LINE_WIDTH,  # 默认连线粗细
+            'favorite_fonts': ['SimSun', 'Microsoft YaHei', '黑体', '楷体', 'Arial'],
+            'favorite_sizes': [10, 12, 14, 16, 18, 20, 24, 30, 36, 48, 72],
         }
     
     def save_config(self):
@@ -441,6 +443,289 @@ class BatchCopyDialog(QDialog):
             'step_x': self._h_step(),
             'step_y': self._v_step(),
         }
+
+
+class FontPickerDialog(QDialog):
+    """自定义字体选择器 - 支持常用字体/字号快捷按钮，可由用户自定义"""
+
+    def __init__(self, current_font: QFont, config_manager, parent=None):
+        super().__init__(parent)
+        self.config_manager = config_manager
+        self.setWindowTitle("字体选择器")
+        self.setMinimumSize(820, 560)
+        self.resize(900, 600)
+
+        self._selected_family = current_font.family()
+        self._selected_size = current_font.pointSize() if current_font.pointSize() > 0 else 24
+
+        self._all_families = QFontDatabase.families()
+        self._build_ui()
+        self._refresh_fav_fonts()
+        self._refresh_fav_sizes()
+        self._update_preview()
+
+    # ── UI 构建 ──────────────────────────────────────────────────────────────
+    def _build_ui(self):
+        root = QHBoxLayout(self)
+        root.setSpacing(12)
+        root.setContentsMargins(12, 12, 12, 12)
+
+        # ── 左侧：字体列表 ────────────────────────────────────────────────
+        left = QVBoxLayout()
+        left.setSpacing(6)
+
+        search_row = QHBoxLayout()
+        self.search_edit = QLineEdit()
+        self.search_edit.setPlaceholderText("搜索字体...")
+        self.search_edit.textChanged.connect(self._filter_fonts)
+        search_row.addWidget(self.search_edit)
+        left.addLayout(search_row)
+
+        self.font_list = QListWidget()
+        self.font_list.setMinimumWidth(280)
+        for f in self._all_families:
+            item = QListWidgetItem(f)
+            item.setFont(QFont(f, 13))
+            self.font_list.addItem(item)
+        self.font_list.currentTextChanged.connect(self._on_family_changed)
+        # 定位到当前字体
+        matches = self.font_list.findItems(self._selected_family, Qt.MatchFlag.MatchExactly)
+        if matches:
+            self.font_list.setCurrentItem(matches[0])
+            self.font_list.scrollToItem(matches[0])
+        left.addWidget(self.font_list)
+
+        root.addLayout(left, 3)
+
+        # ── 右侧 ──────────────────────────────────────────────────────────
+        right = QVBoxLayout()
+        right.setSpacing(8)
+
+        # 常用字体 + 常用字号 并排
+        fav_row = QHBoxLayout()
+        fav_row.setSpacing(12)
+
+        # 常用字体区
+        fav_font_box = QGroupBox("常用字体")
+        fav_font_layout = QVBoxLayout(fav_font_box)
+        fav_font_layout.setSpacing(4)
+        self.fav_font_grid = QGridLayout()
+        self.fav_font_grid.setSpacing(4)
+        fav_font_layout.addLayout(self.fav_font_grid)
+        btn_edit_fav_fonts = QPushButton("编辑常用字体...")
+        btn_edit_fav_fonts.setFixedHeight(24)
+        btn_edit_fav_fonts.clicked.connect(self._edit_fav_fonts)
+        fav_font_layout.addWidget(btn_edit_fav_fonts)
+        fav_row.addWidget(fav_font_box, 3)
+
+        # 常用字号区
+        fav_size_box = QGroupBox("常用字号")
+        fav_size_layout = QVBoxLayout(fav_size_box)
+        fav_size_layout.setSpacing(4)
+
+        # 顶部：spinbox + 滑块
+        size_ctrl_row = QHBoxLayout()
+        self.size_spin = QSpinBox()
+        self.size_spin.setRange(4, 400)
+        self.size_spin.setValue(self._selected_size)
+        self.size_spin.setSuffix(" px")
+        self.size_spin.setFixedWidth(80)
+        self.size_spin.valueChanged.connect(self._on_size_spin_changed)
+        size_ctrl_row.addWidget(self.size_spin)
+        fav_size_layout.addLayout(size_ctrl_row)
+
+        self.size_slider = QSlider(Qt.Orientation.Horizontal)
+        self.size_slider.setRange(4, 200)
+        self.size_slider.setValue(min(self._selected_size, 200))
+        self.size_slider.valueChanged.connect(self._on_slider_changed)
+        fav_size_layout.addWidget(self.size_slider)
+
+        self.fav_size_grid = QGridLayout()
+        self.fav_size_grid.setSpacing(4)
+        fav_size_layout.addLayout(self.fav_size_grid)
+
+        btn_edit_fav_sizes = QPushButton("编辑常用字号...")
+        btn_edit_fav_sizes.setFixedHeight(24)
+        btn_edit_fav_sizes.clicked.connect(self._edit_fav_sizes)
+        fav_size_layout.addWidget(btn_edit_fav_sizes)
+        fav_row.addWidget(fav_size_box, 2)
+
+        right.addLayout(fav_row)
+
+        # 预览区
+        preview_box = QGroupBox("示例")
+        preview_layout = QVBoxLayout(preview_box)
+        self.preview_label = QLabel("YyZz 你好世界 AaBbCc")
+        self.preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.preview_label.setMinimumHeight(100)
+        self.preview_label.setWordWrap(True)
+        preview_layout.addWidget(self.preview_label)
+
+        self.custom_preview_edit = QLineEdit()
+        self.custom_preview_edit.setPlaceholderText("自定义文本...")
+        self.custom_preview_edit.textChanged.connect(self._update_preview)
+        preview_layout.addWidget(self.custom_preview_edit)
+        right.addWidget(preview_box, 1)
+
+        # 确定/取消
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        btn_ok = QPushButton("确定")
+        btn_ok.setDefault(True)
+        btn_ok.setFixedWidth(80)
+        btn_ok.clicked.connect(self.accept)
+        btn_cancel = QPushButton("取消")
+        btn_cancel.setFixedWidth(80)
+        btn_cancel.clicked.connect(self.reject)
+        btn_row.addWidget(btn_ok)
+        btn_row.addWidget(btn_cancel)
+        right.addLayout(btn_row)
+
+        root.addLayout(right, 4)
+
+    # ── 刷新常用字体按钮 ─────────────────────────────────────────────────────
+    def _refresh_fav_fonts(self):
+        # 清空旧按钮
+        while self.fav_font_grid.count():
+            w = self.fav_font_grid.takeAt(0).widget()
+            if w:
+                w.deleteLater()
+
+        default_favs = ['SimSun', 'Microsoft YaHei', '黑体', '楷体', 'Arial']
+        favs = self.config_manager.get('favorite_fonts', default_favs) if self.config_manager else default_favs
+        cols = 2
+        for idx, fname in enumerate(favs):
+            btn = QPushButton(fname)
+            btn.setFont(QFont(fname, 10))
+            btn.setFixedHeight(28)
+            btn.setToolTip(fname)
+            btn.clicked.connect(lambda _, f=fname: self._select_family(f))
+            self.fav_font_grid.addWidget(btn, idx // cols, idx % cols)
+
+    # ── 刷新常用字号按钮 ─────────────────────────────────────────────────────
+    def _refresh_fav_sizes(self):
+        while self.fav_size_grid.count():
+            w = self.fav_size_grid.takeAt(0).widget()
+            if w:
+                w.deleteLater()
+
+        default_sizes = [10, 12, 14, 16, 18, 20, 24, 30, 36, 48, 72]
+        sizes = self.config_manager.get('favorite_sizes', default_sizes) if self.config_manager else default_sizes
+        cols = 4
+        for idx, sz in enumerate(sizes):
+            btn = QPushButton(str(sz))
+            btn.setFixedSize(44, 28)
+            btn.clicked.connect(lambda _, s=sz: self._select_size(s))
+            self.fav_size_grid.addWidget(btn, idx // cols, idx % cols)
+
+    # ── 事件处理 ─────────────────────────────────────────────────────────────
+    def _filter_fonts(self, text):
+        for i in range(self.font_list.count()):
+            item = self.font_list.item(i)
+            item.setHidden(text.lower() not in item.text().lower())
+
+    def _on_family_changed(self, family):
+        if family:
+            self._selected_family = family
+            self._update_preview()
+
+    def _select_family(self, family):
+        self._selected_family = family
+        matches = self.font_list.findItems(family, Qt.MatchFlag.MatchExactly)
+        if matches:
+            self.font_list.setCurrentItem(matches[0])
+            self.font_list.scrollToItem(matches[0])
+        self._update_preview()
+
+    def _on_size_spin_changed(self, val):
+        self._selected_size = val
+        self.size_slider.blockSignals(True)
+        self.size_slider.setValue(min(val, 200))
+        self.size_slider.blockSignals(False)
+        self._update_preview()
+
+    def _on_slider_changed(self, val):
+        self._selected_size = val
+        self.size_spin.blockSignals(True)
+        self.size_spin.setValue(val)
+        self.size_spin.blockSignals(False)
+        self._update_preview()
+
+    def _select_size(self, size):
+        self._selected_size = size
+        self.size_spin.blockSignals(True)
+        self.size_spin.setValue(size)
+        self.size_spin.blockSignals(False)
+        self.size_slider.blockSignals(True)
+        self.size_slider.setValue(min(size, 200))
+        self.size_slider.blockSignals(False)
+        self._update_preview()
+
+    def _update_preview(self):
+        if not hasattr(self, 'preview_label'):
+            return
+        text = self.custom_preview_edit.text() if hasattr(self, 'custom_preview_edit') and self.custom_preview_edit.text() else "YyZz 你好世界 AaBbCc"
+        preview_size = min(self._selected_size, 72)
+        font = QFont(self._selected_family, preview_size)
+        self.preview_label.setFont(font)
+        self.preview_label.setText(text)
+
+    # ── 编辑常用字体 ──────────────────────────────────────────────────────────
+    def _edit_fav_fonts(self):
+        if not self.config_manager:
+            QMessageBox.information(self, "提示", "当前上下文无法编辑常用字体")
+            return
+        favs = self.config_manager.get('favorite_fonts', [])
+        current_text = '\n'.join(favs)
+        text, ok = QInputDialog.getMultiLineText(
+            self, "编辑常用字体",
+            "每行一个字体名称（可从左侧列表复制字体名）:",
+            current_text
+        )
+        if ok:
+            new_favs = [f.strip() for f in text.splitlines() if f.strip()]
+            self.config_manager.set('favorite_fonts', new_favs)
+            self._refresh_fav_fonts()
+
+    # ── 编辑常用字号 ──────────────────────────────────────────────────────────
+    def _edit_fav_sizes(self):
+        if not self.config_manager:
+            QMessageBox.information(self, "提示", "当前上下文无法编辑常用字号")
+            return
+        sizes = self.config_manager.get('favorite_sizes', [])
+        current_text = ' '.join(str(s) for s in sizes)
+        text, ok = QInputDialog.getText(
+            self, "编辑常用字号",
+            "用空格或逗号分隔字号（如: 10 12 14 18 24 36 72）:",
+            text=current_text
+        )
+        if ok:
+            import re
+            parts = re.split(r'[\s,]+', text.strip())
+            new_sizes = []
+            for p in parts:
+                try:
+                    v = int(p)
+                    if 4 <= v <= 400:
+                        new_sizes.append(v)
+                except ValueError:
+                    pass
+            new_sizes = sorted(set(new_sizes))
+            if new_sizes:
+                self.config_manager.set('favorite_sizes', new_sizes)
+                self._refresh_fav_sizes()
+
+    # ── 结果获取 ──────────────────────────────────────────────────────────────
+    def selected_font(self) -> QFont:
+        return QFont(self._selected_family, self._selected_size)
+
+    @staticmethod
+    def get_font(current_font: QFont, config_manager, parent=None, title="选择字体"):
+        """替代 QFontDialog.getFont 的静态方法，返回 (font, ok)"""
+        dlg = FontPickerDialog(current_font, config_manager, parent)
+        dlg.setWindowTitle(title)
+        ok = dlg.exec() == QDialog.DialogCode.Accepted
+        return dlg.selected_font(), ok
 
 
 class AssetLibraryDockWidget(QDockWidget):
@@ -2643,7 +2928,8 @@ class VTextItem(BaseElement):
 
     def change_font_settings(self):
         current_font = QFont(self.font_family, self.font_size)
-        font, ok = QFontDialog.getFont(current_font, None, "选择字体")
+        cfg = self.scene().config_manager if self.scene() else None
+        font, ok = FontPickerDialog.get_font(current_font, cfg, None, "选择字体")
         if ok:
             self.font_family = font.family()
             self.font_size = font.pointSize()
@@ -5071,8 +5357,8 @@ class MainWindow(QMainWindow):
     
     def _open_font_dialog(self):
         """弹出字体选择对话框"""
-        current = QFont(self.font_combo.currentText())
-        font, ok = QFontDialog.getFont(current, self, "选择字体")
+        current = QFont(self.font_combo.currentText(), self.font_size_spin.value())
+        font, ok = FontPickerDialog.get_font(current, self.scene.config_manager, self, "选择字体")
         if ok:
             self.font_combo.setCurrentText(font.family())
             self.change_selected_font(font)
@@ -5314,7 +5600,7 @@ class MainWindow(QMainWindow):
         current_font = QFont(current_font_family, current_font_size)
         
         # 打开字体选择对话框
-        font, ok = QFontDialog.getFont(current_font, self, "设置默认字体")
+        font, ok = FontPickerDialog.get_font(current_font, self.scene.config_manager, self, "设置默认字体")
         if ok:
             # 保存到配置
             self.scene.config_manager.set('default_font_family', font.family())
