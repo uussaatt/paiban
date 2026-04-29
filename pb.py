@@ -3529,6 +3529,137 @@ class GuideItem(QGraphicsItem):
         menu.exec(event.screenPos())
 
 
+class NavigatorWidget(QWidget):
+    """导航器：显示画布全景缩略图，支持点击跳转和拖动视口框"""
+
+    NAV_W = 220
+    NAV_H = 160
+
+    def __init__(self, view, scene, parent=None):
+        super().__init__(parent)
+        self.view = view
+        self.scene = scene
+        self.setFixedSize(self.NAV_W, self.NAV_H)
+        self.setWindowTitle("导航器")
+
+        self._thumb = QPixmap()
+        self._scale = 1.0
+        self._scene_rect = QRectF()
+        self._dragging = False
+        self._drag_offset = QPointF()
+        self._dirty = True
+
+        self._refresh_timer = QTimer(self)
+        self._refresh_timer.setInterval(400)
+        self._refresh_timer.timeout.connect(self._do_refresh)
+        self._refresh_timer.start()
+
+        self.view.transformChanged.connect(self.update)
+        self.view.horizontalScrollBar().valueChanged.connect(self.update)
+        self.view.verticalScrollBar().valueChanged.connect(self.update)
+        self.scene.changed.connect(self._mark_dirty)
+
+        self.setMouseTracking(True)
+        self.setCursor(Qt.CursorShape.CrossCursor)
+
+    def _mark_dirty(self):
+        self._dirty = True
+
+    def _do_refresh(self):
+        if not self._dirty:
+            return
+        self._dirty = False
+        self._render_thumb()
+        self.update()
+
+    def _render_thumb(self):
+        sr = self.scene.sceneRect()
+        if sr.isEmpty():
+            return
+        self._scene_rect = sr
+        sx = self.NAV_W / sr.width()
+        sy = self.NAV_H / sr.height()
+        self._scale = min(sx, sy)
+        tw = max(1, int(sr.width()  * self._scale))
+        th = max(1, int(sr.height() * self._scale))
+        self._thumb = QPixmap(tw, th)
+        self._thumb.fill(Qt.GlobalColor.white)
+        painter = QPainter(self._thumb)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        # 用标志位通知 drawBackground 跳过网格/辅助线，避免修改场景状态
+        self.scene._rendering_thumb = True
+        self.scene.render(painter, QRectF(0, 0, tw, th), sr)
+        self.scene._rendering_thumb = False
+        painter.end()
+
+    def _thumb_offset(self):
+        return QPoint((self.NAV_W - self._thumb.width())  // 2,
+                      (self.NAV_H - self._thumb.height()) // 2)
+
+    def _viewport_rect_in_nav(self, ox, oy):
+        if self._scale <= 0 or self._scene_rect.isEmpty():
+            return QRectF()
+        vp = self.view.viewport().rect()
+        tl = self.view.mapToScene(vp.topLeft())
+        br = self.view.mapToScene(vp.bottomRight())
+        sr = self._scene_rect
+        x = ox + (tl.x() - sr.left()) * self._scale
+        y = oy + (tl.y() - sr.top())  * self._scale
+        w = (br.x() - tl.x()) * self._scale
+        h = (br.y() - tl.y()) * self._scale
+        return QRectF(x, y, w, h).normalized()
+
+    def _nav_to_scene(self, nav_pos):
+        if self._scale <= 0 or self._scene_rect.isEmpty():
+            return QPointF()
+        off = self._thumb_offset()
+        sx = self._scene_rect.left() + (nav_pos.x() - off.x()) / self._scale
+        sy = self._scene_rect.top()  + (nav_pos.y() - off.y()) / self._scale
+        return QPointF(sx, sy)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.fillRect(self.rect(), QColor(40, 40, 44))
+        if self._thumb.isNull():
+            self._render_thumb()
+        if not self._thumb.isNull():
+            off = self._thumb_offset()
+            painter.drawPixmap(off.x(), off.y(), self._thumb)
+            vp_rect = self._viewport_rect_in_nav(off.x(), off.y())
+            if vp_rect.isValid():
+                painter.setPen(QPen(QColor(0, 180, 255), 2))
+                painter.setBrush(QBrush(QColor(0, 180, 255, 40)))
+                painter.drawRect(vp_rect)
+        painter.setPen(QPen(QColor(80, 80, 85), 1))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawRect(self.rect().adjusted(0, 0, -1, -1))
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            off = self._thumb_offset()
+            vp_rect = self._viewport_rect_in_nav(off.x(), off.y())
+            if vp_rect.contains(QPointF(event.pos())):
+                self._dragging = True
+                self._drag_offset = QPointF(event.pos()) - vp_rect.center()
+            else:
+                self.view.centerOn(self._nav_to_scene(event.pos()))
+            self.update()
+
+    def mouseMoveEvent(self, event):
+        if self._dragging:
+            target = QPointF(event.pos()) - self._drag_offset
+            self.view.centerOn(self._nav_to_scene(target))
+            self.update()
+
+    def mouseReleaseEvent(self, event):
+        self._dragging = False
+
+    def force_refresh(self):
+        self._dirty = True
+        self._do_refresh()
+
+
 class LayoutScene(QGraphicsScene):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -3640,8 +3771,11 @@ class LayoutScene(QGraphicsScene):
         # 绘制画布背景色
         painter.fillRect(canvas_rect, QColor(250, 250, 245))
         
+        # 缩略图渲染时跳过网格和辅助线
+        is_thumb = getattr(self, '_rendering_thumb', False)
+
         # 绘制网格（在背景图片之前）
-        if self.show_grid:
+        if self.show_grid and not is_thumb:
             painter.setPen(self.grid_pen)
             c_left = int(canvas_rect.left())
             c_right = int(canvas_rect.right())
@@ -4592,9 +4726,15 @@ class LayoutView(QGraphicsView):
 
     def paintEvent(self, event):
         super().paintEvent(event)
+        # 标尺画在 viewport 上
         painter = QPainter(self.viewport())
         self._draw_rulers(painter)
         painter.end()
+
+    def scrollContentsBy(self, dx, dy):
+        """平移时强制重绘整个 viewport 以清除标尺残影"""
+        super().scrollContentsBy(dx, dy)
+        self.viewport().update()
 
     def _draw_rulers(self, painter):
         """在 viewport 上绘制标尺"""
@@ -4651,8 +4791,8 @@ class LayoutView(QGraphicsView):
         cursor_vp = self.viewport().mapFromGlobal(self.cursor().pos())
         if vp.contains(cursor_vp):
             painter.setPen(QPen(QColor(0, 180, 255, 200), 1))
-            painter.drawLine(cursor_vp.x(), 0, cursor_vp.x(), R)   # 水平标尺上的竖线
-            painter.drawLine(0, cursor_vp.y(), R, cursor_vp.y())   # 垂直标尺上的横线
+            painter.drawLine(cursor_vp.x(), 0, cursor_vp.x(), R)
+            painter.drawLine(0, cursor_vp.y(), R, cursor_vp.y())
 
     def _ruler_step(self):
         """根据当前缩放计算合适的标尺刻度间距"""
@@ -4734,7 +4874,7 @@ class LayoutView(QGraphicsView):
                 self._guide_preview.pos_value = scene_pos.x()
             self._guide_preview._update_pos()
             self._guide_preview.update()
-            self.viewport().update()  # 刷新标尺上的光标线
+            self.update()  # 刷新标尺上的光标线
             event.accept()
             return
 
@@ -4746,7 +4886,7 @@ class LayoutView(QGraphicsView):
             event.accept()
         else:
             # 更新标尺光标线
-            self.viewport().update()
+            self.update()
             # 鼠标在标尺区域时改变光标
             pos = event.pos()
             if self._in_h_ruler(pos):
@@ -4948,6 +5088,19 @@ class MainWindow(QMainWindow):
         
         # 连接视图变换信号来更新缩放显示
         self.view.transformChanged.connect(self.update_zoom_display)
+
+        # 导航器停靠面板
+        nav_dock = QDockWidget("导航器", self)
+        nav_dock.setAllowedAreas(Qt.DockWidgetArea.LeftDockWidgetArea |
+                                  Qt.DockWidgetArea.RightDockWidgetArea |
+                                  Qt.DockWidgetArea.BottomDockWidgetArea)
+        nav_dock.setFeatures(QDockWidget.DockWidgetFeature.DockWidgetMovable |
+                              QDockWidget.DockWidgetFeature.DockWidgetClosable |
+                              QDockWidget.DockWidgetFeature.DockWidgetFloatable)
+        self.navigator = NavigatorWidget(self.view, self.scene)
+        nav_dock.setWidget(self.navigator)
+        nav_dock.setFixedHeight(self.navigator.NAV_H + 30)
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, nav_dock)
         
         self.timer = QTimer()
         self.timer.timeout.connect(self.refresh_ui)
