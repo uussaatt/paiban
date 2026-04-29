@@ -235,8 +235,14 @@ class AssetManager:
         # 保存图文连接关系
         image_text_connections = []
         for conn in scene.image_text_connectors:
-            img_idx = item_to_index.get(conn.image_item, -1)
-            text_idx = item_to_index.get(conn.text_item, -1)
+            if hasattr(conn, 'image_item') and hasattr(conn, 'text_item'):
+                img_idx = item_to_index.get(conn.image_item, -1)
+                text_idx = item_to_index.get(conn.text_item, -1)
+            elif hasattr(conn, 'item1') and hasattr(conn, 'item2'):
+                img_idx = item_to_index.get(conn.item1, -1)
+                text_idx = item_to_index.get(conn.item2, -1)
+            else:
+                continue
             if img_idx != -1 and text_idx != -1:
                 image_text_connections.append((img_idx, text_idx))
         
@@ -734,54 +740,122 @@ class AssetLibraryDockWidget(QDockWidget):
         super().__init__("素材库", main_window)
         self.asset_manager = asset_manager
         self.main_window = main_window
-        
-        # 设置停靠属性
         self.setAllowedAreas(Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea)
-        self.setFeatures(QDockWidget.DockWidgetFeature.DockWidgetMovable | 
+        self.setFeatures(QDockWidget.DockWidgetFeature.DockWidgetMovable |
                         QDockWidget.DockWidgetFeature.DockWidgetClosable |
                         QDockWidget.DockWidgetFeature.DockWidgetFloatable)
-        
-        # 创建主要内容widget
         self.content_widget = QWidget()
         self.setWidget(self.content_widget)
-        
         self.setup_ui()
         self.refresh_assets()
-    
-    def setup_ui(self):
-        """设置界面"""
-        layout = QVBoxLayout(self.content_widget)
-        layout.setContentsMargins(5, 5, 5, 5)
-        layout.setSpacing(5)
 
-        # 组合素材列表
+    def setup_ui(self):
+        layout = QVBoxLayout(self.content_widget)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(4)
+        self.tabs = QTabWidget()
+        layout.addWidget(self.tabs)
+
+        # 标签页1：组合素材
+        group_tab = QWidget()
+        gl = QVBoxLayout(group_tab)
+        gl.setContentsMargins(4, 4, 4, 4)
         self.group_list = QListWidget()
         self.group_list.setDragEnabled(True)
         self.group_list.setDragDropMode(QAbstractItemView.DragDropMode.DragOnly)
         self.group_list.setDefaultDropAction(Qt.DropAction.CopyAction)
         self.group_list.itemDoubleClicked.connect(self.rename_group_asset)
         self.group_list.startDrag = self._start_group_drag
-        layout.addWidget(self.group_list)
+        gl.addWidget(self.group_list)
+        gb = QHBoxLayout()
+        btn_use = QPushButton("使用"); btn_use.setMaximumHeight(25)
+        btn_use.clicked.connect(self.use_group_asset_selected); gb.addWidget(btn_use)
+        btn_ren = QPushButton("重命名"); btn_ren.setMaximumHeight(25)
+        btn_ren.clicked.connect(self.rename_group_asset_selected); gb.addWidget(btn_ren)
+        btn_del = QPushButton("删除"); btn_del.setMaximumHeight(25)
+        btn_del.setProperty("class", "danger")
+        btn_del.clicked.connect(self.delete_group_asset); gb.addWidget(btn_del)
+        gl.addLayout(gb)
+        self.tabs.addTab(group_tab, "组合素材")
 
-        # 操作按钮
-        group_btn_layout = QHBoxLayout()
-        btn_use_group = QPushButton("使用")
-        btn_use_group.setMaximumHeight(25)
-        btn_use_group.clicked.connect(self.use_group_asset_selected)
-        group_btn_layout.addWidget(btn_use_group)
-        btn_rename_group = QPushButton("重命名")
-        btn_rename_group.setMaximumHeight(25)
-        btn_rename_group.clicked.connect(self.rename_group_asset_selected)
-        group_btn_layout.addWidget(btn_rename_group)
-        btn_delete_group = QPushButton("删除")
-        btn_delete_group.setMaximumHeight(25)
-        btn_delete_group.setProperty("class", "danger")
-        btn_delete_group.clicked.connect(self.delete_group_asset)
-        group_btn_layout.addWidget(btn_delete_group)
-        layout.addLayout(group_btn_layout)
+        # 标签页2：常用文字
+        text_tab = QWidget()
+        tl = QVBoxLayout(text_tab)
+        tl.setContentsMargins(4, 4, 4, 4)
+        tl.addWidget(QLabel("单击插入到光标处:"))
+        self.snippet_list = QListWidget()
+        # 设置不抢焦点，避免编辑器失焦
+        self.snippet_list.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.snippet_list.itemClicked.connect(self._insert_snippet)
+        tl.addWidget(self.snippet_list)
+        tb = QHBoxLayout()
+        btn_add = QPushButton("添加"); btn_add.setMaximumHeight(25)
+        btn_add.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        btn_add.clicked.connect(self._add_snippet); tb.addWidget(btn_add)
+        btn_edit = QPushButton("编辑"); btn_edit.setMaximumHeight(25)
+        btn_edit.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        btn_edit.clicked.connect(self._edit_snippet); tb.addWidget(btn_edit)
+        btn_sdel = QPushButton("删除"); btn_sdel.setMaximumHeight(25)
+        btn_sdel.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        btn_sdel.setProperty("class", "danger")
+        btn_sdel.clicked.connect(self._delete_snippet); tb.addWidget(btn_sdel)
+        tl.addLayout(tb)
+        self.tabs.addTab(text_tab, "常用文字")
+        self._refresh_snippets()
 
-    
-        """自定义拖拽，携带组合 id"""
+    def _get_snippets(self):
+        return self.main_window.scene.config_manager.get(
+            'text_snippets', ['（一）', '（二）', '第一章', '注：'])
+
+    def _save_snippets(self, snippets):
+        self.main_window.scene.config_manager.set('text_snippets', snippets)
+
+    def _refresh_snippets(self):
+        self.snippet_list.clear()
+        for s in self._get_snippets():
+            self.snippet_list.addItem(QListWidgetItem(s))
+
+    def _insert_snippet(self, item):
+        text = item.text()
+        mw = self.main_window
+        # 找正在编辑的 VTextItem
+        for scene_item in mw.scene.items():
+            if isinstance(scene_item, VTextItem) and scene_item.is_editing:
+                editor = scene_item.inline_editor
+                if editor and editor.isVisible():
+                    editor.insertPlainText(text)
+                    return
+        mw.status_bar.showMessage("请先双击文字元素进入编辑状态，再单击片段插入", 3000)
+
+    def _add_snippet(self):
+        text, ok = QInputDialog.getMultiLineText(self, "添加常用文字", "输入文字片段:")
+        if ok and text.strip():
+            snippets = self._get_snippets()
+            snippets.append(text.strip())
+            self._save_snippets(snippets)
+            self._refresh_snippets()
+
+    def _edit_snippet(self):
+        item = self.snippet_list.currentItem()
+        if not item:
+            return
+        idx = self.snippet_list.row(item)
+        text, ok = QInputDialog.getMultiLineText(self, "编辑常用文字", "修改文字片段:", item.text())
+        if ok and text.strip():
+            snippets = self._get_snippets()
+            snippets[idx] = text.strip()
+            self._save_snippets(snippets)
+            self._refresh_snippets()
+
+    def _delete_snippet(self):
+        item = self.snippet_list.currentItem()
+        if not item:
+            return
+        snippets = self._get_snippets()
+        snippets.pop(self.snippet_list.row(item))
+        self._save_snippets(snippets)
+        self._refresh_snippets()
+
     def _start_group_drag(self, supported_actions):
         item = self.group_list.currentItem()
         if not item:
@@ -793,8 +867,6 @@ class AssetLibraryDockWidget(QDockWidget):
         mime.setData('application/x-group-asset-id', str(asset['id']).encode())
         drag = QDrag(self.group_list)
         drag.setMimeData(mime)
-        
-        # 这一段是新增的预览图逻辑
         pixmap = QPixmap(120, 30)
         pixmap.fill(QColor(0, 120, 215, 180))
         painter = QPainter(pixmap)
@@ -803,11 +875,9 @@ class AssetLibraryDockWidget(QDockWidget):
         painter.end()
         drag.setPixmap(pixmap)
         drag.setHotSpot(QPoint(60, 15))
-        
         drag.exec(Qt.DropAction.CopyAction)
 
     def refresh_assets(self):
-        """刷新素材列表"""
         self.asset_manager.load_assets()
         self.group_list.clear()
         for asset in self.asset_manager.get_group_assets():
@@ -815,61 +885,23 @@ class AssetLibraryDockWidget(QDockWidget):
             item.setData(Qt.ItemDataRole.UserRole, asset)
             text_count = sum(1 for d in asset['items'] if d['type'] == 'VTextItem')
             image_count = sum(1 for d in asset['items'] if d['type'] == 'VImageItem')
-            item.setToolTip(f"文字: {text_count} 条  图片: {image_count} 个  连接: {len(asset['image_text_connections'])} 条")
+            item.setToolTip(f"文字: {text_count}  图片: {image_count}  连接: {len(asset['image_text_connections'])} 条")
             self.group_list.addItem(item)
-    
-    def use_text_asset(self, item):
-        """使用文字素材"""
-        asset = item.data(Qt.ItemDataRole.UserRole)
-        if asset:
-            # 创建文字项目
-            text_item = VTextItem(
-                asset['text'],
-                asset['font_size'],
-                asset['box_height']
-            )
-            text_item.font_family = asset['font_family']
-            text_item.text_color = QColor(asset['text_color'])
-            text_item.rebuild()
-            
-            # 添加到画布中央
-            center = self.main_window.view.mapToScene(self.main_window.view.viewport().rect().center())
-            text_item.setPos(center)
-            self.main_window.scene.add_item_with_undo(text_item)
-            print(f"已添加文字素材 {asset['name']}")
-    
-    def use_image_asset(self, item):
-        """使用图片素材"""
-        asset = item.data(Qt.ItemDataRole.UserRole)
-        if asset and os.path.exists(asset['path']):
-            # 创建图片项目
-            image_item = VImageItem(asset['path'], asset['width'])
-            
-            # 添加到画布中央
-            center = self.main_window.view.mapToScene(self.main_window.view.viewport().rect().center())
-            image_item.setPos(center)
-            self.main_window.scene.add_item_with_undo(image_item)
-            print(f"已添加图片素材 {asset['name']}")
-    
+
     def use_group_asset(self, item):
-        """使用组合素材（放到画布中央）"""
         asset = item.data(Qt.ItemDataRole.UserRole)
         if asset:
             center = self.main_window.view.mapToScene(self.main_window.view.viewport().rect().center())
             self._place_group_at(asset, center)
+
     def _place_group_at(self, asset, base_pos):
-        """在鼠标指定位置精准放置组合素材（整体作为一次撤销）"""
         if not asset or not asset['items']:
             return
-
         min_x = min(d['scene_pos'][0] for d in asset['items'])
         min_y = min(d['scene_pos'][1] for d in asset['items'])
-
         new_items = []
         scene = self.main_window.scene
         sub_commands = []
-
-        # 创建元素
         for idx, item_data in enumerate(asset['items']):
             new_item = None
             if item_data['type'] == 'VTextItem':
@@ -883,22 +915,17 @@ class AssetLibraryDockWidget(QDockWidget):
             elif item_data['type'] == 'VImageItem':
                 if os.path.exists(item_data['path']):
                     new_item = VImageItem(item_data['path'], item_data['width'])
-
             if new_item:
                 off_x = item_data['scene_pos'][0] - min_x
                 off_y = item_data['scene_pos'][1] - min_y
                 new_item.setPos(base_pos.x() + off_x, base_pos.y() + off_y)
                 new_item.setZValue(10)
-
                 cmd = AddItemCommand(scene, new_item)
                 cmd.execute()
                 sub_commands.append(cmd)
-
                 if 'connection_point_visible' in item_data and new_item.connection_point:
                     new_item.connection_point.setVisible(item_data['connection_point_visible'])
                 new_items.append(new_item)
-
-        # 恢复父子关系
         for idx, item_data in enumerate(asset['items']):
             if item_data['parent_index'] != -1 and item_data['parent_index'] < len(new_items):
                 child, parent = new_items[idx], new_items[item_data['parent_index']]
@@ -906,46 +933,20 @@ class AssetLibraryDockWidget(QDockWidget):
                 child.setParentItem(parent)
                 child.setPos(parent.mapFromScene(sp))
                 scene.add_connector(parent, child)
-
-        # 恢复图文连接
         for img_idx, text_idx in asset['image_text_connections']:
             if img_idx < len(new_items) and text_idx < len(new_items):
                 conn_cmd = scene._make_connector_command(new_items[img_idx], new_items[text_idx])
                 if conn_cmd:
                     conn_cmd.execute()
                     sub_commands.append(conn_cmd)
-
-        # 打包为一次撤销
         if sub_commands:
             scene.undo_stack.push(MacroCommand(scene, sub_commands))
-
         scene.clearSelection()
         for i in new_items:
             i.setSelected(True)
         scene.update()
-    
-    def delete_text_asset(self):
-        """删除选中的文字素材"""
-        current_item = self.text_list.currentItem()
-        if current_item:
-            asset = current_item.data(Qt.ItemDataRole.UserRole)
-            reply = QMessageBox.question(self, "确认删除", f"确定要删除文字素材'{asset['name']}' 吗？")
-            if reply == QMessageBox.StandardButton.Yes:
-                self.asset_manager.remove_text_asset(asset['id'])
-                self.refresh_assets()
-    
-    def delete_image_asset(self):
-        """删除选中的图片素材"""
-        current_item = self.image_list.currentItem()
-        if current_item:
-            asset = current_item.data(Qt.ItemDataRole.UserRole)
-            reply = QMessageBox.question(self, "确认删除", f"确定要删除图片素材'{asset['name']}' 吗？")
-            if reply == QMessageBox.StandardButton.Yes:
-                self.asset_manager.remove_image_asset(asset['id'])
-                self.refresh_assets()
-    
+
     def delete_group_asset(self):
-        """删除选中的组合素材"""
         current_item = self.group_list.currentItem()
         if current_item:
             asset = current_item.data(Qt.ItemDataRole.UserRole)
@@ -955,20 +956,17 @@ class AssetLibraryDockWidget(QDockWidget):
                 self.refresh_assets()
 
     def use_group_asset_selected(self):
-        """使用选中的组合素材"""
         current_item = self.group_list.currentItem()
         if current_item:
             self.use_group_asset(current_item)
 
     def rename_group_asset(self, item):
-        """双击重命名组合素材"""
         asset = item.data(Qt.ItemDataRole.UserRole)
         if not asset:
             return
         new_name, ok = QInputDialog.getText(self, "重命名", "请输入新名称:", text=asset['name'])
         if ok and new_name.strip():
             asset['name'] = new_name.strip()
-            # 更新 assets.json
             for a in self.asset_manager.assets['groups']:
                 if a['id'] == asset['id']:
                     a['name'] = new_name.strip()
@@ -977,7 +975,6 @@ class AssetLibraryDockWidget(QDockWidget):
             self.refresh_assets()
 
     def rename_group_asset_selected(self):
-        """按钮触发重命名"""
         current_item = self.group_list.currentItem()
         if current_item:
             self.rename_group_asset(current_item)
@@ -1929,7 +1926,7 @@ class VGenericConnector(QGraphicsPathItem):
         self.connection_type = connection_type  # "image-image", "text-text", "generic"
         self.line_width = line_width if line_width is not None else DEFAULT_LINE_WIDTH  # 线条粗细
         self.base_color = QColor(255, 0, 0, 200)  # 基础颜色
-        self.setZValue(-45)  # 比图文连接器层级稍低
+        self.setZValue(50)  # 显示在图片前面
         
         # 统一使用红色连接线
         pen = QPen(self.base_color)
@@ -2084,7 +2081,7 @@ class VImageTextConnector(QGraphicsPathItem):
         self.text_item = text_item
         self.line_width = line_width if line_width is not None else DEFAULT_LINE_WIDTH  # 线条粗细
         self.base_color = QColor(255, 100, 100, 200)  # 基础颜色
-        self.setZValue(-50)  # 比普通连接器层级高一条
+        self.setZValue(55)  # 显示在图片前面
         
         pen = QPen(self.base_color)
         pen.setWidth(self.line_width)
@@ -2236,7 +2233,7 @@ class VConnector(QGraphicsPathItem):
         super().__init__()
         self.parent_element = parent_item
         self.child_element = child_item
-        self.setZValue(-100)
+        self.setZValue(45)  # 显示在图片前面
         
         pen = QPen(QColor(255, 0, 0, 150))
         pen.setWidth(3)  # 更粗的线条
@@ -2529,6 +2526,12 @@ class InlineTextEditor(QTextEdit):
         
         self.original_text = ""
         self.text_item = None
+
+    def insert_text_at_cursor(self, text):
+        """在当前光标位置插入文本"""
+        cursor = self.textCursor()
+        cursor.insertText(text)
+        self.setFocus() # 确保插入后依然拥有焦点
         
     def start_editing(self, text_item, text):
         """开始编辑指定的文字项目"""
@@ -2609,8 +2612,14 @@ class InlineTextEditor(QTextEdit):
     
     def focusOutEvent(self, event):
         """失去焦点时完成编辑"""
+        if getattr(self, '_inserting_snippet', False):
+            super().focusOutEvent(event)
+            return
         self.finish_editing()
         super().focusOutEvent(event)
+
+    def _delayed_finish(self):
+        pass  # 不再使用
     
     def finish_editing(self):
         """完成编辑"""
@@ -3000,6 +3009,13 @@ class VTextItem(BaseElement):
         
         # 开始编辑
         self.inline_editor.start_editing(self, self.full_text)
+
+    def insert_text(self, text):
+        """如果正在编辑，则在编辑器光标处插入文本"""
+        if self.is_editing and self.inline_editor:
+            self.inline_editor.insert_text_at_cursor(text)
+            return True
+        return False
     
     def finish_inline_editing(self, new_text):
         """完成内联编辑"""
@@ -4971,10 +4987,13 @@ class MainWindow(QMainWindow):
         btn_undo.triggered.connect(self.undo)
         main_toolbar.addAction(btn_undo)
         
-        btn_redo = QAction("重做", self)
-        btn_redo.setShortcut("Ctrl+Y")
-        btn_redo.triggered.connect(self.redo)
-        main_toolbar.addAction(btn_redo)
+        btn_align_right = QAction("右对齐", self)
+        btn_align_right.triggered.connect(self.align_right)
+        main_toolbar.addAction(btn_align_right)
+
+        btn_align_top = QAction("顶部对齐", self)
+        btn_align_top.triggered.connect(self.align_top)
+        main_toolbar.addAction(btn_align_top)
         
         main_toolbar.addSeparator()
         
