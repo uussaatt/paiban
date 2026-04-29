@@ -4700,6 +4700,9 @@ class LayoutView(QGraphicsView):
 
     def __init__(self, scene):
         super().__init__(scene)
+        # --- 在这里插入/确保这两行存在 ---
+        self.setViewportUpdateMode(QGraphicsView.ViewportUpdateMode.FullViewportUpdate)
+        self.setRenderHint(QPainter.RenderHint.Antialiasing)
         self.setRenderHint(QPainter.RenderHint.Antialiasing)
         self.setDragMode(QGraphicsView.DragMode.RubberBandDrag)
         self.setAcceptDrops(True)
