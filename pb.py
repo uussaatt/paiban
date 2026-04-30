@@ -2592,6 +2592,15 @@ class InlineTextEditor(QTextEdit):
             self.setFocus()
             self.selectAll()
     
+    def insertFromMimeData(self, source):
+        """重写粘贴，粘贴后若配置开启则自动退出编辑"""
+        super().insertFromMimeData(source)
+        # 检查是否开启了"粘贴后自动退出编辑"
+        if self.text_item and self.text_item.scene():
+            config_manager = getattr(self.text_item.scene(), 'config_manager', None)
+            if config_manager and config_manager.get('auto_exit_after_paste', False):
+                QTimer.singleShot(0, self.finish_editing)
+
     def keyPressEvent(self, event):
         if event.key() == Qt.Key.Key_Escape:
             print("按下Escape键，取消编辑")
@@ -4917,12 +4926,18 @@ class LayoutView(QGraphicsView):
             super().mouseReleaseEvent(event)
     
     def wheelEvent(self, event):
-        if event.modifiers() == Qt.KeyboardModifier.ControlModifier:
+        if event.modifiers() == Qt.KeyboardModifier.ShiftModifier:
+            # Shift+滚轮 保留原始滚动行为
+            super().wheelEvent(event)
+        else:
+            # 滚轮直接缩放（以鼠标位置为中心）
+            old_pos = self.mapToScene(event.position().toPoint())
             scale = 1.1 if event.angleDelta().y() > 0 else 0.9
             self.scale(scale, scale)
+            new_pos = self.mapToScene(event.position().toPoint())
+            delta = new_pos - old_pos
+            self.translate(delta.x(), delta.y())
             self.transformChanged.emit()
-        else:
-            super().wheelEvent(event)
     
     def fit_in_view(self):
         """合适屏幕 - 让整个画布区域适合视图"""
@@ -5389,6 +5404,18 @@ class MainWindow(QMainWindow):
         set_line_width_action.triggered.connect(lambda: self.set_line_width())
         connector_menu.addAction(set_line_width_action)
 
+        # 编辑行为菜单
+        edit_menu = menubar.addMenu('编辑设置')
+        self.auto_exit_paste_action = QAction('粘贴后自动退出编辑', self)
+        self.auto_exit_paste_action.setCheckable(True)
+        self.auto_exit_paste_action.setChecked(self.scene.config_manager.get('auto_exit_after_paste', False))
+        self.auto_exit_paste_action.toggled.connect(self.toggle_auto_exit_setting)
+        edit_menu.addAction(self.auto_exit_paste_action)
+
+
+    def toggle_auto_exit_setting(self, enabled):
+        """切换粘贴后自动退出编辑的开关"""
+        self.scene.config_manager.set('auto_exit_after_paste', enabled)
 
     def show_canvas_context_menu(self, pos):
         """画布空白处右键菜单"""
