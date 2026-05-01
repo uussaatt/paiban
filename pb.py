@@ -52,6 +52,7 @@ class ConfigManager:
             'default_font_family': DEFAULT_FONT,
             'default_font_size': DEFAULT_FONT_SIZE,
             'default_line_width': DEFAULT_LINE_WIDTH,  # 默认连线粗细
+            'bg_above_connectors': False,  # 背景图片是否在连线之上
             'favorite_fonts': ['SimSun', 'Microsoft YaHei', '黑体', '楷体', 'Arial'],
             'favorite_sizes': [10, 12, 14, 16, 18, 20, 24, 30, 36, 48, 72],
         }
@@ -1962,6 +1963,10 @@ class VGenericConnector(QGraphicsPathItem):
     
     def paint(self, painter, option, widget):
         """绘制连接线，选中时显示高亮"""
+        # 如果设置了背景图片在连线之上，则在 drawBackground 中手动绘制，此处跳过
+        if self.scene() and self.scene().config_manager.get('bg_above_connectors', False):
+            return
+            
         if self.isSelected():
             # 选中时使用橙色粗线
             pen = QPen(QColor(255, 140, 0), self.line_width + 2, Qt.PenStyle.SolidLine)
@@ -2116,6 +2121,10 @@ class VImageTextConnector(QGraphicsPathItem):
     
     def paint(self, painter, option, widget):
         """绘制连接线，选中时显示高亮"""
+        # 如果设置了背景图片在连线之上，则在 drawBackground 中手动绘制，此处跳过
+        if self.scene() and self.scene().config_manager.get('bg_above_connectors', False):
+            return
+            
         if self.isSelected():
             # 选中时使用橙色粗线
             pen = QPen(QColor(255, 140, 0), self.line_width + 2, Qt.PenStyle.SolidLine)
@@ -2262,6 +2271,12 @@ class VConnector(QGraphicsPathItem):
         ctrl2 = c_anchor - QPointF(0, 50)
         path.cubicTo(ctrl1, ctrl2, c_anchor)
         self.setPath(path)
+
+    def paint(self, painter, option, widget):
+        # 如果设置了背景图片在连线之上，则在 drawBackground 中手动绘制，此处跳过
+        if self.scene() and self.scene().config_manager.get('bg_above_connectors', False):
+            return
+        super().paint(painter, option, widget)
 
 class BaseElement(QGraphicsItem):
     """Common base for Text and Image elements"""
@@ -3796,6 +3811,26 @@ class LayoutScene(QGraphicsScene):
             for y in range(c_top, c_bottom + 1, step):
                 painter.drawLine(c_left, y, c_right, y)
         
+        # --- 新增：手动绘制连线层（如果开启了背景图片覆盖连线功能） ---
+        if self.config_manager.get('bg_above_connectors', False):
+            # 绘制父子连线
+            for conn in self.connectors:
+                if conn.isVisible():
+                    painter.save()
+                    painter.setPen(conn.pen())
+                    painter.drawPath(conn.path())
+                    painter.restore()
+            
+            # 绘制图文连线
+            for conn in self.image_text_connectors:
+                if conn.isVisible():
+                    painter.save()
+                    # VGenericConnector 可能需要根据选中状态更新 pen
+                    # 这里简化处理，直接绘制
+                    painter.setPen(conn.pen())
+                    painter.drawPath(conn.path())
+                    painter.restore()
+
         # 绘制背景图片（在网格之上，元素之下）
         if self.background_pixmap and not self.background_pixmap.isNull():
             opacity = self.config_manager.get('background_opacity', 0.3)
@@ -5066,7 +5101,7 @@ class MainWindow(QMainWindow):
         # 应用Fluent Design样式
         self.apply_fluent_design_style()
         
-        self.scene = LayoutScene()
+        self.scene = LayoutScene(self)
         self.scene.setSceneRect(0, 0, 7054, 5021)
         self.scene.selectionChanged.connect(self.on_selection_changed)
         self.view = LayoutView(self.scene)
@@ -5120,12 +5155,18 @@ class MainWindow(QMainWindow):
         nav_dock.setFixedHeight(self.navigator.NAV_H + 30)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, nav_dock)
         
-        self.timer = QTimer()
+        self.timer = QTimer(self)
         self.timer.timeout.connect(self.refresh_ui)
         self.timer.start(2000)
         
         QTimer.singleShot(100, self.fit_view)
         print("Vertical Layout Engine Started...")
+
+    def closeEvent(self, event):
+        """窗口关闭时停止定时器，防止 RuntimeError"""
+        if hasattr(self, 'timer'):
+            self.timer.stop()
+        event.accept()
     
     def create_toolbars(self):
         # 主工具栏 - 编辑和格式化
@@ -5348,6 +5389,12 @@ class MainWindow(QMainWindow):
         zoom_selection_action.setShortcut('Ctrl+2')
         zoom_selection_action.triggered.connect(self.zoom_to_selection)
         view_menu.addAction(zoom_selection_action)
+
+        self.bg_above_connectors_action = QAction('背景图片在连线之上', self)
+        self.bg_above_connectors_action.setCheckable(True)
+        self.bg_above_connectors_action.setChecked(self.scene.config_manager.get('bg_above_connectors', False))
+        self.bg_above_connectors_action.triggered.connect(self.toggle_bg_above_connectors)
+        view_menu.addAction(self.bg_above_connectors_action)
         
         view_menu.addSeparator()
         
@@ -5471,6 +5518,16 @@ class MainWindow(QMainWindow):
         else:
             self.status_bar.showMessage("已退出调整大小模式")
     
+    def toggle_bg_above_connectors(self, enabled):
+        """切换背景图片是否在连线之上"""
+        self.scene.config_manager.set('bg_above_connectors', enabled)
+        self.scene.update()
+        # 强制所有连接器更新，因为它们的 paint 方法逻辑变了
+        for c in self.scene.connectors:
+            c.update()
+        for c in self.scene.image_text_connectors:
+            c.update()
+    
     def undo(self):
         self.scene.undo()
     
@@ -5513,6 +5570,16 @@ class MainWindow(QMainWindow):
     def zoom_to_selection(self):
         """缩放到选中内容"""
         self.view.zoom_to_selection()
+
+    def toggle_bg_above_connectors(self, enabled):
+        """切换背景图片是否在连线之上"""
+        self.scene.config_manager.set('bg_above_connectors', enabled)
+        self.scene.update()
+        # 强制所有连接器更新，因为它们的 paint 方法逻辑变了
+        for c in self.scene.connectors:
+            c.update()
+        for c in self.scene.image_text_connectors:
+            c.update()
     
     def update_zoom_display(self):
         """更新缩放显示"""
@@ -5607,39 +5674,55 @@ class MainWindow(QMainWindow):
             item.rebuild()
     
     def update_font_controls(self):
-        selected_items = [item for item in self.scene.selectedItems() if isinstance(item, VTextItem)]
-        if selected_items:
-            item = selected_items[0]
-            self.font_combo.blockSignals(True)
-            self.font_size_spin.blockSignals(True)
-            self.chars_per_column_spin.blockSignals(True)
-            self.column_spacing_spin.blockSignals(True)
-
-            self.font_combo.setCurrentText(item.font_family)
-            self.font_size_spin.setValue(item.font_size)
-            self.chars_per_column_spin.setValue(item.chars_per_column)
-            self.column_spacing_spin.setValue(item.column_spacing)
+        try:
+            # 检查场景和对象是否还存在
+            if not self.scene:
+                return
             
-            self.font_combo.blockSignals(False)
-            self.font_size_spin.blockSignals(False)
-            self.chars_per_column_spin.blockSignals(False)
-            self.column_spacing_spin.blockSignals(False)
+            selected_items = [item for item in self.scene.selectedItems() if isinstance(item, VTextItem)]
+            if selected_items:
+                item = selected_items[0]
+                self.font_combo.blockSignals(True)
+                self.font_size_spin.blockSignals(True)
+                self.chars_per_column_spin.blockSignals(True)
+                self.column_spacing_spin.blockSignals(True)
+
+                self.font_combo.setCurrentText(item.font_family)
+                self.font_size_spin.setValue(item.font_size)
+                self.chars_per_column_spin.setValue(item.chars_per_column)
+                self.column_spacing_spin.setValue(item.column_spacing)
+                
+                self.font_combo.blockSignals(False)
+                self.font_size_spin.blockSignals(False)
+                self.chars_per_column_spin.blockSignals(False)
+                self.column_spacing_spin.blockSignals(False)
+        except (RuntimeError, AttributeError):
+            # 处理 C++ 对象已被删除的情况
+            pass
     
     def on_selection_changed(self):
-        if hasattr(self, 'font_combo'):
-            self.update_font_controls()
-        # 状态栏提示
-        selected = self.scene.selectedItems()
-        images = [i for i in selected if isinstance(i, VImageItem)]
-        texts = [i for i in selected if isinstance(i, VTextItem)]
-        if images and not texts:
-            self.status_bar.showMessage("拖拽蓝色控制点可缩放图片  角点=等比缩放  边中点=单向拉伸  右键=更多选项")
-        elif texts and not images:
-            self.status_bar.showMessage("双击文字可编辑  右键=字体/颜色/列间距等设置")
-        elif images and texts:
-            self.status_bar.showMessage("右键=批量连接/对齐  Ctrl+G=保存组合")
-        else:
-            self.status_bar.showMessage("")
+        try:
+            # 检查场景是否还存在
+            if not self.scene:
+                return
+                
+            if hasattr(self, 'font_combo'):
+                self.update_font_controls()
+            # 状态栏提示
+            selected = self.scene.selectedItems()
+            images = [i for i in selected if isinstance(i, VImageItem)]
+            texts = [i for i in selected if isinstance(i, VTextItem)]
+            if images and not texts:
+                self.status_bar.showMessage("拖拽蓝色控制点可缩放图片  角点=等比缩放  边中点=单向拉伸  右键=更多选项")
+            elif texts and not images:
+                self.status_bar.showMessage("双击文字可编辑  右键=字体/颜色/列间距等设置")
+            elif images and texts:
+                self.status_bar.showMessage("右键=批量连接/对齐  Ctrl+G=保存组合")
+            else:
+                self.status_bar.showMessage("")
+        except (RuntimeError, AttributeError):
+            # 处理 C++ 对象已被删除的情况
+            pass
     
     def set_line_width(self):
         """设置连线粗细，同时更新默认值和所有现有连线"""
@@ -5663,6 +5746,10 @@ class MainWindow(QMainWindow):
 
     def refresh_ui(self):
         try:
+            # 检查场景是否还存在
+            if not self.scene:
+                return
+                
             self.tree_widget.clear()
             def add_node(item, parent_node):
                 node = QTreeWidgetItem(parent_node)
@@ -5675,7 +5762,10 @@ class MainWindow(QMainWindow):
                     add_node(item, self.tree_widget)
             self.tree_widget.expandAll()
             self.scene.update_all_connectors()
-        except: pass
+        except (RuntimeError, AttributeError):
+            pass
+        except Exception:
+            pass
 
     def export_image(self):
         path, _ = QFileDialog.getSaveFileName(self, "Export Image", "", "PNG (*.png)")
