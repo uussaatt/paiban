@@ -1514,22 +1514,27 @@ class UndoCommand:
         pass
 
 class AddItemCommand(UndoCommand):
-    """添加元素命令"""
+    """添加元素命令 - 增加了父子项安全检查"""
     def __init__(self, scene, item):
         super().__init__(scene)
         self.item = item
 
     def execute(self):
-        """redo 时重新添加元素"""
-        if not self.item.scene():
+        """执行添加操作：只有当元素既没有父级也不在场景中时才添加"""
+        # 如果元素已经有父级了，它会随父级自动进入场景，无需手动 addItem
+        if not self.item.scene() and not self.item.parentItem():
             self.scene.addItem(self.item)
+            
         if isinstance(self.item, (VTextItem, VImageItem)):
             self.item.set_connection_points_visible(self.scene.show_connection_points)
 
     def undo(self):
-        self.scene.remove_all_connectors_for_item(self.item)
-        self.scene.remove_image_text_connectors(self.item)
-        self.scene.removeItem(self.item)
+        """撤销添加操作：增加场景归属判断，防止重复删除报错"""
+        # 检查元素是否还在当前场景中（可能已随父级被移除）
+        if self.item.scene() == self.scene:
+            self.scene.remove_all_connectors_for_item(self.item)
+            self.scene.remove_image_text_connectors(self.item)
+            self.scene.removeItem(self.item)
 
 class DeleteItemCommand(UndoCommand):
     """删除元素命令"""
@@ -1762,22 +1767,36 @@ class EditTextCommand(UndoCommand):
 
 
 class AddConnectorCommand(UndoCommand):
-    """添加图文/通用连接线命令"""
+    """添加连接线命令（支持父子连接线和图文连接线）"""
     def __init__(self, scene, connector):
         super().__init__(scene)
         self.connector = connector
 
     def execute(self):
-        if self.connector not in self.scene.image_text_connectors:
-            self.scene.addItem(self.connector)
-            self.scene.image_text_connectors.append(self.connector)
-        self.connector.update_path()
-        self.connector.setVisible(self.scene.show_image_text_connectors)
+        # 处理父子红线连接器
+        if isinstance(self.connector, VConnector):
+            if self.connector not in self.scene.connectors:
+                self.scene.addItem(self.connector)
+                self.scene.connectors.append(self.connector)
+            self.connector.update_path()
+            self.connector.setVisible(self.scene.show_connectors)
+        # 处理图文/通用连接器
+        else:
+            if self.connector not in self.scene.image_text_connectors:
+                self.scene.addItem(self.connector)
+                self.scene.image_text_connectors.append(self.connector)
+            self.connector.update_path()
+            self.connector.setVisible(self.scene.show_image_text_connectors)
 
     def undo(self):
-        if self.connector in self.scene.image_text_connectors:
-            self.scene.removeItem(self.connector)
-            self.scene.image_text_connectors.remove(self.connector)
+        if isinstance(self.connector, VConnector):
+            if self.connector in self.scene.connectors:
+                self.scene.removeItem(self.connector)
+                self.scene.connectors.remove(self.connector)
+        else:
+            if self.connector in self.scene.image_text_connectors:
+                self.scene.removeItem(self.connector)
+                self.scene.image_text_connectors.remove(self.connector)
 
 
 class MacroCommand(UndoCommand):
@@ -3711,6 +3730,7 @@ class LayoutScene(QGraphicsScene):
         self.show_guides = True   # 辅助线显示开关
         self.snap_threshold = 20  # 辅助线吸附距离（场景像素）
         self.resize_mode = False  # 图片调整大小模式
+        self.stamping_session = None  # 盖章式批量复制会话
         
         # 连接选择改变信号
         self.selectionChanged.connect(self.on_selection_changed_track)
@@ -3909,7 +3929,11 @@ class LayoutScene(QGraphicsScene):
         print("Select parent for binding...")
 
     def contextMenuEvent(self, event):
-        """右键菜单：仅处理元素菜单"""
+        """右键菜单：盖章过程中屏蔽菜单"""
+        if self.stamping_session:
+            event.accept()
+            return
+
         item = self.itemAt(event.scenePos(), QTransform())
         
         # 如果右键点击的是普通物体（文字/图片），调用 BaseElement 的右键菜单
@@ -3917,7 +3941,13 @@ class LayoutScene(QGraphicsScene):
             super().contextMenuEvent(event)
 
     def mousePressEvent(self, event):
-        """鼠标按下事件：处理元素点击和父子绑定"""
+        """鼠标按下事件：处理元素点击、父子绑定和盖章会话"""
+        # 盖章模式拦截：拖拽中按右键触发盖章
+        if event.button() == Qt.MouseButton.RightButton and self.stamping_session:
+            self.stamp_current_selection()
+            event.accept()
+            return
+
         if self.binding_source:
             # itemAt 可能返回字符子项/连接点等，需向上找到真正的 BaseElement
             raw = self.itemAt(event.scenePos(), QTransform())
@@ -3940,6 +3970,19 @@ class LayoutScene(QGraphicsScene):
 
         super().mousePressEvent(event)
 
+        # 启动盖章会话追踪：如果按下左键后有选中元素，则开启会话
+        if event.button() == Qt.MouseButton.LeftButton and self.selectedItems():
+            self.stamping_session = {
+                'stamps': [],  # 存储每一批生成的副本命令
+                'initial_items': [i for i in self.selectedItems() if isinstance(i, BaseElement)]
+            }
+
+    def mouseReleaseEvent(self, event):
+        """鼠标松开：结束盖章会话"""
+        if self.stamping_session:
+            self.finish_stamping_session()
+        super().mouseReleaseEvent(event)
+
     def add_connector(self, parent, child):
         self.remove_child_connectors(child)
         conn = VConnector(parent, child)
@@ -3960,6 +4003,145 @@ class LayoutScene(QGraphicsScene):
         for c in to_rem:
             self.removeItem(c)
             self.connectors.remove(c)
+
+    def stamp_current_selection(self):
+        """修复版盖章函数"""
+        if not self.stamping_session:
+            return
+            
+        items_to_clone = self.stamping_session['initial_items']
+        if not items_to_clone:
+            return
+            
+        # 1. 接收三个返回值
+        all_clones, internal_conns, roots_only = self.clone_items(items_to_clone)
+        
+        batch_cmds = []
+        
+        # 2. 【核心修复】只把顶层父级加入场景
+        for root_item in roots_only:
+            root_item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, False)
+            root_item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, False)
+            
+            # 使用命令添加 root_item，子级会自动跟进去，不会再报 scene 不同步的错
+            cmd = AddItemCommand(self, root_item)
+            cmd.execute()
+            batch_cmds.append(cmd)
+            
+        # 3. 添加连线
+        for conn in internal_conns:
+            cmd = AddConnectorCommand(self, conn)
+            cmd.execute()
+            batch_cmds.append(cmd)
+            
+        # 4. 【核心修复】此时所有元素都在场景里了，绝对坐标已生成，更新连线路径
+        # 这样连线就不会从 (0,0) 射出来了
+        for conn in internal_conns:
+            conn.update_path()
+            
+        self.stamping_session['stamps'].append(batch_cmds)
+
+    def finish_stamping_session(self):
+        """正常结束盖章会话，将所有副本封装进一个宏命令以便 Ctrl+Z"""
+        if not self.stamping_session:
+            return
+            
+        all_stamps_cmds = []
+        for batch in self.stamping_session['stamps']:
+            all_stamps_cmds.extend(batch)
+            
+        # 恢复所有副本的交互属性
+        for cmd in all_stamps_cmds:
+            if isinstance(cmd, AddItemCommand):
+                cmd.item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, True)
+                cmd.item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, True)
+        
+        # 如果生成了副本，封装成 MacroCommand 存入撤销栈
+        if all_stamps_cmds:
+            macro = MacroCommand(self, all_stamps_cmds)
+            self.undo_stack.push(macro)
+            print(f"盖章会话结束，共生成 {len(self.stamping_session['stamps'])} 串副本")
+            
+        self.stamping_session = None
+
+    def abort_stamping_session(self):
+        """放弃盖章会话，撤销本次拖拽过程中生成的所有副本"""
+        if not self.stamping_session:
+            return
+            
+        print("放弃盖章，正在移除副本...")
+        for batch in reversed(self.stamping_session['stamps']):
+            for cmd in reversed(batch):
+                cmd.undo()
+                
+        self.stamping_session = None
+
+    def clone_items(self, items):
+        """克隆一组元素及其内部连接关系，解决子级跳位并支持安全添加"""
+        if not items:
+            return [], [], [] # 注意：现在返回三个值
+            
+        item_map = {item: idx for idx, item in enumerate(items)}
+        clones_list = []  # 用于存储所有生成的副本对象
+        id_to_clone = {}  # 原件索引 -> 副本对象的映射
+        
+        # --- 第一步：仅创建副本对象（不设置坐标，不设置父子关系） ---
+        for item in items:
+            clone = None
+            if isinstance(item, VTextItem):
+                clone = VTextItem(item.full_text, item.font_size, item.box_height)
+                clone.font_family = item.font_family
+                clone.text_color = QColor(item.text_color)
+                clone.chars_per_column = item.chars_per_column
+                clone.column_spacing = item.column_spacing
+                clone.auto_height = item.auto_height
+                clone.manual_line_break = item.manual_line_break
+                clone.rebuild()
+            elif isinstance(item, VImageItem):
+                clone = VImageItem(item.file_path, item.target_width)
+                clone.set_opacity(item.image_opacity)
+                if item.locked:
+                    clone.set_locked(True)
+            
+            if clone:
+                clone.setZValue(item.zValue())
+                clones_list.append(clone)
+                id_to_clone[item_map[item]] = clone
+                
+        # --- 第二步：建立副本之间的父子层级关系 ---
+        new_internal_conns = []
+        for item in items:
+            parent = item.parentItem()
+            # 只有当原件的父级也在本次选中的克隆列表里，才建立副本间的父子关系
+            if parent in item_map:
+                c_item = id_to_clone[item_map[item]]
+                c_parent = id_to_clone[item_map[parent]]
+                
+                c_item.prepareGeometryChange() # 刷新图形状态
+                c_item.setParentItem(c_parent) # 核心：建立层级
+                
+                # 为这对副本创建一条对应的红虚线连接器
+                new_conn = VConnector(c_parent, c_item)
+                new_internal_conns.append(new_conn)
+
+        # --- 第三步：设置坐标并筛选出顶层父级 ---
+        roots_only = []
+        for item in items:
+            c_item = id_to_clone.get(item_map[item])
+            if not c_item:
+                continue
+                
+            if c_item.parentItem():
+                # 如果这个副本是有父级的，直接复制原件相对于父级的【本地偏移】
+                # 这样父级移动到哪，它就跟到哪，不会乱跳
+                c_item.setPos(item.pos())
+            else:
+                # 如果它是独立元素或最顶层父级，复制它在画布上的【绝对位置】
+                c_item.setPos(item.scenePos())
+                roots_only.append(c_item) # 记录下来：它是这组克隆体的“根”
+        
+        # 返回：所有副本（用于属性操作）、内部连线（用于后续更新路径）、根父级列表（用于 addItem）
+        return clones_list, new_internal_conns, roots_only
 
     def update_connectors(self, item_moved):
         for c in self.connectors:
@@ -4566,6 +4748,17 @@ class LayoutScene(QGraphicsScene):
         self.undo_stack.redo()
     
     def keyPressEvent(self, event):
+        # 盖章会话按键拦截：空格盖章，ESC放弃
+        if self.stamping_session:
+            if event.key() == Qt.Key.Key_Space:
+                self.stamp_current_selection()
+                event.accept()
+                return
+            elif event.key() == Qt.Key.Key_Escape:
+                self.abort_stamping_session()
+                event.accept()
+                return
+
         # ESC键取消连接模式
         if event.key() == Qt.Key.Key_Escape:
             if self.connection_mode:
