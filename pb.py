@@ -3972,9 +3972,24 @@ class LayoutScene(QGraphicsScene):
 
         # 启动盖章会话追踪：如果按下左键后有选中元素，则开启会话
         if event.button() == Qt.MouseButton.LeftButton and self.selectedItems():
+            # --- 新增：递归获取所有子级元素的逻辑 ---
+            all_items_to_process = []
+            def collect_all_children(item):
+                if isinstance(item, BaseElement):
+                    if item not in all_items_to_process:
+                        all_items_to_process.append(item)
+                # 遍历当前项的所有子项目
+                for child in item.childItems():
+                    collect_all_children(child)
+
+            # 对每一个选中的物体执行递归搜寻
+            for selected_item in self.selectedItems():
+                collect_all_children(selected_item)
+            # ----------------------------------------
+
             self.stamping_session = {
-                'stamps': [],  # 存储每一批生成的副本命令
-                'initial_items': [i for i in self.selectedItems() if isinstance(i, BaseElement)]
+                'stamps': [],  
+                'initial_items': all_items_to_process # 现在这里包含了父级及其所有子级
             }
 
     def mouseReleaseEvent(self, event):
