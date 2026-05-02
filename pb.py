@@ -53,6 +53,7 @@ class ConfigManager:
             'default_font_size': DEFAULT_FONT_SIZE,
             'default_line_width': DEFAULT_LINE_WIDTH,  # 默认连线粗细
             'bg_above_connectors': False,  # 背景图片是否在连线之上
+            'marquee_only_images': False,  # 框选时仅选择图片
             'favorite_fonts': ['SimSun', 'Microsoft YaHei', '黑体', '楷体', 'Arial'],
             'favorite_sizes': [10, 12, 14, 16, 18, 20, 24, 30, 36, 48, 72],
         }
@@ -1338,6 +1339,7 @@ class ProjectData:
                 data['width'] = item.target_width
                 data['opacity'] = item.image_opacity
                 data['locked'] = item.locked
+                data['visible'] = item.isVisible()
                 if item.connection_point:
                     data['connection_point_visible'] = item.connection_point.isVisible()
             
@@ -1433,6 +1435,8 @@ class ProjectData:
                     item.set_opacity(d['opacity'])
                 if d.get('locked', False):
                     item.set_locked(True)
+                if 'visible' in d:
+                    item.set_image_visible(d['visible'])
             
             if item:
                 # 使用场景坐标（如果有的话）
@@ -3284,6 +3288,20 @@ class VImageItem(BaseElement):
             self.p_item.setOpacity(self.image_opacity * (0.6 if locked else 1.0))
         self.update()
 
+    def set_image_visible(self, visible):
+        """设置图片显示/隐藏"""
+        self.setVisible(visible)
+        if not visible:
+            self.setSelected(False)
+            self._show_handles(False)
+        if self.scene():
+            self.scene().update_connectors(self)
+            self.scene().update_image_text_connectors(self)
+
+    def toggle_image_visible(self):
+        """切换图片显示/隐藏"""
+        self.set_image_visible(not self.isVisible())
+
     def _create_handles(self):
         for role in ('tl', 'tc', 'tr', 'ml', 'mr', 'bl', 'bc', 'br'):
             h = ResizeHandle(self, role)
@@ -3411,6 +3429,8 @@ class VImageItem(BaseElement):
         # 锁定/解锁
         lock_lbl = "🔓 解锁图片" if self.locked else "🔒 锁定图片"
         menu.addAction(lock_lbl).triggered.connect(lambda: self.set_locked(not self.locked))
+        visible_lbl = "隐藏图片" if self.isVisible() else "显示图片"
+        menu.addAction(visible_lbl).triggered.connect(self.toggle_image_visible)
         menu.addSeparator()
 
         # 图片自身操作
@@ -3731,6 +3751,8 @@ class LayoutScene(QGraphicsScene):
         self.snap_threshold = 20  # 辅助线吸附距离（场景像素）
         self.resize_mode = False  # 图片调整大小模式
         self.stamping_session = None  # 盖章式批量复制会话
+        self.align_reference_mode = None  # 对齐基准点选模式
+        self.align_reference_candidates = []
         
         # 连接选择改变信号
         self.selectionChanged.connect(self.on_selection_changed_track)
@@ -3929,8 +3951,8 @@ class LayoutScene(QGraphicsScene):
         print("Select parent for binding...")
 
     def contextMenuEvent(self, event):
-        """右键菜单：盖章过程中屏蔽菜单"""
-        if self.stamping_session:
+        """右键菜单：盖章或对齐基准选择过程中屏蔽菜单"""
+        if self.stamping_session or self.align_reference_mode:
             event.accept()
             return
 
@@ -3941,10 +3963,25 @@ class LayoutScene(QGraphicsScene):
             super().contextMenuEvent(event)
 
     def mousePressEvent(self, event):
-        """鼠标按下事件：处理元素点击、父子绑定和盖章会话"""
+        """鼠标按下事件：处理元素点击、父子绑定、对齐基准选择和盖章会话"""
         # 盖章模式拦截：拖拽中按右键触发盖章
         if event.button() == Qt.MouseButton.RightButton and self.stamping_session:
             self.stamp_current_selection()
+            event.accept()
+            return
+
+        # 对齐基准选择模式：点选当前已选对象中的一个作为基准
+        if self.align_reference_mode and event.button() == Qt.MouseButton.LeftButton:
+            raw = self.itemAt(event.scenePos(), QTransform())
+            target_item = raw
+            while target_item is not None and not isinstance(target_item, BaseElement):
+                target_item = target_item.parentItem()
+
+            if target_item and target_item in self.align_reference_candidates:
+                self._execute_alignment_with_reference(self.align_reference_mode, target_item, self.align_reference_candidates)
+                self._cancel_align_reference_mode()
+            else:
+                print("请点击当前已选对象中的一个作为对齐基准，按 ESC 可取消")
             event.accept()
             return
 
@@ -4763,6 +4800,12 @@ class LayoutScene(QGraphicsScene):
         self.undo_stack.redo()
     
     def keyPressEvent(self, event):
+        # 对齐基准点选模式：ESC 取消
+        if self.align_reference_mode and event.key() == Qt.Key.Key_Escape:
+            self._cancel_align_reference_mode()
+            event.accept()
+            return
+
         # 盖章会话按键拦截：空格盖章，ESC放弃
         if self.stamping_session:
             if event.key() == Qt.Key.Key_Space:
@@ -4825,92 +4868,94 @@ class LayoutScene(QGraphicsScene):
         else:
             super().keyPressEvent(event)
     
-    def align_top(self, items=None):
-        if items is None: items = [item for item in self.selectedItems() if isinstance(item, BaseElement)]
-        if len(items) < 2: return
-        # 以第一个选中的元素为基准
-        ref_items = [i for i in self.selection_order if i in items]
-        ref = ref_items[0] if ref_items else items[0]
-        min_y = ref.scenePos().y()
-        for item in items:
-            current_pos = item.scenePos()
-            new_scene_pos = QPointF(current_pos.x(), min_y)
-            if item.parentItem():
-                item.setPos(item.parentItem().mapFromScene(new_scene_pos))
-            else:
-                item.setPos(new_scene_pos)
-        
+    def _start_align_reference_mode(self, align_mode, items, tip_text):
+        self.align_reference_mode = align_mode
+        self.align_reference_candidates = list(items)
+        if self.views():
+            self.views()[0].setCursor(Qt.CursorShape.CrossCursor)
+        print(tip_text)
+
+    def _cancel_align_reference_mode(self):
+        self.align_reference_mode = None
+        self.align_reference_candidates = []
+        if self.views():
+            self.views()[0].setCursor(Qt.CursorShape.ArrowCursor)
+        print("已取消对齐基准选择")
+
+    def _execute_alignment_with_reference(self, align_mode, ref, items):
+        if align_mode == 'top':
+            ref_value = ref.scenePos().y()
+            for item in items:
+                current_pos = item.scenePos()
+                new_scene_pos = QPointF(current_pos.x(), ref_value)
+                if item.parentItem():
+                    item.setPos(item.parentItem().mapFromScene(new_scene_pos))
+                else:
+                    item.setPos(new_scene_pos)
+        elif align_mode == 'right':
+            ref_value = ref.scenePos().x() + ref.boundingRect().width()
+            for item in items:
+                current_pos = item.scenePos()
+                new_x = ref_value - item.boundingRect().width()
+                new_scene_pos = QPointF(new_x, current_pos.y())
+                if item.parentItem():
+                    item.setPos(item.parentItem().mapFromScene(new_scene_pos))
+                else:
+                    item.setPos(new_scene_pos)
+        elif align_mode == 'center_h':
+            ref_value = ref.scenePos().x() + ref.boundingRect().width() / 2
+            for item in items:
+                current_pos = item.scenePos()
+                new_x = ref_value - item.boundingRect().width() / 2
+                new_scene_pos = QPointF(new_x, current_pos.y())
+                if item.parentItem():
+                    item.setPos(item.parentItem().mapFromScene(new_scene_pos))
+                else:
+                    item.setPos(new_scene_pos)
+        elif align_mode == 'center_v':
+            ref_value = ref.scenePos().y() + ref.boundingRect().height() / 2
+            for item in items:
+                current_pos = item.scenePos()
+                new_y = ref_value - item.boundingRect().height() / 2
+                new_scene_pos = QPointF(current_pos.x(), new_y)
+                if item.parentItem():
+                    item.setPos(item.parentItem().mapFromScene(new_scene_pos))
+                else:
+                    item.setPos(new_scene_pos)
+
         for item in items:
             self.update_connectors(item)
             self.update_image_text_connectors(item)
-        
-        print(f"已对齐到顶部（基准: {ref}）")
+
+        print(f"已完成对齐，基准对象: {type(ref).__name__}")
+
+    def align_top(self, items=None):
+        if items is None:
+            items = [item for item in self.selectedItems() if isinstance(item, BaseElement)]
+        if len(items) < 2:
+            return
+        self._start_align_reference_mode('top', items, '请在画布中点选一个已选对象作为“顶部对齐”基准，按 ESC 可取消')
     
     def align_right(self, items=None):
-        if items is None: items = [item for item in self.selectedItems() if isinstance(item, BaseElement)]
-        if len(items) < 2: return
-        # 以第一个选中的元素为基准
-        ref_items = [i for i in self.selection_order if i in items]
-        ref = ref_items[0] if ref_items else items[0]
-        max_right = ref.scenePos().x() + ref.boundingRect().width()
-        for item in items:
-            current_pos = item.scenePos()
-            new_x = max_right - item.boundingRect().width()
-            new_scene_pos = QPointF(new_x, current_pos.y())
-            if item.parentItem():
-                item.setPos(item.parentItem().mapFromScene(new_scene_pos))
-            else:
-                item.setPos(new_scene_pos)
-        
-        for item in items:
-            self.update_connectors(item)
-            self.update_image_text_connectors(item)
-        
-        print(f"已对齐到右边（基准: {ref}）")
+        if items is None:
+            items = [item for item in self.selectedItems() if isinstance(item, BaseElement)]
+        if len(items) < 2:
+            return
+        self._start_align_reference_mode('right', items, '请在画布中点选一个已选对象作为“右对齐”基准，按 ESC 可取消')
     
     def align_center_horizontal(self, items=None):
-        if items is None: items = [item for item in self.selectedItems() if isinstance(item, BaseElement)]
-        if len(items) < 2: return
-        # 以第一个选中的元素为基准
-        ref_items = [i for i in self.selection_order if i in items]
-        ref = ref_items[0] if ref_items else items[0]
-        center_x = ref.scenePos().x() + ref.boundingRect().width() / 2
-        for item in items:
-            current_pos = item.scenePos()
-            new_x = center_x - item.boundingRect().width() / 2
-            new_scene_pos = QPointF(new_x, current_pos.y())
-            if item.parentItem():
-                item.setPos(item.parentItem().mapFromScene(new_scene_pos))
-            else:
-                item.setPos(new_scene_pos)
-        
-        for item in items:
-            self.update_connectors(item)
-            self.update_image_text_connectors(item)
-        
-        print(f"已水平居中对齐（基准: {ref}）")
+        if items is None:
+            items = [item for item in self.selectedItems() if isinstance(item, BaseElement)]
+        if len(items) < 2:
+            return
+        self._start_align_reference_mode('center_h', items, '请在画布中点选一个已选对象作为“水平居中”基准，按 ESC 可取消')
     
     def align_center_vertical(self, items=None):
-        if items is None: items = [item for item in self.selectedItems() if isinstance(item, BaseElement)]
-        if len(items) < 2: return
-        # 以第一个选中的元素为基准
-        ref_items = [i for i in self.selection_order if i in items]
-        ref = ref_items[0] if ref_items else items[0]
-        center_y = ref.scenePos().y() + ref.boundingRect().height() / 2
-        for item in items:
-            current_pos = item.scenePos()
-            new_y = center_y - item.boundingRect().height() / 2
-            new_scene_pos = QPointF(current_pos.x(), new_y)
-            if item.parentItem():
-                item.setPos(item.parentItem().mapFromScene(new_scene_pos))
-            else:
-                item.setPos(new_scene_pos)
-        
-        for item in items:
-            self.update_connectors(item)
-            self.update_image_text_connectors(item)
-        
-        print(f"已垂直居中对齐（基准: {ref}）")
+        if items is None:
+            items = [item for item in self.selectedItems() if isinstance(item, BaseElement)]
+        if len(items) < 2:
+            return
+        self._start_align_reference_mode('center_v', items, '请在画布中点选一个已选对象作为“垂直居中”基准，按 ESC 可取消')
 
     def batch_copy(self, params):
         """步长和重复复制"""
@@ -4956,9 +5001,13 @@ class LayoutView(QGraphicsView):
         self.setViewportUpdateMode(QGraphicsView.ViewportUpdateMode.FullViewportUpdate)
         self.setRenderHint(QPainter.RenderHint.Antialiasing)
         self.setRenderHint(QPainter.RenderHint.Antialiasing)
-        self.setDragMode(QGraphicsView.DragMode.RubberBandDrag)
+        self.setDragMode(QGraphicsView.DragMode.NoDrag)
         self.setAcceptDrops(True)
         self._is_panning = False
+        self._marquee_origin = QPoint()
+        self._marquee_active = False
+        self._marquee_mode = Qt.ItemSelectionMode.ContainsItemShape
+        self._marquee_band = QRubberBand(QRubberBand.Shape.Rectangle, self.viewport())
         self._pan_start = QPoint()
         self._main_window = None
         # 辅助线拖拽状态
@@ -4978,6 +5027,37 @@ class LayoutView(QGraphicsView):
     def _in_v_ruler(self, pos):
         """鼠标是否在垂直标尺区域（左侧）"""
         return pos.x() < self.RULER_SIZE and pos.y() >= self.RULER_SIZE
+
+    def _update_marquee_style(self, current_pos):
+        left_to_right = current_pos.x() >= self._marquee_origin.x()
+        if left_to_right:
+            self._marquee_mode = Qt.ItemSelectionMode.ContainsItemShape
+            self._marquee_band.setStyleSheet("background: rgba(0, 120, 215, 0.18); border: 1px solid rgba(0, 120, 215, 0.95);")
+        else:
+            self._marquee_mode = Qt.ItemSelectionMode.IntersectsItemShape
+            self._marquee_band.setStyleSheet("background: rgba(0, 200, 120, 0.18); border: 1px solid rgba(0, 200, 120, 0.95);")
+
+    def _apply_marquee_selection(self):
+        rect = self._marquee_band.geometry()
+        if rect.width() < 3 or rect.height() < 3:
+            return
+
+        scene_polygon = self.mapToScene(rect)
+        path = QPainterPath()
+        path.addPolygon(scene_polygon)
+
+        scene = self.scene()
+        only_images = scene.config_manager.get('marquee_only_images', False)
+        scene.clearSelection()
+        items = scene.items(path, self._marquee_mode, Qt.SortOrder.DescendingOrder, self.transform())
+
+        for item in items:
+            if only_images:
+                if isinstance(item, VImageItem) and not getattr(item, 'locked', False):
+                    item.setSelected(True)
+            else:
+                if item.flags() & QGraphicsItem.GraphicsItemFlag.ItemIsSelectable:
+                    item.setSelected(True)
 
     def paintEvent(self, event):
         super().paintEvent(event)
@@ -5098,7 +5178,6 @@ class LayoutView(QGraphicsView):
                 self._guide_orientation = Qt.Orientation.Horizontal
                 scene_y = self.mapToScene(pos).y()
                 self._guide_preview = self.scene().add_guide(Qt.Orientation.Horizontal, scene_y)
-                self.setDragMode(QGraphicsView.DragMode.NoDrag)
                 event.accept()
                 return
             elif self._in_v_ruler(pos):
@@ -5107,7 +5186,16 @@ class LayoutView(QGraphicsView):
                 self._guide_orientation = Qt.Orientation.Vertical
                 scene_x = self.mapToScene(pos).x()
                 self._guide_preview = self.scene().add_guide(Qt.Orientation.Vertical, scene_x)
-                self.setDragMode(QGraphicsView.DragMode.NoDrag)
+                event.accept()
+                return
+
+            # 空白区域启动 AutoCAD 风格框选
+            if self.itemAt(pos) is None:
+                self._marquee_active = True
+                self._marquee_origin = pos
+                self._update_marquee_style(pos)
+                self._marquee_band.setGeometry(QRect(self._marquee_origin, QSize()))
+                self._marquee_band.show()
                 event.accept()
                 return
 
@@ -5130,6 +5218,13 @@ class LayoutView(QGraphicsView):
             self._guide_preview._update_pos()
             self._guide_preview.update()
             self.update()  # 刷新标尺上的光标线
+            event.accept()
+            return
+
+        if self._marquee_active:
+            self._update_marquee_style(event.pos())
+            self._marquee_band.setGeometry(QRect(self._marquee_origin, event.pos()).normalized())
+            self.update()
             event.accept()
             return
 
@@ -5157,7 +5252,13 @@ class LayoutView(QGraphicsView):
             self._guide_dragging = False
             self._guide_preview = None
             self._guide_orientation = None
-            self.setDragMode(QGraphicsView.DragMode.RubberBandDrag)
+            event.accept()
+            return
+
+        if self._marquee_active and event.button() == Qt.MouseButton.LeftButton:
+            self._marquee_active = False
+            self._apply_marquee_selection()
+            self._marquee_band.hide()
             event.accept()
             return
 
@@ -5614,6 +5715,10 @@ class MainWindow(QMainWindow):
         clear_background_action = QAction('清除背景图片', self)
         clear_background_action.triggered.connect(self.clear_background_image)
         view_menu.addAction(clear_background_action)
+
+        show_all_images_action = QAction('显示所有隐藏图片', self)
+        show_all_images_action.triggered.connect(self.show_all_hidden_images)
+        view_menu.addAction(show_all_images_action)
         
         background_opacity_action = QAction('设置背景透明度...', self)
         background_opacity_action.triggered.connect(self.set_background_opacity)
@@ -5667,10 +5772,23 @@ class MainWindow(QMainWindow):
         self.auto_exit_paste_action.toggled.connect(self.toggle_auto_exit_setting)
         edit_menu.addAction(self.auto_exit_paste_action)
 
+        self.marquee_filter_action = QAction('框选时仅选中图片', self)
+        self.marquee_filter_action.setCheckable(True)
+        self.marquee_filter_action.setChecked(self.scene.config_manager.get('marquee_only_images', False))
+        self.marquee_filter_action.toggled.connect(self.toggle_marquee_filter_setting)
+        edit_menu.addAction(self.marquee_filter_action)
 
     def toggle_auto_exit_setting(self, enabled):
         """切换粘贴后自动退出编辑的开关"""
         self.scene.config_manager.set('auto_exit_after_paste', enabled)
+
+    def toggle_marquee_filter_setting(self, enabled):
+        """切换框选时仅选中图片"""
+        self.scene.config_manager.set('marquee_only_images', enabled)
+        if enabled:
+            self.status_bar.showMessage('模式已切换：框选仅选中图片', 3000)
+        else:
+            self.status_bar.showMessage('模式已切换：框选恢复正常过滤', 3000)
 
     def show_canvas_context_menu(self, pos):
         """画布空白处右键菜单"""
@@ -6045,6 +6163,15 @@ class MainWindow(QMainWindow):
         if reply == QMessageBox.StandardButton.Yes:
             self.scene.set_background_image('')
             QMessageBox.information(self, "成功", "背景图片已清除")
+
+    def show_all_hidden_images(self):
+        """显示所有被隐藏的图片"""
+        count = 0
+        for item in self.scene.items():
+            if isinstance(item, VImageItem) and not item.isVisible():
+                item.set_image_visible(True)
+                count += 1
+        self.status_bar.showMessage(f'已显示 {count} 张隐藏图片', 3000)
 
     def toggle_guides(self):
         """切换辅助线显示/隐藏"""
