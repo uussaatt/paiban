@@ -54,6 +54,7 @@ class ConfigManager:
             'default_line_width': DEFAULT_LINE_WIDTH,  # 默认连线粗细
             'bg_above_connectors': False,  # 背景图片是否在连线之上
             'marquee_only_images': False,  # 框选时仅选择图片
+            'insert_image_to_bottom': False,  # 插入图片时置于底层
             'favorite_fonts': ['SimSun', 'Microsoft YaHei', '黑体', '楷体', 'Arial'],
             'favorite_sizes': [10, 12, 14, 16, 18, 20, 24, 30, 36, 48, 72],
         }
@@ -5440,6 +5441,8 @@ class LayoutView(QGraphicsView):
                     pos = self.mapToScene(event.position().toPoint())
                     img = VImageItem(path, target_width=DEFAULT_FONT_SIZE*4)
                     img.setPos(pos)
+                    if self.scene().config_manager.get('insert_image_to_bottom', False):
+                        img.setZValue(-1)
                     self.scene().add_item_with_undo(img)
             event.acceptProposedAction()
     
@@ -5827,6 +5830,12 @@ class MainWindow(QMainWindow):
         self.marquee_filter_action.toggled.connect(self.toggle_marquee_filter_setting)
         edit_menu.addAction(self.marquee_filter_action)
 
+        self.insert_image_to_bottom_action = QAction('插入图片时置于底层', self)
+        self.insert_image_to_bottom_action.setCheckable(True)
+        self.insert_image_to_bottom_action.setChecked(self.scene.config_manager.get('insert_image_to_bottom', False))
+        self.insert_image_to_bottom_action.toggled.connect(self.toggle_insert_image_to_bottom)
+        edit_menu.addAction(self.insert_image_to_bottom_action)
+
     def toggle_auto_exit_setting(self, enabled):
         """切换粘贴后自动退出编辑的开关"""
         self.scene.config_manager.set('auto_exit_after_paste', enabled)
@@ -5839,11 +5848,21 @@ class MainWindow(QMainWindow):
         else:
             self.status_bar.showMessage('模式已切换：框选恢复正常过滤', 3000)
 
+    def toggle_insert_image_to_bottom(self, enabled):
+        """切换插入图片时是否置于底层"""
+        self.scene.config_manager.set('insert_image_to_bottom', enabled)
+        if enabled:
+            self.status_bar.showMessage('已开启：插入图片时自动置于文字和连线底层', 3000)
+        else:
+            self.status_bar.showMessage('已关闭：插入图片时保持默认层级', 3000)
+
     def show_canvas_context_menu(self, pos):
         """画布空白处右键菜单"""
         menu = QMenu(self)
         menu.addAction("添加文本", self.add_text)
         menu.addAction("插入图片", self.add_image)
+        menu.addSeparator()
+        menu.addAction("显示所有隐藏图片", self.show_all_hidden_images)
         menu.addSeparator()
         menu.addAction("打开工程\tCtrl+O", self.load_proj)
         menu.addAction("保存工程\tCtrl+S", self.save_proj)
@@ -5875,6 +5894,8 @@ class MainWindow(QMainWindow):
             img = VImageItem(path, target_width=DEFAULT_FONT_SIZE*4)
             center = self.view.mapToScene(self.view.viewport().rect().center())
             img.setPos(center)
+            if self.scene.config_manager.get('insert_image_to_bottom', False):
+                img.setZValue(-1)
             self.scene.add_item_with_undo(img)
     
     def edit_selected_text(self):
