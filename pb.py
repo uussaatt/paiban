@@ -1715,22 +1715,6 @@ class MoveItemCommand(UndoCommand):
         self._update_connectors()
 
     def undo(self):
-        if self.item.parentItem():
-            self.item.setPos(self.item.parentItem().mapFromScene(self.old_scene_pos))
-        else:
-            self.item.setPos(self.old_scene_pos)
-        self._update_connectors()
-
-    def _update_connectors(self):
-        if self.item.scene():
-            self.item.scene().update_connectors(self.item)
-            self.item.scene().update_image_text_connectors(self.item)
-            for child in self.item.childItems():
-                if isinstance(child, BaseElement):
-                    self.item.scene().update_connectors(child)
-                    self.item.scene().update_image_text_connectors(child)
-
-    def undo(self):
         # 只需移动父级，子元素作为子项会自动跟随
         if self.item.parentItem():
             local_pos = self.item.parentItem().mapFromScene(self.old_scene_pos)
@@ -1739,6 +1723,15 @@ class MoveItemCommand(UndoCommand):
             self.item.setPos(self.old_scene_pos)
 
         # 更新所有相关连线
+        if self.item.scene():
+            self.item.scene().update_connectors(self.item)
+            self.item.scene().update_image_text_connectors(self.item)
+            for child in self.item.childItems():
+                if isinstance(child, BaseElement):
+                    self.item.scene().update_connectors(child)
+                    self.item.scene().update_image_text_connectors(child)
+
+    def _update_connectors(self):
         if self.item.scene():
             self.item.scene().update_connectors(self.item)
             self.item.scene().update_image_text_connectors(self.item)
@@ -1878,65 +1871,97 @@ class AnchorHandle(QGraphicsRectItem):
         return self.mapToScene(0, 0)
 
 class ConnectionPoint(QGraphicsEllipseItem):
-    """可视化连接点"""
+    """可视化连接点：扩大点击区、增强悬停反馈、缩小时保持可见"""
+    HIT_RADIUS = 10
+    BOUNDS_RADIUS = 11
+    BASE_RADIUS = 2
+    HOVER_RADIUS = 5
+
     def __init__(self, parent_item, point_type="image_top"):
-        super().__init__(-8, -8, 16, 16)  # 16x16像素的圆点（更大）
+        super().__init__()
         self.parent_element = parent_item
         self.point_type = point_type  # "image_top", "text_bottom"
         self.connected_lines = []  # 连接到此点的线条
-        
-        # 设置样式
-        self.setBrush(QBrush(QColor(255, 100, 100, 200)))  # 半透明红色
-        self.setPen(QPen(QColor(200, 50, 50), 3))  # 更粗的边框
-        
+        self._hovered = False
+        self.base_brush = QBrush(QColor(255, 100, 100, 200))
+        self.base_pen = QPen(QColor(200, 50, 50), 3)
+        self.hover_brush = QBrush(QColor(0, 255, 120, 240))
+        self.hover_pen = QPen(QColor(0, 200, 80), 3)
+
         # 设置交互属性
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, False)
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, True)
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemSendsGeometryChanges, True)
-        
+
         # 设置层级和父级
         self.setZValue(100)  # 显示在最上层
         self.setParentItem(parent_item)
-        
+
         # 更新位置
         self.update_position()
-        
+
         # 鼠标悬停效果
         self.setAcceptHoverEvents(True)
-        
+
+    def boundingRect(self):
+        """扩大重绘范围，避免缩小时视觉被裁切"""
+        r = self.BOUNDS_RADIUS
+        return QRectF(-r, -r, r * 2, r * 2)
+
+    def shape(self):
+        """扩大点击/悬停感应区到约 40x40 像素"""
+        path = QPainterPath()
+        r = self.HIT_RADIUS
+        path.addEllipse(QRectF(-r, -r, r * 2, r * 2))
+        return path
+
+    def paint(self, painter, option, widget):
+        """圆心始终保持在(0,0)，缩小时仍保持足够可见"""
+        lod = option.levelOfDetailFromTransform(painter.worldTransform())
+        lod = max(lod, 0.001)
+
+        radius = self.HOVER_RADIUS if self._hovered else self.BASE_RADIUS
+        min_screen_radius = self.HOVER_RADIUS if self._hovered else self.BASE_RADIUS
+        if lod < 1.0:
+            radius = max(radius, min_screen_radius / lod)
+
+        rect = QRectF(-radius, -radius, radius * 2, radius * 2)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setBrush(self.hover_brush if self._hovered else self.base_brush)
+        painter.setPen(self.hover_pen if self._hovered else self.base_pen)
+        painter.drawEllipse(rect)
+
     def update_position(self):
         """更新连接点位置（仅更新自身坐标，连线由父元素的 itemChange 统一更新）"""
         if not self.parent_element:
             return
-            
+
         rect = self.parent_element.boundingRect()
-        
+
         if self.point_type == "image_top":
-            # 图片顶部中点
-            self.setPos(rect.width()/2, 0)
+            self.setPos(rect.width() / 2, 0)
         elif self.point_type == "text_bottom":
-            # 文字底部中点
-            self.setPos(rect.width()/2, rect.height())
-    
+            self.setPos(rect.width() / 2, rect.height())
+
     def hoverEnterEvent(self, event):
         """鼠标悬停进入"""
-        self.setBrush(QBrush(QColor(255, 150, 150, 255)))  # 高亮显示
-        self.setPen(QPen(QColor(255, 0, 0), 4))  # 更粗的悬停边框
+        self._hovered = True
+        self.update()
         super().hoverEnterEvent(event)
-    
+
     def hoverLeaveEvent(self, event):
         """鼠标悬停离开"""
-        self.setBrush(QBrush(QColor(255, 100, 100, 200)))  # 恢复原样
-        self.setPen(QPen(QColor(200, 50, 50), 3))  # 恢复原始粗细
+        self._hovered = False
+        self.update()
         super().hoverLeaveEvent(event)
-    
+
     def mousePressEvent(self, event):
         """鼠标按下开始连接"""
         if event.button() == Qt.MouseButton.LeftButton:
             if self.scene():
                 self.scene().start_connection_from_point(self)
         super().mousePressEvent(event)
-    
+
     def get_scene_center(self):
         """获取连接点在场景中的中心位置"""
         return self.mapToScene(0, 0)
@@ -4057,7 +4082,7 @@ class LayoutScene(QGraphicsScene):
             self.connectors.remove(c)
 
     def stamp_current_selection(self):
-        """修复版盖章函数"""
+        """修复版盖章函数 - 每次复制单独推入撤销栈"""
         if not self.stamping_session:
             return
             
@@ -4091,28 +4116,34 @@ class LayoutScene(QGraphicsScene):
         for conn in internal_conns:
             conn.update_path()
             
-        self.stamping_session['stamps'].append(batch_cmds)
-
-    def finish_stamping_session(self):
-        """正常结束盖章会话，将所有副本封装进一个宏命令以便 Ctrl+Z"""
-        if not self.stamping_session:
-            return
-            
-        all_stamps_cmds = []
-        for batch in self.stamping_session['stamps']:
-            all_stamps_cmds.extend(batch)
-            
         # 恢复所有副本的交互属性
-        for cmd in all_stamps_cmds:
+        for cmd in batch_cmds:
             if isinstance(cmd, AddItemCommand):
                 cmd.item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, True)
                 cmd.item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, True)
         
-        # 如果生成了副本，封装成 MacroCommand 存入撤销栈
-        if all_stamps_cmds:
-            macro = MacroCommand(self, all_stamps_cmds)
-            self.undo_stack.push(macro)
-            print(f"盖章会话结束，共生成 {len(self.stamping_session['stamps'])} 串副本")
+        # 5. 【修改点】每次复制都单独推入撤销栈，而不是等到会话结束
+        if batch_cmds:
+            # 如果这是第一次复制，创建一个新的宏命令
+            if len(self.stamping_session['stamps']) == 0:
+                macro = MacroCommand(self, batch_cmds)
+                self.undo_stack.push(macro)
+            else:
+                # 对于后续的复制，创建一个新的宏命令单独推入撤销栈
+                # 这样每次复制都可以单独撤销
+                macro = MacroCommand(self, batch_cmds)
+                self.undo_stack.push(macro)
+            
+            self.stamping_session['stamps'].append(batch_cmds)
+            print(f"已复制 {len(roots_only)} 个元素，可按 Ctrl+Z 单独撤销此次复制")
+
+    def finish_stamping_session(self):
+        """正常结束盖章会话 - 现在每次复制都已单独推入撤销栈"""
+        if not self.stamping_session:
+            return
+            
+        print(f"盖章会话结束，共生成 {len(self.stamping_session['stamps'])} 串副本")
+        print("提示：每次复制都已单独记录到撤销栈，可按 Ctrl+Z 逐一撤销")
             
         self.stamping_session = None
 
@@ -4149,11 +4180,17 @@ class LayoutScene(QGraphicsScene):
                 clone.auto_height = item.auto_height
                 clone.manual_line_break = item.manual_line_break
                 clone.rebuild()
+                # 同步连接点可见性
+                if item.connection_point and clone.connection_point:
+                    clone.connection_point.setVisible(item.connection_point.isVisible())
             elif isinstance(item, VImageItem):
                 clone = VImageItem(item.file_path, item.target_width)
                 clone.set_opacity(item.image_opacity)
                 if item.locked:
                     clone.set_locked(True)
+                # 同步连接点可见性
+                if item.connection_point and clone.connection_point:
+                    clone.connection_point.setVisible(item.connection_point.isVisible())
             
             if clone:
                 clone.setZValue(item.zValue())
@@ -4883,49 +4920,61 @@ class LayoutScene(QGraphicsScene):
         print("已取消对齐基准选择")
 
     def _execute_alignment_with_reference(self, align_mode, ref, items):
+        # 收集所有移动命令
+        move_commands = []
+        
         if align_mode == 'top':
             ref_value = ref.scenePos().y()
             for item in items:
+                if item == ref:  # 跳过基准对象本身
+                    continue
                 current_pos = item.scenePos()
                 new_scene_pos = QPointF(current_pos.x(), ref_value)
-                if item.parentItem():
-                    item.setPos(item.parentItem().mapFromScene(new_scene_pos))
-                else:
-                    item.setPos(new_scene_pos)
+                # 创建移动命令
+                cmd = MoveItemCommand(self, item, current_pos, new_scene_pos)
+                cmd.execute()  # 执行移动
+                move_commands.append(cmd)
         elif align_mode == 'right':
             ref_value = ref.scenePos().x() + ref.boundingRect().width()
             for item in items:
+                if item == ref:  # 跳过基准对象本身
+                    continue
                 current_pos = item.scenePos()
                 new_x = ref_value - item.boundingRect().width()
                 new_scene_pos = QPointF(new_x, current_pos.y())
-                if item.parentItem():
-                    item.setPos(item.parentItem().mapFromScene(new_scene_pos))
-                else:
-                    item.setPos(new_scene_pos)
+                # 创建移动命令
+                cmd = MoveItemCommand(self, item, current_pos, new_scene_pos)
+                cmd.execute()  # 执行移动
+                move_commands.append(cmd)
         elif align_mode == 'center_h':
             ref_value = ref.scenePos().x() + ref.boundingRect().width() / 2
             for item in items:
+                if item == ref:  # 跳过基准对象本身
+                    continue
                 current_pos = item.scenePos()
                 new_x = ref_value - item.boundingRect().width() / 2
                 new_scene_pos = QPointF(new_x, current_pos.y())
-                if item.parentItem():
-                    item.setPos(item.parentItem().mapFromScene(new_scene_pos))
-                else:
-                    item.setPos(new_scene_pos)
+                # 创建移动命令
+                cmd = MoveItemCommand(self, item, current_pos, new_scene_pos)
+                cmd.execute()  # 执行移动
+                move_commands.append(cmd)
         elif align_mode == 'center_v':
             ref_value = ref.scenePos().y() + ref.boundingRect().height() / 2
             for item in items:
+                if item == ref:  # 跳过基准对象本身
+                    continue
                 current_pos = item.scenePos()
                 new_y = ref_value - item.boundingRect().height() / 2
                 new_scene_pos = QPointF(current_pos.x(), new_y)
-                if item.parentItem():
-                    item.setPos(item.parentItem().mapFromScene(new_scene_pos))
-                else:
-                    item.setPos(new_scene_pos)
+                # 创建移动命令
+                cmd = MoveItemCommand(self, item, current_pos, new_scene_pos)
+                cmd.execute()  # 执行移动
+                move_commands.append(cmd)
 
-        for item in items:
-            self.update_connectors(item)
-            self.update_image_text_connectors(item)
+        # 将所有移动命令打包为一个宏命令，以便一次撤销
+        if move_commands:
+            macro_cmd = MacroCommand(self, move_commands)
+            self.undo_stack.push(macro_cmd)
 
         print(f"已完成对齐，基准对象: {type(ref).__name__}")
 
