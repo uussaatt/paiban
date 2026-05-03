@@ -2604,17 +2604,46 @@ class BaseElement(QGraphicsItem):
         self._build_base_context_menu(event.screenPos())
 
     def paint(self, painter, option, widget):
-        # Draw orange dashed selection border
         if self.isSelected():
-            # 设置抗锯齿以获得更平滑的线条
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-            
-            # 橙色粗虚线边框
-            pen = QPen(QColor(255, 140, 0), 3, Qt.PenStyle.DashLine)  # 橙色，3像素粗
-            pen.setDashPattern([8, 4])  # 自定义虚线样式：8像素实线，4像素间隔
-            painter.setPen(pen)
+
+            scale = 1.0
+            if self.scene() and self.scene().views():
+                scale = max(self.scene().views()[0].transform().m11(), 0.001)
+
+            inset = 5 / scale
+            rect = self.boundingRect().adjusted(-inset, -inset, inset, inset)
+            screen_short_side = min(rect.width() * scale, rect.height() * scale)
+            if screen_short_side < 45:
+                outer_width = 3
+                inner_width = 2
+                dash_pattern = [2, 2]
+            elif screen_short_side < 90:
+                outer_width = 4
+                inner_width = 2
+                dash_pattern = [3, 2]
+            else:
+                outer_width = 6
+                inner_width = 3
+                dash_pattern = [7, 4]
+
+            painter.setBrush(QBrush(QColor(0, 120, 215, 28)))
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.drawRect(rect)
+
+            outer_pen = QPen(QColor(255, 255, 255, 235), outer_width, Qt.PenStyle.SolidLine)
+            outer_pen.setCosmetic(True)
+            outer_pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+            painter.setPen(outer_pen)
             painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.drawRect(self.boundingRect())
+            painter.drawRect(rect)
+
+            inner_pen = QPen(QColor(0, 140, 255, 255), inner_width, Qt.PenStyle.DashLine)
+            inner_pen.setCosmetic(True)
+            inner_pen.setDashPattern(dash_pattern)
+            inner_pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+            painter.setPen(inner_pen)
+            painter.drawRect(rect)
     
     def toggle_connection_point(self):
         """切换连接点的可见性"""
