@@ -1872,7 +1872,7 @@ class AnchorHandle(QGraphicsRectItem):
         return self.mapToScene(0, 0)
 
 class ConnectionPoint(QGraphicsEllipseItem):
-    """可视化连接点：扩大点击区、增强悬停反馈、缩小时保持可见"""
+    """可视化连接点：增强版（解决层级遮挡和多线连接问题）"""
     HIT_RADIUS = 10
     BOUNDS_RADIUS = 11
     BASE_RADIUS = 2
@@ -1881,28 +1881,66 @@ class ConnectionPoint(QGraphicsEllipseItem):
     def __init__(self, parent_item, point_type="image_top"):
         super().__init__()
         self.parent_element = parent_item
-        self.point_type = point_type  # "image_top", "text_bottom"
-        self.connected_lines = []  # 连接到此点的线条
+        self.point_type = point_type
+        self.connected_lines = []
         self._hovered = False
         self.base_brush = QBrush(QColor(255, 100, 100, 200))
         self.base_pen = QPen(QColor(200, 50, 50), 3)
-        self.hover_brush = QBrush(QColor(0, 255, 120, 240))
+        self.hover_brush = QBrush(QColor(0, 255, 120, 240)) # 悬停时的绿色
         self.hover_pen = QPen(QColor(0, 200, 80), 3)
 
-        # 设置交互属性
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, False)
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, True)
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemSendsGeometryChanges, True)
 
-        # 设置层级和父级
-        self.setZValue(100)  # 显示在最上层
+        # --- 核心修改：将 ZValue 设为极高，确保点永远在连线之上 ---
+        self.setZValue(2500) 
         self.setParentItem(parent_item)
-
-        # 更新位置
         self.update_position()
-
-        # 鼠标悬停效果
         self.setAcceptHoverEvents(True)
+
+    def boundingRect(self):
+        r = self.BOUNDS_RADIUS
+        return QRectF(-r, -r, r * 2, r * 2)
+
+    def shape(self):
+        path = QPainterPath()
+        r = self.HIT_RADIUS
+        path.addEllipse(QRectF(-r, -r, r * 2, r * 2))
+        return path
+
+    def paint(self, painter, option, widget):
+        lod = option.levelOfDetailFromTransform(painter.worldTransform())
+        lod = max(lod, 0.001)
+
+        # 判断当前点是否是选中的“连线起点”
+        is_active_source = (self.scene() and getattr(self.scene(), 'connection_source_point', None) == self)
+
+        radius = self.HOVER_RADIUS if (self._hovered or is_active_source) else self.BASE_RADIUS
+        min_screen_radius = self.HOVER_RADIUS if (self._hovered or is_active_source) else self.BASE_RADIUS
+        if lod < 1.0:
+            radius = max(radius, min_screen_radius / lod)
+
+        rect = QRectF(-radius, -radius, radius * 2, radius * 2)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        
+        if is_active_source:
+            painter.setBrush(QBrush(Qt.GlobalColor.yellow)) # 选中起点变黄
+            painter.setPen(QPen(QColor(200, 200, 0), 3))
+        else:
+            # 正常悬停变绿，平时变红
+            painter.setBrush(self.hover_brush if self._hovered else self.base_brush)
+            painter.setPen(self.hover_pen if self._hovered else self.base_pen)
+            
+        painter.drawEllipse(rect)
+
+    def update_position(self):
+        if not self.parent_element: return
+        rect = self.parent_element.boundingRect()
+        if self.point_type == "image_top":
+            self.setPos(rect.width() / 2, 0)
+        elif self.point_type == "text_bottom":
+            self.setPos(rect.width() / 2, rect.height())
 
     def boundingRect(self):
         """扩大重绘范围，避免缩小时视觉被裁切"""
@@ -1985,6 +2023,23 @@ class VGenericConnector(QGraphicsPathItem):
         self.setPen(pen)
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, True)  # 可选中
         self.setAcceptHoverEvents(True)  # 接受悬停事件
+
+    # --- 新增：重写 shape 方法以扩大点击区域 ---
+    def shape(self):
+        """
+        核心修改：返回一个加宽后的路径用于碰撞检测。
+        视觉上保持 line_width 宽度，但点击判定区域扩大到 20 像素。
+        """
+        path = self.path()
+        if path.isEmpty():
+            return super().shape()
+            
+        stroker = QPainterPathStroker()
+        stroker.setWidth(20)  # 点击感应宽度设置为 20 像素
+        stroker.setCapStyle(Qt.PenCapStyle.RoundCap)
+        stroker.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        return stroker.createStroke(path)
+    # ----------------------------------------
     
     def set_line_width(self, width):
         """设置线条粗细"""
@@ -2143,6 +2198,21 @@ class VImageTextConnector(QGraphicsPathItem):
         self.setPen(pen)
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, True)  # 可选中
         self.setAcceptHoverEvents(True)  # 接受悬停事件
+
+    # --- 新增：重写 shape 方法以扩大点击区域 ---
+    def shape(self):
+        """
+        核心修改：利用 stroker 将‘线’扩展为‘面’进行拾取判定。
+        即使在画布缩小时，也能轻松选中连线。
+        """
+        path = self.path()
+        if path.isEmpty():
+            return super().shape()
+            
+        stroker = QPainterPathStroker()
+        stroker.setWidth(20)  # 点击感应宽度设置为 20 像素
+        return stroker.createStroke(path)
+    # ----------------------------------------
     
     def set_line_width(self, width):
         """设置线条粗细"""
@@ -3512,6 +3582,9 @@ class VImageItem(BaseElement):
         self._build_image_context_menu(global_pos)
 
     def contextMenuEvent(self, event):
+        if self.locked:
+            event.ignore()
+            return
         self._build_image_context_menu(event.screenPos())
 
     def boundingRect(self):
@@ -5065,10 +5138,39 @@ class LayoutView(QGraphicsView):
         self._guide_orientation = None     # 拖出方向
         self._guide_preview = None         # 预览辅助线对象
         # 为标尺留出边距
+        self._hovered_connection_point = None
         self.setViewportMargins(self.RULER_SIZE, self.RULER_SIZE, 0, 0)
 
     def set_main_window(self, mw):
         self._main_window = mw
+
+    def _sync_connection_point_hover(self, pos):
+        hovered = None
+        if self.scene():
+            scene_pos = self.mapToScene(pos)
+            items_at = self.scene().items(
+                scene_pos,
+                Qt.ItemSelectionMode.IntersectsItemShape,
+                Qt.SortOrder.DescendingOrder,
+                self.transform()
+            )
+            for item in items_at:
+                if isinstance(item, ConnectionPoint):
+                    hovered = item
+                    break
+
+        if hovered == self._hovered_connection_point:
+            return
+
+        if self._hovered_connection_point:
+            self._hovered_connection_point._hovered = False
+            self._hovered_connection_point.update()
+
+        self._hovered_connection_point = hovered
+
+        if self._hovered_connection_point:
+            self._hovered_connection_point._hovered = True
+            self._hovered_connection_point.update()
 
     def _in_h_ruler(self, pos):
         """鼠标是否在水平标尺区域（顶部）"""
@@ -5221,44 +5323,77 @@ class LayoutView(QGraphicsView):
 
     def mousePressEvent(self, event):
         pos = event.pos()
-        if event.button() == Qt.MouseButton.LeftButton:
-            if self._in_h_ruler(pos):
-                # 从水平标尺拖出水平辅助线
-                self._guide_dragging = True
-                self._guide_orientation = Qt.Orientation.Horizontal
-                scene_y = self.mapToScene(pos).y()
-                self._guide_preview = self.scene().add_guide(Qt.Orientation.Horizontal, scene_y)
-                event.accept()
-                return
-            elif self._in_v_ruler(pos):
-                # 从垂直标尺拖出垂直辅助线
-                self._guide_dragging = True
-                self._guide_orientation = Qt.Orientation.Vertical
-                scene_x = self.mapToScene(pos).x()
-                self._guide_preview = self.scene().add_guide(Qt.Orientation.Vertical, scene_x)
-                event.accept()
-                return
-
-            # 空白区域启动 AutoCAD 风格框选
-            if self.itemAt(pos) is None:
-                self._marquee_active = True
-                self._marquee_origin = pos
-                self._update_marquee_style(pos)
-                self._marquee_band.setGeometry(QRect(self._marquee_origin, QSize()))
-                self._marquee_band.show()
-                event.accept()
-                return
-
+        # 处理中键平移
         if event.button() == Qt.MouseButton.MiddleButton:
             self._is_panning = True
             self._pan_start = event.pos()
             self.setCursor(Qt.CursorShape.ClosedHandCursor)
             event.accept()
-        else:
+            return
+
+        if event.button() == Qt.MouseButton.LeftButton and self.scene():
+            scene_pos = self.mapToScene(pos)
+            items_at = self.scene().items(
+                scene_pos,
+                Qt.ItemSelectionMode.IntersectsItemShape,
+                Qt.SortOrder.DescendingOrder,
+                self.transform()
+            )
+            for item in items_at:
+                if isinstance(item, ConnectionPoint):
+                    self.scene().start_connection_from_point(item)
+                    event.accept()
+                    return
+
+        if event.button() in (Qt.MouseButton.LeftButton, Qt.MouseButton.RightButton):
+            # 1. 优先处理标尺点击逻辑
+            if self._in_h_ruler(pos) or self._in_v_ruler(pos):
+                if self._in_h_ruler(pos):
+                    self._guide_dragging = True
+                    self._guide_orientation = Qt.Orientation.Horizontal
+                    scene_y = self.mapToScene(pos).y()
+                    self._guide_preview = self.scene().add_guide(Qt.Orientation.Horizontal, scene_y)
+                elif self._in_v_ruler(pos):
+                    self._guide_dragging = True
+                    self._guide_orientation = Qt.Orientation.Vertical
+                    scene_x = self.mapToScene(pos).x()
+                    self._guide_preview = self.scene().add_guide(Qt.Orientation.Vertical, scene_x)
+                event.accept()
+                return
+
+            # 2. 检查点击位置的物体状态（实现“穿透”锁定物体的关键）
+            raw_hit = self.itemAt(pos)
+            hit_element = raw_hit
+            # 向上追溯，直到找到 BaseElement（即我们的 VImageItem 或 VTextItem）
+            while hit_element and not isinstance(hit_element, BaseElement):
+                hit_element = hit_element.parentItem()
+            
+            # 判断是否为锁定状态
+            is_locked = False
+            if hit_element:
+                if isinstance(hit_element, VImageItem) and hit_element.locked:
+                    is_locked = True
+                # 如果未来有锁定的文字，也可以在这里增加判断
+
+            # 3. 开启框选逻辑的条件：点在空白处 OR 点在锁定的物体上
+            if hit_element is None or is_locked:
+                self._marquee_active = True
+                self._marquee_origin = pos
+                self._update_marquee_style(pos)
+                self._marquee_band.setGeometry(QRect(self._marquee_origin, QSize()))
+                self._marquee_band.show()
+                # 记录是哪个键触发的框选，以便在 Release 事件中对应
+                self._marquee_trigger_button = event.button()
+                event.accept()
+                return
+            
+            # 4. 如果点击的是普通非锁定物体，执行系统默认的选择/拖拽逻辑
             super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
-        # 辅助线拖拽中
+        self._sync_connection_point_hover(event.pos())
+
+        # 标尺辅助线拖拽预览
         if self._guide_dragging and self._guide_preview:
             scene_pos = self.mapToScene(event.pos())
             if self._guide_orientation == Qt.Orientation.Horizontal:
@@ -5267,17 +5402,19 @@ class LayoutView(QGraphicsView):
                 self._guide_preview.pos_value = scene_pos.x()
             self._guide_preview._update_pos()
             self._guide_preview.update()
-            self.update()  # 刷新标尺上的光标线
+            self.update() 
             event.accept()
             return
 
+        # CAD 风格选框更新
         if self._marquee_active:
             self._update_marquee_style(event.pos())
             self._marquee_band.setGeometry(QRect(self._marquee_origin, event.pos()).normalized())
-            self.update()
+            self.viewport().update() # 确保选框渲染在最顶层
             event.accept()
             return
 
+        # 视图平移
         if self._is_panning:
             delta = event.pos() - self._pan_start
             self._pan_start = event.pos()
@@ -5285,19 +5422,20 @@ class LayoutView(QGraphicsView):
             self.verticalScrollBar().setValue(self.verticalScrollBar().value() - delta.y())
             event.accept()
         else:
-            # 更新标尺光标线
+            # 更新标尺的光标跟随线
             self.update()
-            # 鼠标在标尺区域时改变光标
-            pos = event.pos()
-            if self._in_h_ruler(pos):
-                self.setCursor(Qt.CursorShape.SizeVerCursor)
-            elif self._in_v_ruler(pos):
-                self.setCursor(Qt.CursorShape.SizeHorCursor)
-            else:
-                self.setCursor(Qt.CursorShape.ArrowCursor)
             super().mouseMoveEvent(event)
+            self._sync_connection_point_hover(event.pos())
+
+    def leaveEvent(self, event):
+        if self._hovered_connection_point:
+            self._hovered_connection_point._hovered = False
+            self._hovered_connection_point.update()
+            self._hovered_connection_point = None
+        super().leaveEvent(event)
 
     def mouseReleaseEvent(self, event):
+        # 结束辅助线拖拽
         if self._guide_dragging:
             self._guide_dragging = False
             self._guide_preview = None
@@ -5305,13 +5443,15 @@ class LayoutView(QGraphicsView):
             event.accept()
             return
 
-        if self._marquee_active and event.button() == Qt.MouseButton.LeftButton:
+        # 结束框选并应用选择逻辑
+        if self._marquee_active and event.button() == self._marquee_trigger_button:
             self._marquee_active = False
             self._apply_marquee_selection()
             self._marquee_band.hide()
             event.accept()
             return
 
+        # 结束平移
         if event.button() == Qt.MouseButton.MiddleButton:
             self._is_panning = False
             self.setCursor(Qt.CursorShape.ArrowCursor)
