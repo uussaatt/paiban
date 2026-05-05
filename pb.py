@@ -2609,12 +2609,7 @@ class BaseElement(QGraphicsItem):
         if self.isSelected():
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
-            scale = 1.0
-            if self.scene() and self.scene().views():
-                scale = max(self.scene().views()[0].transform().m11(), 0.001)
-
-            inset = 5 / scale
-            rect = self.boundingRect().adjusted(-inset, -inset, inset, inset)
+            rect = self.boundingRect()
             outer_width = 4
             inner_width = 2
             dash_pattern = [5, 3]
