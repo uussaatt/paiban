@@ -1873,8 +1873,8 @@ class AnchorHandle(QGraphicsRectItem):
 
 class ConnectionPoint(QGraphicsEllipseItem):
     """可视化连接点：增强版（解决层级遮挡和多线连接问题）"""
-    HIT_RADIUS = 10
-    BOUNDS_RADIUS = 11
+    HIT_RADIUS = 3
+    BOUNDS_RADIUS = 7
     BASE_RADIUS = 2
     HOVER_RADIUS = 5
 
@@ -1999,6 +1999,8 @@ class ConnectionPoint(QGraphicsEllipseItem):
         if event.button() == Qt.MouseButton.LeftButton:
             if self.scene():
                 self.scene().start_connection_from_point(self)
+            event.accept()
+            return
         super().mousePressEvent(event)
 
     def get_scene_center(self):
@@ -2613,19 +2615,9 @@ class BaseElement(QGraphicsItem):
 
             inset = 5 / scale
             rect = self.boundingRect().adjusted(-inset, -inset, inset, inset)
-            screen_short_side = min(rect.width() * scale, rect.height() * scale)
-            if screen_short_side < 45:
-                outer_width = 3
-                inner_width = 2
-                dash_pattern = [2, 2]
-            elif screen_short_side < 90:
-                outer_width = 4
-                inner_width = 2
-                dash_pattern = [3, 2]
-            else:
-                outer_width = 6
-                inner_width = 3
-                dash_pattern = [7, 4]
+            outer_width = 4
+            inner_width = 2
+            dash_pattern = [5, 3]
 
             painter.setBrush(QBrush(QColor(0, 120, 215, 28)))
             painter.setPen(Qt.PenStyle.NoPen)
@@ -2638,9 +2630,8 @@ class BaseElement(QGraphicsItem):
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawRect(rect)
 
-            inner_pen = QPen(QColor(0, 140, 255, 255), inner_width, Qt.PenStyle.DashLine)
+            inner_pen = QPen(QColor(255, 140, 0, 255), inner_width, Qt.PenStyle.SolidLine)
             inner_pen.setCosmetic(True)
-            inner_pen.setDashPattern(dash_pattern)
             inner_pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
             painter.setPen(inner_pen)
             painter.drawRect(rect)
@@ -4363,20 +4354,33 @@ class LayoutScene(QGraphicsScene):
         for item in self.items():
             if isinstance(item, (VTextItem, VImageItem)):
                 item.set_connection_points_visible(visible)
+
+    def _show_status_message(self, message, timeout=0):
+        main_window = self.parent()
+        if main_window and hasattr(main_window, 'status_bar'):
+            main_window.status_bar.showMessage(message, timeout)
+        else:
+            print(message)
     
     def start_connection_from_point(self, point):
         """从连接点开始连接"""
         if self.connection_mode and self.connection_source_point:
-            self.complete_connection(self.connection_source_point, point)
-            self.connection_mode = False
-            self.connection_source_point = None
-            if self.views():
-                self.views()[0].setCursor(Qt.CursorShape.ArrowCursor)
+            source_point = self.connection_source_point
+            if self.complete_connection(self.connection_source_point, point):
+                self.connection_mode = False
+                self.connection_source_point = None
+                if self.views():
+                    self.views()[0].setCursor(Qt.CursorShape.ArrowCursor)
+                source_point.update()
+                point.update()
+                self._show_status_message("连线已创建。点击任意连接点开始下一条连线。", 4000)
         else:
             self.connection_mode = True
             self.connection_source_point = point
             if self.views():
                 self.views()[0].setCursor(Qt.CursorShape.CrossCursor)
+            point.update()
+            self._show_status_message("连线模式：请选择第二个连接点，按 Esc 取消。")
             print("连接模式：点击另一个连接点完成连接，或按ESC键取消")
     
     def cancel_connection_mode(self):
@@ -4386,13 +4390,14 @@ class LayoutScene(QGraphicsScene):
             self.connection_source_point = None
             if self.views():
                 self.views()[0].setCursor(Qt.CursorShape.ArrowCursor)
+            self._show_status_message("已取消连线模式。", 3000)
             print("已取消连接模式")
     
     def complete_connection(self, source_point, target_point):
         """完成两个连接点之间的连接"""
         if source_point == target_point:
             print("不能连接到自身")
-            return
+            return False
         
         source_item = source_point.parent_element
         target_item = target_point.parent_element
@@ -4409,6 +4414,8 @@ class LayoutScene(QGraphicsScene):
             self.add_text_text_connector(source_item, target_item)
         else:
             print("连接类型不支持")
+            return False
+        return True
     
     def toggle_connection_points(self):
         """切换连接点显示状态"""
@@ -5173,20 +5180,25 @@ class LayoutView(QGraphicsView):
     def set_main_window(self, mw):
         self._main_window = mw
 
+    def _connection_point_at(self, pos, tolerance=7, exclude_point=None):
+        if not self.scene():
+            return None
+
+        hit_offset_y = -6
+        nearest = None
+        nearest_dist = tolerance
+        for item in self.scene().items():
+            if not isinstance(item, ConnectionPoint) or not item.isVisible() or item == exclude_point:
+                continue
+            view_pos = self.mapFromScene(item.get_scene_center())
+            dist = math.hypot(view_pos.x() - pos.x(), view_pos.y() + hit_offset_y - pos.y())
+            if dist <= nearest_dist:
+                nearest = item
+                nearest_dist = dist
+        return nearest
+
     def _sync_connection_point_hover(self, pos):
-        hovered = None
-        if self.scene():
-            scene_pos = self.mapToScene(pos)
-            items_at = self.scene().items(
-                scene_pos,
-                Qt.ItemSelectionMode.IntersectsItemShape,
-                Qt.SortOrder.DescendingOrder,
-                self.transform()
-            )
-            for item in items_at:
-                if isinstance(item, ConnectionPoint):
-                    hovered = item
-                    break
+        hovered = self._connection_point_at(pos)
 
         if hovered == self._hovered_connection_point:
             return
@@ -5361,18 +5373,12 @@ class LayoutView(QGraphicsView):
             return
 
         if event.button() == Qt.MouseButton.LeftButton and self.scene():
-            scene_pos = self.mapToScene(pos)
-            items_at = self.scene().items(
-                scene_pos,
-                Qt.ItemSelectionMode.IntersectsItemShape,
-                Qt.SortOrder.DescendingOrder,
-                self.transform()
-            )
-            for item in items_at:
-                if isinstance(item, ConnectionPoint):
-                    self.scene().start_connection_from_point(item)
-                    event.accept()
-                    return
+            exclude_point = self.scene().connection_source_point if self.scene().connection_mode else None
+            point = self._connection_point_at(pos, exclude_point=exclude_point)
+            if point:
+                self.scene().start_connection_from_point(point)
+                event.accept()
+                return
 
         if event.button() in (Qt.MouseButton.LeftButton, Qt.MouseButton.RightButton):
             # 1. 优先处理标尺点击逻辑
