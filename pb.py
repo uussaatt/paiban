@@ -55,6 +55,7 @@ class ConfigManager:
             'bg_above_connectors': False,  # 背景图片是否在连线之上
             'marquee_only_images': False,  # 框选时仅选择图片
             'insert_image_to_bottom': False,  # 插入图片时置于底层
+            'nudge_large_step': 10,  # Shift+方向键大步长（像素）
             'favorite_fonts': ['SimSun', 'Microsoft YaHei', '黑体', '楷体', 'Arial'],
             'favorite_sizes': [10, 12, 14, 16, 18, 20, 24, 30, 36, 48, 72],
         }
@@ -5007,6 +5008,34 @@ class LayoutScene(QGraphicsScene):
                 elif isinstance(item, (VImageTextConnector, VGenericConnector)):
                     # 删除连接线
                     self.remove_connector_item(item)
+        elif event.key() in (Qt.Key.Key_Left, Qt.Key.Key_Right, Qt.Key.Key_Up, Qt.Key.Key_Down):
+            items = [i for i in self.selectedItems() if isinstance(i, BaseElement)]
+            if items:
+                # Shift键使用大步长，否则1px
+                if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+                    step = self.config_manager.get('nudge_large_step', 10)
+                else:
+                    step = 1
+                dx = dy = 0
+                if event.key() == Qt.Key.Key_Left:  dx = -step
+                elif event.key() == Qt.Key.Key_Right: dx = step
+                elif event.key() == Qt.Key.Key_Up:   dy = -step
+                elif event.key() == Qt.Key.Key_Down:  dy = step
+
+                move_commands = []
+                for item in items:
+                    old_pos = item.scenePos()
+                    new_pos = old_pos + QPointF(dx, dy)
+                    if item.parentItem():
+                        item.setPos(item.parentItem().mapFromScene(new_pos))
+                    else:
+                        item.setPos(new_pos)
+                    move_commands.append(MoveItemCommand(self, item, old_pos, new_pos))
+
+                if move_commands:
+                    self.undo_stack.push(MacroCommand(self, move_commands))
+                event.accept()
+                return
         else:
             super().keyPressEvent(event)
     
@@ -5393,6 +5422,12 @@ class LayoutView(QGraphicsView):
 
             # 2. 检查点击位置的物体状态（实现“穿透”锁定物体的关键）
             raw_hit = self.itemAt(pos)
+
+            # 如果点击的是辅助线，直接交给场景处理，不触发框选
+            if isinstance(raw_hit, GuideItem):
+                super(LayoutView, self).mousePressEvent(event)
+                return
+
             hit_element = raw_hit
             # 向上追溯，直到找到 BaseElement（即我们的 VImageItem 或 VTextItem）
             while hit_element and not isinstance(hit_element, BaseElement):
@@ -6006,6 +6041,11 @@ class MainWindow(QMainWindow):
         self.insert_image_to_bottom_action.toggled.connect(self.toggle_insert_image_to_bottom)
         edit_menu.addAction(self.insert_image_to_bottom_action)
 
+        edit_menu.addSeparator()
+        nudge_step_action = QAction('设置Shift+方向键步长...', self)
+        nudge_step_action.triggered.connect(self.set_nudge_large_step)
+        edit_menu.addAction(nudge_step_action)
+
     def toggle_auto_exit_setting(self, enabled):
         """切换粘贴后自动退出编辑的开关"""
         self.scene.config_manager.set('auto_exit_after_paste', enabled)
@@ -6025,6 +6065,14 @@ class MainWindow(QMainWindow):
             self.status_bar.showMessage('已开启：插入图片时自动置于文字和连线底层', 3000)
         else:
             self.status_bar.showMessage('已关闭：插入图片时保持默认层级', 3000)
+
+    def set_nudge_large_step(self):
+        """设置Shift+方向键大步长"""
+        current = self.scene.config_manager.get('nudge_large_step', 10)
+        val, ok = QInputDialog.getInt(self, "Shift+方向键步长", "步长（像素）:", current, 1, 1000)
+        if ok:
+            self.scene.config_manager.set('nudge_large_step', val)
+            self.status_bar.showMessage(f'Shift+方向键步长已设置为 {val}px', 3000)
 
     def show_canvas_context_menu(self, pos):
         """画布空白处右键菜单"""
