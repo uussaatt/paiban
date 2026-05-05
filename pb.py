@@ -5663,7 +5663,6 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("VertiLayout Pro - 竖排排版引擎")
         self.setGeometry(100, 100, 1400, 900)
-        
         # 应用Fluent Design样式
         self.apply_fluent_design_style()
         
@@ -5676,14 +5675,21 @@ class MainWindow(QMainWindow):
         # 创建停靠面板
         # 右侧：层级 & 属性面板
         sidebar = QDockWidget("层级 & 属性", self)
+        sidebar.setObjectName("dock_hierarchy")
         sidebar.setAllowedAreas(Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea)
         self.tree_widget = QTreeWidget()
-        self.tree_widget.setHeaderLabel("排版元素")
+        self.tree_widget.setHeaderLabels(["排版元素", "位置"])
+        self.tree_widget.setColumnWidth(0, 180)
+        self.tree_widget.itemClicked.connect(self._on_tree_item_clicked)
+        self.tree_widget.itemChanged.connect(self._on_tree_item_changed)
         sidebar.setWidget(self.tree_widget)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, sidebar)
+        self._tree_item_counter = 0  # 全局编号计数器
+        self._tree_updating = False   # 防止 itemChanged 递归触发
         
         # 左侧：素材库面板
         self.asset_library_dock = AssetLibraryDockWidget(self.scene.asset_manager, self)
+        self.asset_library_dock.setObjectName("dock_assets")
         self.asset_library_dock.setMinimumWidth(250)  # 设置最小宽度
         self.asset_library_dock.setMaximumWidth(400)  # 设置最大宽度
         self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.asset_library_dock)
@@ -5710,6 +5716,7 @@ class MainWindow(QMainWindow):
 
         # 导航器停靠面板
         nav_dock = QDockWidget("导航器", self)
+        nav_dock.setObjectName("dock_navigator")
         nav_dock.setAllowedAreas(Qt.DockWidgetArea.LeftDockWidgetArea |
                                   Qt.DockWidgetArea.RightDockWidgetArea |
                                   Qt.DockWidgetArea.BottomDockWidgetArea)
@@ -5727,16 +5734,34 @@ class MainWindow(QMainWindow):
         
         QTimer.singleShot(100, self.fit_view)
         print("Vertical Layout Engine Started...")
+        # 恢复上次窗口大小和停靠面板布局
+        self._restore_window_state()
+
+    def _save_window_state(self):
+        s = QSettings("VertiLayout", "VertiLayoutPro")
+        s.setValue("geometry", self.saveGeometry())
+        s.setValue("windowState", self.saveState())
+
+    def _restore_window_state(self):
+        s = QSettings("VertiLayout", "VertiLayoutPro")
+        geom = s.value("geometry")
+        state = s.value("windowState")
+        if geom:
+            self.restoreGeometry(geom)
+        if state:
+            self.restoreState(state)
 
     def closeEvent(self, event):
-        """窗口关闭时停止定时器，防止 RuntimeError"""
+        """窗口关闭时停止定时器，保存窗口状态"""
         if hasattr(self, 'timer'):
             self.timer.stop()
+        self._save_window_state()
         event.accept()
     
     def create_toolbars(self):
         # 主工具栏 - 编辑和格式化
         main_toolbar = QToolBar("编辑与格式")
+        main_toolbar.setObjectName("toolbar_main")
         self.addToolBar(Qt.ToolBarArea.TopToolBarArea, main_toolbar)
         
         # === 基本编辑操作 ===
@@ -6363,22 +6388,92 @@ class MainWindow(QMainWindow):
             # 检查场景是否还存在
             if not self.scene:
                 return
-                
+
             self.tree_widget.clear()
+            self._tree_item_counter = 0
+            self._tree_updating = True
             def add_node(item, parent_node):
+                self._tree_item_counter += 1
+                n = self._tree_item_counter
                 node = QTreeWidgetItem(parent_node)
-                txt = "Image" if isinstance(item, VImageItem) else f"Txt: {item.full_text[:8]}..."
-                node.setText(0, txt)
+
+                if isinstance(item, VImageItem):
+                    label = f"[{n}] 图片  {os.path.basename(item.file_path)}"
+                    node.setForeground(0, QBrush(QColor(0, 100, 200)))
+                else:
+                    preview = item.full_text.replace('\n', '↵')[:12]
+                    if len(item.full_text) > 12:
+                        preview += '…'
+                    label = f"[{n}] 文字  {preview}"
+                    node.setForeground(0, QBrush(QColor(30, 30, 30)))
+
+                pos = item.scenePos()
+                node.setText(0, label)
+                node.setText(1, f"({int(pos.x())}, {int(pos.y())})")
+                node.setData(0, Qt.ItemDataRole.UserRole, item)
+                # checkbox 控制显示/隐藏
+                node.setFlags(node.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+                node.setCheckState(0, Qt.CheckState.Checked if item.isVisible() else Qt.CheckState.Unchecked)
+
                 for child in item.childItems():
-                    if isinstance(child, BaseElement): add_node(child, node)
+                    if isinstance(child, BaseElement):
+                        add_node(child, node)
+
             for item in self.scene.items():
                 if isinstance(item, BaseElement) and item.parentItem() is None:
                     add_node(item, self.tree_widget)
+
             self.tree_widget.expandAll()
+            self._tree_updating = False
             self.scene.update_all_connectors()
         except (RuntimeError, AttributeError):
             pass
         except Exception:
+            pass
+
+    def _on_tree_item_clicked(self, node, column):
+        """点击树节点，选中画布上对应的元素并居中显示"""
+        try:
+            item = node.data(0, Qt.ItemDataRole.UserRole)
+            if item and item.scene():
+                self.scene.clearSelection()
+                item.setSelected(True)
+                self.view.centerOn(item)
+        except (RuntimeError, AttributeError):
+            pass
+
+    def _on_tree_item_changed(self, node, column):
+        """checkbox 勾选/取消 控制元素显示隐藏"""
+        if self._tree_updating or column != 0:
+            return
+        try:
+            item = node.data(0, Qt.ItemDataRole.UserRole)
+            if item and item.scene():
+                visible = node.checkState(0) == Qt.CheckState.Checked
+                item.setVisible(visible)
+                # 同步父子连线可见性
+                for conn in self.scene.connectors:
+                    if conn.parent_element == item or conn.child_element == item:
+                        # 只有两端都可见时才显示连线
+                        conn.setVisible(
+                            self.scene.show_connectors and
+                            conn.parent_element.isVisible() and
+                            conn.child_element.isVisible()
+                        )
+                # 同步图文连线可见性
+                for conn in self.scene.image_text_connectors:
+                    if hasattr(conn, 'image_item') and hasattr(conn, 'text_item'):
+                        i1, i2 = conn.image_item, conn.text_item
+                    elif hasattr(conn, 'item1') and hasattr(conn, 'item2'):
+                        i1, i2 = conn.item1, conn.item2
+                    else:
+                        continue
+                    if i1 == item or i2 == item:
+                        conn.setVisible(
+                            self.scene.show_image_text_connectors and
+                            i1.isVisible() and i2.isVisible()
+                        )
+        except (RuntimeError, AttributeError):
             pass
 
     def export_image(self):
