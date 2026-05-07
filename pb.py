@@ -2545,6 +2545,7 @@ class BaseElement(QGraphicsItem):
         # 批量图文连接选项
         if len(selected_items) >= 2:
             batch_menu = menu.addMenu("批量连接 (Batch Connect)")
+            chain_connect_action = batch_menu.addAction("批量连线")
             auto_connect_action = batch_menu.addAction("智能连接")
             position_connect_action = batch_menu.addAction("位置连接")
             connect_to_text_action = batch_menu.addAction("连到文字")
@@ -2575,6 +2576,8 @@ class BaseElement(QGraphicsItem):
                 self.scene().align_center_horizontal(selected_items)
             elif action == align_center_v_action:
                 self.scene().align_center_vertical(selected_items)
+            elif action == chain_connect_action:
+                self.scene().batch_chain_connect_selected_items()
             elif action == auto_connect_action:
                 self.scene().auto_connect_selected_items()
             elif action == position_connect_action:
@@ -3868,6 +3871,7 @@ class LayoutScene(QGraphicsScene):
         self.stamping_session = None  # 盖章式批量复制会话
         self.align_reference_mode = None  # 对齐基准点选模式
         self.align_reference_candidates = []
+        self._pending_selection_click_item = None
         
         # 连接选择改变信号
         self.selectionChanged.connect(self.on_selection_changed_track)
@@ -4041,22 +4045,28 @@ class LayoutScene(QGraphicsScene):
         painter.drawRect(canvas_rect)
     
     def on_selection_changed_track(self):
-        """追踪选中顺序"""
-        current_selected = set(self.selectedItems())
-        previous_selected = set(self.selection_order)
-        
-        # 找出新选中的项目
-        newly_selected = current_selected - previous_selected
-        # 找出取消选中的项目
-        deselected = previous_selected - current_selected
-        
-        # 从列表中移除取消选中的项目
-        self.selection_order = [item for item in self.selection_order if item not in deselected]
-        
-        # 添加新选中的项目到列表末尾
-        for item in newly_selected:
-            if isinstance(item, (VImageItem, VTextItem)):
-                self.selection_order.append(item)
+        """追踪选中顺序：支持点击、框选、Ctrl+A 等所有选中方式"""
+        current_selected = set(
+            item for item in self.selectedItems()
+            if isinstance(item, (VImageItem, VTextItem))
+        )
+        previous_set = set(self.selection_order)
+
+        # 移除已取消选中的元素
+        self.selection_order = [item for item in self.selection_order if item in current_selected]
+
+        # 新增元素：优先把点击的元素排在最前（如果有的话），其余按场景顺序追加
+        newly_selected = current_selected - previous_set
+        if newly_selected:
+            clicked_item = self._pending_selection_click_item
+            # 如果点击的元素是新选中的，先加它
+            if clicked_item in newly_selected:
+                self.selection_order.append(clicked_item)
+                newly_selected.discard(clicked_item)
+            # 其余新选中的元素按场景 items() 顺序追加，保持稳定
+            for item in self.items():
+                if item in newly_selected:
+                    self.selection_order.append(item)
             
     def start_binding_mode(self, item):
         self.binding_source = item
@@ -4079,6 +4089,13 @@ class LayoutScene(QGraphicsScene):
 
     def mousePressEvent(self, event):
         """鼠标按下事件：处理元素点击、父子绑定、对齐基准选择和盖章会话"""
+        if event.button() == Qt.MouseButton.LeftButton:
+            raw = self.itemAt(event.scenePos(), QTransform())
+            clicked_item = raw
+            while clicked_item is not None and not isinstance(clicked_item, BaseElement):
+                clicked_item = clicked_item.parentItem()
+            self._pending_selection_click_item = clicked_item
+
         # 盖章模式拦截：拖拽中按右键触发盖章
         if event.button() == Qt.MouseButton.RightButton and self.stamping_session:
             self.stamp_current_selection()
@@ -4567,145 +4584,59 @@ class LayoutScene(QGraphicsScene):
             conn.setVisible(self.show_image_text_connectors)
     
     def auto_connect_selected_items(self):
-        """智能连接：按选中顺序识别图片-文字组合体，按连接点顺序连接
-        组合体的连接点顺序：a=图片连接点(顶部), b=文字连接点(底部)
-        连接规则：第1组的b → 第2组的a, 第2组的b → 第3组的a, 依次类推
+        """智能连接：按选中顺序将元素逐对连接。
+        
+        选中顺序决定连接顺序：第1个→第2个，第2个→第3个，依此类推。
+        支持图片-文字、图片-图片、文字-文字任意组合。
+        父子绑定的元素对会被自动跳过（已有红虚线连接）。
         """
-        # 使用选中顺序列表，而不是selectedItems()
-        if not self.selection_order:
-            print("请按顺序选中元素进行连接")
-            return
-        
-        # 过滤出图片和文字元素，保持选中顺序
-        items = [item for item in self.selection_order if isinstance(item, (VImageItem, VTextItem))]
-        
+        # 合并 selection_order 和 selectedItems，确保不遗漏
+        # selection_order 记录了点击顺序，selectedItems 补充框选等方式选中的元素
+        ordered = list(self.selection_order)
+        for item in self.selectedItems():
+            if isinstance(item, (VImageItem, VTextItem)) and item not in ordered:
+                ordered.append(item)
+
+        items = [item for item in ordered
+                 if isinstance(item, (VImageItem, VTextItem)) and item.scene() == self]
+
         if len(items) < 2:
-            print("请至少选中两个元素进行连接")
+            self._show_status_message("请至少选中两个元素进行智能连接", 3000)
             return
-        
-        print(f"按选中顺序处理 {len(items)} 个元素")
-        
-        # 识别图片-文字组合体（有父子绑定关系的），保持选中顺序
-        groups = []  # 每个组是字典 {'image': 图片, 'text': 文字, 'point_a': 图片连接点, 'point_b': 文字连接点}
-        processed = set()
-        
-        for item in items:
-            if item in processed:
+
+        commands = []
+        skipped_parent_child = 0
+        skipped_existing = 0
+
+        for item1, item2 in zip(items, items[1:]):
+            if item1 == item2:
                 continue
-            
-            if isinstance(item, VImageItem):
-                # 查找这个图片的子文字
-                text_child = None
-                for child in item.childItems():
-                    if isinstance(child, VTextItem) and child in items:
-                        text_child = child
-                        break
-                
-                if text_child:
-                    # 这是一个完整的图片-文字组合体
-                    group = {
-                        'image': item,
-                        'text': text_child,
-                        'point_a': item,  # a连接点：图片（顶部）
-                        'point_b': text_child  # b连接点：文字（底部）
-                    }
-                    groups.append(group)
-                    processed.add(item)
-                    processed.add(text_child)
-                    print(f"识别到组合体: 图片(a连接点) + 文字(b连接点)")
-                else:
-                    # 单独的图片，只有a连接点
-                    group = {
-                        'image': item,
-                        'text': None,
-                        'point_a': item,
-                        'point_b': item  # 单独图片，b连接点也是自己
-                    }
-                    groups.append(group)
-                    processed.add(item)
-                    print(f"识别到单独图片: 只有a连接点")
-                    
-            elif isinstance(item, VTextItem):
-                # 查找这个文字的父图片
-                parent = item.parentItem()
-                if isinstance(parent, VImageItem) and parent in items:
-                    # 已经在处理图片时添加了
-                    if item not in processed:
-                        group = {
-                            'image': parent,
-                            'text': item,
-                            'point_a': parent,
-                            'point_b': item
-                        }
-                        groups.append(group)
-                        processed.add(parent)
-                        processed.add(item)
-                        print(f"识别到组合体: 图片(a连接点) + 文字(b连接点)")
-                else:
-                    # 单独的文字，只有b连接点
-                    group = {
-                        'image': None,
-                        'text': item,
-                        'point_a': item,  # 单独文字，a连接点也是自己
-                        'point_b': item
-                    }
-                    groups.append(group)
-                    processed.add(item)
-                    print(f"识别到单独文字: 只有b连接点")
-        
-        if len(groups) < 2:
-            print("识别到的组合体数量不足2个，无法连接")
-            return
-        
-        # 连接逻辑：第i组的b连接点 → 第i+1组的a连接点
-        connections_made = 0
-        for i in range(len(groups) - 1):
-            current_group = groups[i]
-            next_group = groups[i + 1]
-            
-            # 当前组的b连接点（文字或图片）
-            source_item = current_group['point_b']
-            # 下一组的a连接点（图片或文字）
-            target_item = next_group['point_a']
-            
-            # 检查是否已经存在连接
-            already_connected = False
-            for conn in self.image_text_connectors:
-                if hasattr(conn, 'image_item') and hasattr(conn, 'text_item'):
-                    if ((conn.image_item == source_item and conn.text_item == target_item) or
-                        (conn.image_item == target_item and conn.text_item == source_item)):
-                        already_connected = True
-                        break
-                elif hasattr(conn, 'item1') and hasattr(conn, 'item2'):
-                    if ((conn.item1 == source_item and conn.item2 == target_item) or
-                        (conn.item1 == target_item and conn.item2 == source_item)):
-                        already_connected = True
-                        break
-            
-            if already_connected:
-                print(f"跳过已存在的连接: 第{i+1}组b点 → 第{i+2}组a点")
+            # 跳过已有父子绑定关系的元素对（已有红虚线）
+            if self._has_parent_child_relation(item1, item2):
+                skipped_parent_child += 1
                 continue
-            
-            # 根据类型创建连接
-            if isinstance(source_item, VImageItem) and isinstance(target_item, VTextItem):
-                self.add_image_text_connector(source_item, target_item)
-                connections_made += 1
-                print(f"创建连接: 第{i+1}组b点(图片) → 第{i+2}组a点(文字)")
-            elif isinstance(source_item, VTextItem) and isinstance(target_item, VImageItem):
-                self.add_image_text_connector(target_item, source_item)
-                connections_made += 1
-                print(f"创建连接: 第{i+1}组b点(文字) → 第{i+2}组a点(图片)")
-            elif isinstance(source_item, VImageItem) and isinstance(target_item, VImageItem):
-                self.add_image_image_connector(source_item, target_item)
-                connections_made += 1
-                print(f"创建连接: 第{i+1}组b点(图片) → 第{i+2}组a点(图片)")
-            elif isinstance(source_item, VTextItem) and isinstance(target_item, VTextItem):
-                self.add_text_text_connector(source_item, target_item)
-                connections_made += 1
-                print(f"创建连接: 第{i+1}组b点(文字) → 第{i+2}组a点(文字)")
-        
-        print(f"智能连接完成：创建了 {connections_made} 个连接")
-        print(f"连接规则：每组的b连接点 → 下一组的a连接点")
+
+            cmd = self._make_connector_command(item1, item2)
+            if cmd is None:
+                skipped_existing += 1
+                continue
+
+            cmd.execute()
+            commands.append(cmd)
+
+        if commands:
+            self.undo_stack.push(MacroCommand(self, commands))
+
+        msg = f"智能连接完成：新增 {len(commands)} 条连线"
+        details = []
+        if skipped_parent_child:
+            details.append(f"跳过父子关系 {skipped_parent_child} 对")
+        if skipped_existing:
+            details.append(f"跳过已存在 {skipped_existing} 对")
+        if details:
+            msg += "，" + "，".join(details)
+        print(msg)
+        self._show_status_message(msg, 4000)
     
     def connect_by_position(self):
         """按位置连接：上下相邻的图片和文字自动连接"""
@@ -4920,7 +4851,64 @@ class LayoutScene(QGraphicsScene):
         elif isinstance(item1, VTextItem) and isinstance(item2, VImageItem):
             return AddConnectorCommand(self, VImageTextConnector(item2, item1,
                 self.config_manager.get('default_line_width', DEFAULT_LINE_WIDTH)))
+        elif isinstance(item1, VImageItem) and isinstance(item2, VImageItem):
+            return AddConnectorCommand(self, VGenericConnector(item1, item2, "image-image",
+                self.config_manager.get('default_line_width', DEFAULT_LINE_WIDTH)))
+        elif isinstance(item1, VTextItem) and isinstance(item2, VTextItem):
+            return AddConnectorCommand(self, VGenericConnector(item1, item2, "text-text",
+                self.config_manager.get('default_line_width', DEFAULT_LINE_WIDTH)))
         return None
+
+    def _has_parent_child_relation(self, item1, item2):
+        return item1.parentItem() == item2 or item2.parentItem() == item1
+
+    def batch_chain_connect_selected_items(self):
+        """Connect selected image/text items pair-by-pair in click selection order."""
+        items = [
+            item for item in self.selection_order
+            if isinstance(item, (VImageItem, VTextItem)) and item.isSelected() and item.scene() == self
+        ]
+
+        if len(items) < 2:
+            print("请按顺序选中至少两个图片或文字元素")
+            return
+
+        commands = []
+        skipped_parent_child = 0
+        skipped_existing = 0
+        skipped_unsupported = 0
+
+        for item1, item2 in zip(items, items[1:]):
+            if item1 == item2:
+                skipped_existing += 1
+                continue
+            if self._has_parent_child_relation(item1, item2):
+                skipped_parent_child += 1
+                continue
+
+            command = self._make_connector_command(item1, item2)
+            if command is None:
+                skipped_existing += 1
+                continue
+
+            command.execute()
+            commands.append(command)
+
+        if commands:
+            self.undo_stack.push(MacroCommand(self, commands))
+
+        message = f"批量连线完成：新增 {len(commands)} 条"
+        details = []
+        if skipped_parent_child:
+            details.append(f"跳过父子关系 {skipped_parent_child} 对")
+        if skipped_existing:
+            details.append(f"跳过已存在/重复 {skipped_existing} 对")
+        if skipped_unsupported:
+            details.append(f"跳过不支持 {skipped_unsupported} 对")
+        if details:
+            message += "，" + "，".join(details)
+        print(message)
+        self._show_status_message(message, 4000)
     
     def paste_item(self, pos=None):
         items = self.paste_items(pos)
@@ -5797,6 +5785,11 @@ class MainWindow(QMainWindow):
         btn_align_top = QAction("顶部对齐", self)
         btn_align_top.triggered.connect(self.align_top)
         main_toolbar.addAction(btn_align_top)
+
+        btn_smart_connect = QAction("智能连接", self)
+        btn_smart_connect.setToolTip("按选中顺序逐对连接元素（Ctrl+点击确定顺序）")
+        btn_smart_connect.triggered.connect(self.auto_connect_selected)
+        main_toolbar.addAction(btn_smart_connect)
         
         main_toolbar.addSeparator()
         
