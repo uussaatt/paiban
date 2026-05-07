@@ -54,6 +54,8 @@ class ConfigManager:
             'default_line_width': DEFAULT_LINE_WIDTH,  # 默认连线粗细
             'bg_above_connectors': False,  # 背景图片是否在连线之上
             'marquee_only_images': False,  # 框选时仅选择图片
+            'marquee_only_connected': False,  # 框选时仅选择有连接点的元素
+            'marquee_sort_order': 'right_to_left',  # 框选排序：right_to_left / left_to_right / top_to_bottom / bottom_to_top
             'insert_image_to_bottom': False,  # 插入图片时置于底层
             'nudge_large_step': 10,  # Shift+方向键大步长（像素）
             'favorite_fonts': ['SimSun', 'Microsoft YaHei', '黑体', '楷体', 'Arial'],
@@ -4055,18 +4057,28 @@ class LayoutScene(QGraphicsScene):
         # 移除已取消选中的元素
         self.selection_order = [item for item in self.selection_order if item in current_selected]
 
-        # 新增元素：优先把点击的元素排在最前（如果有的话），其余按场景顺序追加
         newly_selected = current_selected - previous_set
         if newly_selected:
             clicked_item = self._pending_selection_click_item
-            # 如果点击的元素是新选中的，先加它
-            if clicked_item in newly_selected:
+            # 单击选中：优先把点击的元素排在最前
+            if clicked_item in newly_selected and len(newly_selected) == 1:
                 self.selection_order.append(clicked_item)
-                newly_selected.discard(clicked_item)
-            # 其余新选中的元素按场景 items() 顺序追加，保持稳定
-            for item in self.items():
-                if item in newly_selected:
-                    self.selection_order.append(item)
+            else:
+                # 框选/Ctrl+A 等批量选中：按空间位置排序
+                sort_order = self.config_manager.get('marquee_sort_order', 'right_to_left')
+                if sort_order == 'right_to_left':
+                    key = lambda item: (-item.scenePos().x(), item.scenePos().y())
+                elif sort_order == 'left_to_right':
+                    key = lambda item: (item.scenePos().x(), item.scenePos().y())
+                elif sort_order == 'top_to_bottom':
+                    key = lambda item: (item.scenePos().y(), -item.scenePos().x())
+                else:  # bottom_to_top
+                    key = lambda item: (-item.scenePos().y(), -item.scenePos().x())
+                sorted_new = sorted(newly_selected, key=key)
+                # 如果点击的元素也在批量选中里，把它放到最前
+                if clicked_item in newly_selected:
+                    sorted_new = [clicked_item] + [i for i in sorted_new if i != clicked_item]
+                self.selection_order.extend(sorted_new)
             
     def start_binding_mode(self, item):
         self.binding_source = item
@@ -5179,6 +5191,7 @@ class LayoutView(QGraphicsView):
         self._marquee_active = False
         self._marquee_mode = Qt.ItemSelectionMode.ContainsItemShape
         self._marquee_band = QRubberBand(QRubberBand.Shape.Rectangle, self.viewport())
+        self._marquee_sweep_order = []  # 框选过程中鼠标扫过的元素顺序
         self._pan_start = QPoint()
         self._main_window = None
         # 辅助线拖拽状态
@@ -5253,6 +5266,7 @@ class LayoutView(QGraphicsView):
 
         scene = self.scene()
         only_images = scene.config_manager.get('marquee_only_images', False)
+        only_connected = scene.config_manager.get('marquee_only_connected', False)
         scene.clearSelection()
         items = scene.items(path, self._marquee_mode, Qt.SortOrder.DescendingOrder, self.transform())
 
@@ -5260,6 +5274,12 @@ class LayoutView(QGraphicsView):
             if only_images:
                 if isinstance(item, VImageItem) and not getattr(item, 'locked', False):
                     item.setSelected(True)
+            elif only_connected:
+                # 仅选择连接点可见的文字或图片
+                if isinstance(item, (VImageItem, VTextItem)) and not getattr(item, 'locked', False):
+                    cp = getattr(item, 'connection_point', None)
+                    if cp and cp.isVisible():
+                        item.setSelected(True)
             else:
                 if item.flags() & QGraphicsItem.GraphicsItemFlag.ItemIsSelectable:
                     item.setSelected(True)
@@ -5432,6 +5452,7 @@ class LayoutView(QGraphicsView):
             if hit_element is None or is_locked:
                 self._marquee_active = True
                 self._marquee_origin = pos
+                self._marquee_sweep_order = []  # 开始新的框选，清空扫过记录
                 self._update_marquee_style(pos)
                 self._marquee_band.setGeometry(QRect(self._marquee_origin, QSize()))
                 self._marquee_band.show()
@@ -5462,8 +5483,36 @@ class LayoutView(QGraphicsView):
         # CAD 风格选框更新
         if self._marquee_active:
             self._update_marquee_style(event.pos())
-            self._marquee_band.setGeometry(QRect(self._marquee_origin, event.pos()).normalized())
-            self.viewport().update() # 确保选框渲染在最顶层
+            current_rect = QRect(self._marquee_origin, event.pos()).normalized()
+            self._marquee_band.setGeometry(current_rect)
+
+            # 实时追踪鼠标扫过的元素顺序
+            scene = self.scene()
+            if scene:
+                scene_polygon = self.mapToScene(current_rect)
+                path = QPainterPath()
+                path.addPolygon(scene_polygon)
+                only_images = scene.config_manager.get('marquee_only_images', False)
+                only_connected = scene.config_manager.get('marquee_only_connected', False)
+                items_in_rect = scene.items(path, self._marquee_mode,
+                                            Qt.SortOrder.DescendingOrder, self.transform())
+                for item in items_in_rect:
+                    if item in self._marquee_sweep_order:
+                        continue
+                    if only_images:
+                        if isinstance(item, VImageItem) and not getattr(item, 'locked', False):
+                            self._marquee_sweep_order.append(item)
+                    elif only_connected:
+                        if isinstance(item, (VImageItem, VTextItem)) and not getattr(item, 'locked', False):
+                            cp = getattr(item, 'connection_point', None)
+                            if cp and cp.isVisible():
+                                self._marquee_sweep_order.append(item)
+                    else:
+                        if isinstance(item, (VImageItem, VTextItem)) and \
+                                (item.flags() & QGraphicsItem.GraphicsItemFlag.ItemIsSelectable):
+                            self._marquee_sweep_order.append(item)
+
+            self.viewport().update()
             event.accept()
             return
 
@@ -5500,6 +5549,14 @@ class LayoutView(QGraphicsView):
         if self._marquee_active and event.button() == self._marquee_trigger_button:
             self._marquee_active = False
             self._apply_marquee_selection()
+            # 用框选过程中实时追踪的扫过顺序覆盖 selection_order
+            scene = self.scene()
+            if scene and self._marquee_sweep_order:
+                # 只保留最终确实被选中的元素，顺序不变
+                selected_set = set(scene.selectedItems())
+                scene.selection_order = [item for item in self._marquee_sweep_order
+                                         if item in selected_set]
+            self._marquee_sweep_order = []
             self._marquee_band.hide()
             event.accept()
             return
@@ -6053,6 +6110,30 @@ class MainWindow(QMainWindow):
         self.marquee_filter_action.toggled.connect(self.toggle_marquee_filter_setting)
         edit_menu.addAction(self.marquee_filter_action)
 
+        self.marquee_connected_action = QAction('框选时仅选中有连接点的元素', self)
+        self.marquee_connected_action.setCheckable(True)
+        self.marquee_connected_action.setChecked(self.scene.config_manager.get('marquee_only_connected', False))
+        self.marquee_connected_action.toggled.connect(self.toggle_marquee_connected_setting)
+        edit_menu.addAction(self.marquee_connected_action)
+
+        edit_menu.addSeparator()
+        marquee_sort_menu = edit_menu.addMenu('框选排序方式（影响智能连接顺序）')
+        sort_group_actions = []
+        for label, value in [
+            ('从右到左（竖排默认）', 'right_to_left'),
+            ('从左到右', 'left_to_right'),
+            ('从上到下', 'top_to_bottom'),
+            ('从下到上', 'bottom_to_top'),
+        ]:
+            a = QAction(label, self)
+            a.setCheckable(True)
+            a.setData(value)
+            a.triggered.connect(lambda checked, v=value: self._set_marquee_sort_order(v))
+            marquee_sort_menu.addAction(a)
+            sort_group_actions.append(a)
+        self._marquee_sort_actions = sort_group_actions
+        self._sync_marquee_sort_check()
+
         self.insert_image_to_bottom_action = QAction('插入图片时置于底层', self)
         self.insert_image_to_bottom_action.setCheckable(True)
         self.insert_image_to_bottom_action.setChecked(self.scene.config_manager.get('insert_image_to_bottom', False))
@@ -6072,9 +6153,45 @@ class MainWindow(QMainWindow):
         """切换框选时仅选中图片"""
         self.scene.config_manager.set('marquee_only_images', enabled)
         if enabled:
+            # 两个模式互斥
+            self.marquee_connected_action.blockSignals(True)
+            self.marquee_connected_action.setChecked(False)
+            self.marquee_connected_action.blockSignals(False)
+            self.scene.config_manager.set('marquee_only_connected', False)
             self.status_bar.showMessage('模式已切换：框选仅选中图片', 3000)
         else:
             self.status_bar.showMessage('模式已切换：框选恢复正常过滤', 3000)
+
+    def toggle_marquee_connected_setting(self, enabled):
+        """切换框选时仅选中有连接点的元素"""
+        self.scene.config_manager.set('marquee_only_connected', enabled)
+        if enabled:
+            # 两个模式互斥
+            self.marquee_filter_action.blockSignals(True)
+            self.marquee_filter_action.setChecked(False)
+            self.marquee_filter_action.blockSignals(False)
+            self.scene.config_manager.set('marquee_only_images', False)
+            self.status_bar.showMessage('模式已切换：框选仅选中有连接点的文字/图片', 3000)
+        else:
+            self.status_bar.showMessage('模式已切换：框选恢复正常过滤', 3000)
+
+    def _set_marquee_sort_order(self, value):
+        """设置框选排序方式"""
+        self.scene.config_manager.set('marquee_sort_order', value)
+        self._sync_marquee_sort_check()
+        labels = {
+            'right_to_left': '从右到左',
+            'left_to_right': '从左到右',
+            'top_to_bottom': '从上到下',
+            'bottom_to_top': '从下到上',
+        }
+        self.status_bar.showMessage(f'框选排序方式已设置为：{labels.get(value, value)}', 3000)
+
+    def _sync_marquee_sort_check(self):
+        """同步排序菜单的勾选状态"""
+        current = self.scene.config_manager.get('marquee_sort_order', 'right_to_left')
+        for a in self._marquee_sort_actions:
+            a.setChecked(a.data() == current)
 
     def toggle_insert_image_to_bottom(self, enabled):
         """切换插入图片时是否置于底层"""
