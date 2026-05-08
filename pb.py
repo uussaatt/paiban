@@ -1752,16 +1752,26 @@ class EditTextCommand(UndoCommand):
         self.old_text = old_text
         self.new_text = new_text
 
+    def _restore_scene_pos(self, scene_pos):
+        if self.item.parentItem():
+            self.item.setPos(self.item.parentItem().mapFromScene(scene_pos))
+        else:
+            self.item.setPos(scene_pos)
+
     def execute(self):
+        scene_pos = self.item.scenePos()
         self.item.full_text = self.new_text
         self.item.rebuild()
+        self._restore_scene_pos(scene_pos)
         if self.item.scene():
             self.item.scene().update_connectors(self.item)
             self.item.scene().update_image_text_connectors(self.item)
 
     def undo(self):
+        scene_pos = self.item.scenePos()
         self.item.full_text = self.old_text
         self.item.rebuild()
+        self._restore_scene_pos(scene_pos)
         if self.item.scene():
             self.item.scene().update_connectors(self.item)
             self.item.scene().update_image_text_connectors(self.item)
@@ -2649,108 +2659,91 @@ class BaseElement(QGraphicsItem):
                 print(f"{element_type}连接点已显示")
 
 class InlineTextEditor(QTextEdit):
-    """内联文本编辑器"""
+    """原位内联编辑器：透明覆盖层，只负责接收键盘输入，视觉由 VTextItem.paint 负责"""
     editingFinished = pyqtSignal(str)
     editingCancelled = pyqtSignal()
-    
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
-        
-        # 设置Fluent Design样式
+        self.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
+        # 完全透明，无边框——视觉效果由 VTextItem 自己画，但光标需要可见
         self.setStyleSheet("""
             QTextEdit {
-                background: rgba(255, 255, 255, 0.95);
-                border: 2px solid rgba(0, 120, 215, 0.8);
-                border-radius: 8px;
-                font-family: SimSun;
-                padding: 8px;
-                color: #323130;
-            }
-            QTextEdit:focus {
-                border: 2px solid rgba(0, 120, 215, 1.0);
+                background: transparent;
+                border: none;
+                color: rgba(0,0,0,0);
+                selection-background-color: transparent;
+                selection-color: transparent;
             }
         """)
-        
-        # 设置字体
-        font = QFont("SimSun", 24)
-        self.setFont(font)
-        
+        # 隐藏 QTextEdit 自带竖向光标，竖排文字光标由 VTextItem.paint 自绘
+        self.setCursorWidth(0)
+        palette = self.palette()
+        palette.setColor(QPalette.ColorRole.Text, QColor(0, 0, 0, 0))
+        palette.setColor(QPalette.ColorRole.Base, QColor(0, 0, 0, 0))
+        palette.setColor(QPalette.ColorRole.Window, QColor(0, 0, 0, 0))
+        self.setPalette(palette)
         self.original_text = ""
         self.text_item = None
+        # 每次文字变化时通知 VTextItem 实时预览
+        self.textChanged.connect(self._on_text_changed)
+
+    def _on_text_changed(self):
+        if self.text_item and self.text_item.is_editing:
+            self.text_item._editing_text = self.toPlainText()
+            self.text_item._update_editing_rect()
+            self.text_item.update()
 
     def insert_text_at_cursor(self, text):
-        """在当前光标位置插入文本"""
         cursor = self.textCursor()
         cursor.insertText(text)
-        self.setFocus() # 确保插入后依然拥有焦点
-        
-    def start_editing(self, text_item, text):
-        """开始编辑指定的文字项目"""
+        self.setFocus()
+
+    def start_editing(self, text_item, text, cursor_position=None, select_all=False):
         self.text_item = text_item
         self.original_text = text
-        self.setPlainText(text)
-        
-        # 设置编辑器的字体和大小
+
+        # 设置字体（与竖排渲染一致，影响光标高度）
         font = QFont(text_item.font_family, text_item.font_size)
         self.setFont(font)
-        
-        # 设置文字颜色
+
+        self.blockSignals(True)
+        self.setPlainText(text)
+        self.blockSignals(False)
+
+        # QTextEdit 只负责接收输入，视觉光标由 VTextItem.paint 自绘
         palette = self.palette()
-        palette.setColor(QPalette.ColorRole.Text, text_item.text_color)
+        palette.setColor(QPalette.ColorRole.Text, QColor(0, 0, 0, 0))       # 文字透明（由VTextItem画）
+        palette.setColor(QPalette.ColorRole.Base, QColor(0, 0, 0, 0))       # 背景透明
+        palette.setColor(QPalette.ColorRole.Window, QColor(0, 0, 0, 0))     # 窗口透明
         self.setPalette(palette)
-        
-        # 计算编辑器的位置和大小
+        self.setCursorWidth(0)
+
         scene = text_item.scene()
         if scene and scene.views():
             view = scene.views()[0]
-            
-            # 获取文字项目在视图中的位置
+            # 精确对齐到文字包围盒
             item_rect = text_item.boundingRect()
-            scene_rect = QRectF(text_item.scenePos(), item_rect.size())
+            scene_rect = text_item.mapRectToScene(item_rect)
             view_rect = view.mapFromScene(scene_rect).boundingRect()
-            
-            # --- 新增补丁：确保宽度和高度适合横向多行输入 ---
-            # 1. 强制最小宽度为 500，方便看清长句子
-            if view_rect.width() < 500:
-                view_rect.setWidth(500)
-            
-            # 2. 动态计算高度：至少显示 3 行文字的空间，或者保留原有的高度（取较大者）
-            line_height = QFontMetrics(font).lineSpacing()
-            min_height_for_lines = line_height * 4  # 预留 4 行的高度
-            if view_rect.height() < min_height_for_lines:
-                view_rect.setHeight(min_height_for_lines)
-            # ----------------------------------------------------
-            
-            # 调整编辑器大小，给一些额外空间
-            margin = 10
-            view_rect.adjust(-margin, -margin, margin, margin)
-            
-            # 确保编辑器不会超出视图边界
-            view_size = view.size()
-            if view_rect.right() > view_size.width():
-                view_rect.moveRight(view_size.width() - 5)
-            if view_rect.bottom() > view_size.height():
-                view_rect.moveBottom(view_size.height() - 5)
-            if view_rect.left() < 0:
-                view_rect.moveLeft(5)
-            if view_rect.top() < 0:
-                view_rect.moveTop(5)
-            
-            # 设置编辑器位置和大小
-            self.setParent(view)
+
+            self.setParent(view.viewport())
             self.setGeometry(view_rect)
             self.show()
             self.setFocus()
-            self.selectAll()
-    
+            cursor = self.textCursor()
+            if select_all:
+                self.selectAll()
+            else:
+                pos = len(text) if cursor_position is None else max(0, min(cursor_position, len(text)))
+                cursor.setPosition(pos)
+                self.setTextCursor(cursor)
+
     def insertFromMimeData(self, source):
-        """重写粘贴，粘贴后若配置开启则自动退出编辑"""
         super().insertFromMimeData(source)
-        # 检查是否开启了"粘贴后自动退出编辑"
         if self.text_item and self.text_item.scene():
             config_manager = getattr(self.text_item.scene(), 'config_manager', None)
             if config_manager and config_manager.get('auto_exit_after_paste', False):
@@ -2758,43 +2751,84 @@ class InlineTextEditor(QTextEdit):
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key.Key_Escape:
-            print("按下Escape键，取消编辑")
             self.editingCancelled.emit()
             self.hide()
-            # 清理编辑器状态
             self.text_item = None
             self.original_text = ""
         elif event.key() == Qt.Key.Key_Return and event.modifiers() == Qt.KeyboardModifier.ControlModifier:
-            # Ctrl+Enter 完成编辑
-            print("按下Ctrl+Enter，完成编辑")
             self.finish_editing()
-        elif event.key() == Qt.Key.Key_Return:
-            # 普通回车插入换行
-            super().keyPressEvent(event)
+        elif event.key() in (Qt.Key.Key_Up, Qt.Key.Key_Down, Qt.Key.Key_Left, Qt.Key.Key_Right):
+            # 竖排方向键逻辑：上下=同列移动，左右=跨列移动
+            self._handle_vertical_arrow(event)
         else:
             super().keyPressEvent(event)
-    
+
+    def _handle_vertical_arrow(self, event):
+        """竖排方向键：上下=同列上下移动，左=移到右边列，右=移到左边列"""
+        if not self.text_item:
+            return
+        text = self.toPlainText()
+        cursor = self.textCursor()
+        pos = cursor.position()
+        positions, _, _, char_h, col_step = self.text_item._editing_layout(text)
+
+        # 找到当前光标对应的位置信息
+        cur_item = next((p for p in positions if p['index'] == pos), None)
+        if cur_item is None and positions:
+            cur_item = positions[-1]
+
+        key = event.key()
+        new_pos = pos
+
+        if key == Qt.Key.Key_Up:
+            # 同列上移：找同列中 cursor_y 最近的上一个字符
+            same_col = [p for p in positions if p['col_idx'] == cur_item['col_idx'] and p['index'] < pos]
+            if same_col:
+                new_pos = same_col[-1]['index']
+
+        elif key == Qt.Key.Key_Down:
+            # 同列下移：找同列中 cursor_y 最近的下一个字符
+            same_col = [p for p in positions if p['col_idx'] == cur_item['col_idx'] and p['index'] > pos]
+            if same_col:
+                new_pos = same_col[0]['index']
+
+        elif key == Qt.Key.Key_Left:
+            # 竖排从右到左，Left = 移到左边列（col_idx 更大）
+            next_col = cur_item['col_idx'] + 1
+            next_col_items = [p for p in positions if p['col_idx'] == next_col]
+            if next_col_items:
+                # 找同列中 y 最接近的字符
+                target_y = cur_item['cursor_y']
+                closest = min(next_col_items, key=lambda p: abs(p['cursor_y'] - target_y))
+                new_pos = closest['index']
+
+        elif key == Qt.Key.Key_Right:
+            # 竖排从右到左，Right = 移到右边列（col_idx 更小）
+            prev_col = cur_item['col_idx'] - 1
+            if prev_col >= 0:
+                prev_col_items = [p for p in positions if p['col_idx'] == prev_col]
+                if prev_col_items:
+                    target_y = cur_item['cursor_y']
+                    closest = min(prev_col_items, key=lambda p: abs(p['cursor_y'] - target_y))
+                    new_pos = closest['index']
+
+        if new_pos != pos:
+            cursor.setPosition(new_pos)
+            self.setTextCursor(cursor)
+            if self.text_item:
+                self.text_item.update()
+
     def focusOutEvent(self, event):
-        """失去焦点时完成编辑"""
         if getattr(self, '_inserting_snippet', False):
             super().focusOutEvent(event)
             return
         self.finish_editing()
         super().focusOutEvent(event)
 
-    def _delayed_finish(self):
-        pass  # 不再使用
-    
     def finish_editing(self):
-        """完成编辑"""
         new_text = self.toPlainText()
-        print(f"InlineTextEditor完成编辑: 原文本='{self.original_text[:20]}...', 新文本='{new_text[:20]}...'")
-        
-        # 无论文本是否改变，都发送信号以确保状态重置
         self.editingFinished.emit(new_text)
         self.hide()
-        
-        # 清理编辑器状态
         self.text_item = None
         self.original_text = ""
 
@@ -2820,6 +2854,7 @@ class VTextItem(BaseElement):
         # 内联编辑器
         self.inline_editor = None
         self.is_editing = False
+        self._editing_text = ""  # 编辑中的实时文字（用于黑底白字预览）
         
         self.rebuild()
         self.create_connection_point()
@@ -3149,30 +3184,87 @@ class VTextItem(BaseElement):
                 print("文字连接点已显示")
 
     def mouseDoubleClickEvent(self, event):
-        """双击开始内联编辑"""
+        """双击像 Photoshop 文字层一样原位编辑，并尽量把光标放到点击处"""
         print(f"双击文字，当前编辑状态: {self.is_editing}")
-        if self.is_editing:
-            print("已经在编辑状态，强制重置")
-            self.reset_editing_state()
-        self.start_inline_editing()
-    
-    def start_inline_editing(self):
-        """开始内联编辑"""
-        if self.is_editing:
-            print("已经在编辑状态中")
+        cursor_position = self._cursor_position_from_point(event.pos())
+        if self.is_editing and self.inline_editor:
+            cursor = self.inline_editor.textCursor()
+            cursor.setPosition(cursor_position)
+            self.inline_editor.setTextCursor(cursor)
+            self.inline_editor.setFocus()
+        else:
+            self.start_inline_editing(cursor_position=cursor_position, select_all=True)
+        event.accept()
+
+    def mousePressEvent(self, event):
+        """编辑状态下点击定位光标，非编辑状态走父类拖拽逻辑"""
+        if self.is_editing and event.button() == Qt.MouseButton.LeftButton:
+            pos = self._cursor_position_from_point(event.pos())
+            if self.inline_editor:
+                cursor = self.inline_editor.textCursor()
+                cursor.setPosition(pos)
+                self.inline_editor.setTextCursor(cursor)
+                self.inline_editor.setFocus()
+            self._drag_select_start = pos
+            event.accept()
             return
-            
-        print("开始内联编辑")
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        """编辑状态下拖拽选中文字"""
+        if self.is_editing and event.buttons() & Qt.MouseButton.LeftButton:
+            pos = self._cursor_position_from_point(event.pos())
+            if self.inline_editor and hasattr(self, '_drag_select_start'):
+                cursor = self.inline_editor.textCursor()
+                cursor.setPosition(self._drag_select_start)
+                cursor.setPosition(pos, QTextCursor.MoveMode.KeepAnchor)
+                self.inline_editor.setTextCursor(cursor)
+            self.update()
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if self.is_editing:
+            self._drag_select_start = None
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+    
+    def start_inline_editing(self, cursor_position=None, select_all=False):
+        """开始内联编辑：原位显示文字层、直接输入，体验接近 Photoshop"""
+        if self.is_editing:
+            return
+
         self.is_editing = True
-        
+        self._editing_text = self.full_text  # 初始化为当前文字
+        # 记录初始右边界（场景坐标），编辑期间固定不动
+        self._editing_right = self.scenePos().x() + self._rect.width()
+        self._editing_scene_y = self.scenePos().y()
+        self._cursor_visible = True
+
+        # 启动光标闪烁定时器
+        if not hasattr(self, '_cursor_timer'):
+            self._cursor_timer = QTimer()
+            self._cursor_timer.timeout.connect(self._blink_cursor)
+        self._cursor_timer.start(500)
+
+        # 隐藏子字符，编辑期间由 paint 直接绘制预览
+        for child in self.childItems():
+            if isinstance(child, QGraphicsSimpleTextItem):
+                child.setVisible(False)
+
         # 创建内联编辑器
         if not self.inline_editor:
             self.inline_editor = InlineTextEditor()
             self.inline_editor.editingFinished.connect(self.finish_inline_editing)
             self.inline_editor.editingCancelled.connect(self.cancel_inline_editing)
-        
-        # 开始编辑
-        self.inline_editor.start_editing(self, self.full_text)
+
+        # 触发文字层编辑态重绘
+        self.update()
+
+        # 启动透明覆盖编辑器
+        self.inline_editor.start_editing(self, self.full_text, cursor_position, select_all)
 
     def insert_text(self, text):
         """如果正在编辑，则在编辑器光标处插入文本"""
@@ -3182,23 +3274,75 @@ class VTextItem(BaseElement):
         return False
     
     def finish_inline_editing(self, new_text):
-        """完成内联编辑"""
+        """完成内联编辑：恢复正常显示并保存"""
+        if hasattr(self, '_cursor_timer'):
+            self._cursor_timer.stop()
+        pos_before = self.scenePos()
         self.is_editing = False
+        self._editing_text = ""
+        self._editing_right = None
+        self._editing_scene_y = None
+        # 恢复子字符可见性和颜色
+        for child in self.childItems():
+            if isinstance(child, QGraphicsSimpleTextItem):
+                child.setVisible(True)
+                child.setBrush(QBrush(self.text_color))
+        self.update()
         if new_text != self.full_text and self.scene():
             old_text = self.full_text
             cmd = EditTextCommand(self.scene(), self, old_text, new_text)
             cmd.execute()
             self.scene().undo_stack.push(cmd)
+        else:
+            # 文字未变化时也恢复正常包围盒，但保持图层场景坐标不动
+            self.rebuild()
+
+        # 点击空白处结束编辑时，不让 rebuild 的右边缘补偿改变图层位置
+        if self.parentItem():
+            self.setPos(self.parentItem().mapFromScene(pos_before))
+        else:
+            self.setPos(pos_before)
+        if self.scene():
+            self.scene().update_connectors(self)
+            self.scene().update_image_text_connectors(self)
 
     def cancel_inline_editing(self):
-        """取消内联编辑"""
+        """取消内联编辑：恢复原始文字和颜色，位置不变"""
+        if hasattr(self, '_cursor_timer'):
+            self._cursor_timer.stop()
+        pos_before = self.scenePos()
         self.is_editing = False
+        self._editing_text = ""
+        self._editing_right = None
+        self._editing_scene_y = None
+        # rebuild 恢复原始 _rect
+        self.rebuild()
+        # 强制还原位置
+        if self.parentItem():
+            self.setPos(self.parentItem().mapFromScene(pos_before))
+        else:
+            self.setPos(pos_before)
+        for child in self.childItems():
+            if isinstance(child, QGraphicsSimpleTextItem):
+                child.setVisible(True)
+                child.setBrush(QBrush(self.text_color))
+        self.update()
         if self.inline_editor:
             self.inline_editor.hide()
 
     def reset_editing_state(self):
         """强制重置编辑状态"""
+        if hasattr(self, '_cursor_timer'):
+            self._cursor_timer.stop()
         self.is_editing = False
+        self._editing_text = ""
+        self._editing_right = None
+        self._editing_scene_y = None
+        for child in self.childItems():
+            if isinstance(child, QGraphicsSimpleTextItem):
+                child.setVisible(True)
+                child.setBrush(QBrush(self.text_color))
+        self.update()
         if self.inline_editor:
             self.inline_editor.hide()
             self.inline_editor.text_item = None
@@ -3221,6 +3365,188 @@ class VTextItem(BaseElement):
             event.accept()
         else:
             super().keyPressEvent(event)
+
+    def _blink_cursor(self):
+        """光标闪烁"""
+        self._cursor_visible = not getattr(self, '_cursor_visible', True)
+        self.update()
+
+    def _editing_layout(self, text):
+        """返回竖排编辑预览的字符位置，供绘制光标和双击定位复用"""
+        main_font = QFont(self.font_family, self.font_size)
+        main_fm = QFontMetrics(main_font)
+        char_h = main_fm.height()
+        col_step = self.font_size + self.column_spacing
+        effective_height = (
+            self.chars_per_column * char_h * LINE_HEIGHT_RATIO
+            if self.auto_height else self.box_height
+        )
+        right_edge = self._rect.right()
+        cursor_y = 0
+        col_idx = 0
+        positions = []
+
+        for index, ch in enumerate(text):
+            if ch == '\n':
+                col_x_left = right_edge - (col_idx + 1) * col_step
+                positions.append({
+                    'index': index,
+                    'char': ch,
+                    'rect': QRectF(col_x_left, cursor_y, col_step, char_h),
+                    'cursor_y': cursor_y,
+                    'col_idx': col_idx,
+                    'x': col_x_left,
+                })
+                if self.manual_line_break:
+                    cursor_y = 0
+                    col_idx += 1
+                continue
+
+            if cursor_y + char_h > effective_height:
+                cursor_y = 0
+                col_idx += 1
+
+            col_x_left = right_edge - (col_idx + 1) * col_step
+            x = col_x_left + (col_step - self.font_size) / 2
+            positions.append({
+                'index': index,
+                'char': ch,
+                'rect': QRectF(col_x_left, cursor_y, col_step, char_h),
+                'cursor_y': cursor_y,
+                'col_idx': col_idx,
+                'x': x,
+            })
+            cursor_y += char_h * LINE_HEIGHT_RATIO
+
+        col_x_left = right_edge - (col_idx + 1) * col_step
+        positions.append({
+            'index': len(text),
+            'char': '',
+            'rect': QRectF(col_x_left, cursor_y, col_step, char_h),
+            'cursor_y': cursor_y,
+            'col_idx': col_idx,
+            'x': col_x_left,
+        })
+        return positions, main_font, main_fm, char_h, col_step
+
+    def _cursor_position_from_point(self, point):
+        """把双击位置换算成 QTextEdit 的字符索引，便于原地继续编辑"""
+        text = self._editing_text if self.is_editing else self.full_text
+        positions, _, _, char_h, _ = self._editing_layout(text)
+        if not positions:
+            return 0
+
+        best_index = len(text)
+        best_score = float('inf')
+        for item in positions:
+            rect = item['rect']
+            center = rect.center()
+            dx = abs(point.x() - center.x())
+            dy = abs(point.y() - center.y())
+            score = dx * 2.0 + dy
+            if rect.adjusted(-4, -char_h * 0.4, 4, char_h * 0.4).contains(point):
+                if point.y() > rect.center().y() and item['index'] < len(text):
+                    return item['index'] + 1
+                return item['index']
+            if score < best_score:
+                best_score = score
+                best_index = item['index']
+                if point.y() > center.y() and best_index < len(text):
+                    best_index += 1
+        return max(0, min(best_index, len(text)))
+
+    def _update_editing_rect(self):
+        """编辑状态下根据当前文字实时计算包围盒，右边界固定，向左扩展"""
+        text = self._editing_text
+        positions, _, _, char_h, col_step = self._editing_layout(text)
+        max_col = max((item['col_idx'] for item in positions), default=0)
+        max_y = max((item['cursor_y'] + char_h for item in positions), default=char_h)
+        new_w = (max_col + 1) * col_step
+        new_h = max_y
+
+        # _rect 始终从 (0,0) 开始，通过移动元素场景位置保持右边界固定
+        right_edge = self._editing_right
+        scene_y = self._editing_scene_y
+
+        self.prepareGeometryChange()
+        self._rect = QRectF(0, 0, new_w, new_h)
+
+        # 移动元素使右边界保持在 _editing_right
+        new_scene_x = right_edge - new_w
+        if self.parentItem():
+            new_local = self.parentItem().mapFromScene(QPointF(new_scene_x, scene_y))
+            self.setPos(new_local)
+        else:
+            self.setPos(new_scene_x, scene_y)
+
+        # 同步更新透明编辑器的位置和大小
+        if self.inline_editor and self.inline_editor.isVisible() and self.scene() and self.scene().views():
+            view = self.scene().views()[0]
+            scene_rect = QRectF(self.scenePos(), self._rect.size())
+            view_rect = view.mapFromScene(scene_rect).boundingRect()
+            self.inline_editor.setGeometry(view_rect)
+
+    def paint(self, painter, option, widget):
+        """编辑状态下绘制原位文字层预览，非编辑状态走父类选中框逻辑"""
+        if self.is_editing:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            preview_text = self._editing_text if self._editing_text != "" or self.full_text == "" else self.full_text
+            positions, main_font, main_fm, char_h, col_step = self._editing_layout(preview_text)
+
+            # 黑色背景块
+            painter.fillRect(self._rect, QColor(0, 0, 0))
+
+            painter.setFont(main_font)
+            painter.setPen(QColor(255, 255, 255))  # 白色文字
+
+            right_edge = self._rect.right()
+
+            # 获取光标位置
+            cursor_char_pos = -1
+            if self.inline_editor and self.inline_editor.isVisible():
+                cursor_char_pos = self.inline_editor.textCursor().position()
+
+            for item in positions:
+                if item['index'] >= len(preview_text) or item['char'] == '\n':
+                    continue
+                # 判断是否在选区内，选中的字符画反色（白底黑字）
+                in_selection = False
+                if self.inline_editor and self.inline_editor.isVisible():
+                    tc = self.inline_editor.textCursor()
+                    if tc.hasSelection():
+                        sel_start = tc.selectionStart()
+                        sel_end = tc.selectionEnd()
+                        in_selection = sel_start <= item['index'] < sel_end
+                if in_selection:
+                    painter.fillRect(item['rect'], QColor(255, 255, 255))
+                    painter.setPen(QColor(0, 0, 0))
+                else:
+                    painter.setPen(QColor(255, 255, 255))
+                painter.drawText(
+                    QPointF(item['x'], item['cursor_y'] + char_h - main_fm.descent()),
+                    item['char']
+                )
+
+            # 绘制光标（白色横线）
+            if cursor_char_pos >= 0 and self.inline_editor:
+                show_cursor = True
+                if hasattr(self, '_cursor_visible'):
+                    show_cursor = self._cursor_visible
+                if show_cursor and cursor_char_pos < len(positions):
+                    cursor_item = positions[cursor_char_pos]
+                    cy = cursor_item['cursor_y']
+                    cidx = cursor_item['col_idx']
+                    col_x_left = right_edge - (cidx + 1) * col_step
+                    col_x_right = col_x_left + col_step
+                    cursor_pen = QPen(QColor(255, 255, 255), 2)
+                    cursor_pen.setCosmetic(True)
+                    painter.setPen(cursor_pen)
+                    painter.drawLine(QPointF(col_x_left + 2, cy), QPointF(col_x_right - 2, cy))
+        else:
+            for child in self.childItems():
+                if isinstance(child, QGraphicsSimpleTextItem):
+                    child.setBrush(QBrush(self.text_color))
+            super().paint(painter, option, widget)
 
     def boundingRect(self):
         return self._rect
