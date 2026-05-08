@@ -3214,7 +3214,7 @@ class VTextItem(BaseElement):
         """编辑状态下拖拽选中文字"""
         if self.is_editing and event.buttons() & Qt.MouseButton.LeftButton:
             pos = self._cursor_position_from_point(event.pos())
-            if self.inline_editor and hasattr(self, '_drag_select_start'):
+            if self.inline_editor and self._drag_select_start is not None:
                 cursor = self.inline_editor.textCursor()
                 cursor.setPosition(self._drag_select_start)
                 cursor.setPosition(pos, QTextCursor.MoveMode.KeepAnchor)
@@ -3238,10 +3238,13 @@ class VTextItem(BaseElement):
 
         self.is_editing = True
         self._editing_text = self.full_text  # 初始化为当前文字
-        # 记录初始右边界（场景坐标），编辑期间固定不动
-        self._editing_right = self.scenePos().x() + self._rect.width()
-        self._editing_scene_y = self.scenePos().y()
+        # 记录初始右边界（场景坐标），用 mapRectToScene 确保精确
+        scene_rect = self.mapRectToScene(self._rect)
+        self._editing_right = scene_rect.right()
+        self._editing_scene_y = scene_rect.top()
+        self._editing_origin_scene_pos = self.scenePos()  # 记录进入编辑时的原始场景位置
         self._cursor_visible = True
+        self._drag_select_start = None  # 拖拽选择起始位置
 
         # 启动光标闪烁定时器
         if not hasattr(self, '_cursor_timer'):
@@ -3274,54 +3277,63 @@ class VTextItem(BaseElement):
         return False
     
     def finish_inline_editing(self, new_text):
-        """完成内联编辑：恢复正常显示并保存"""
+        """完成内联编辑：恢复正常显示并保存，右边界固定不变"""
         if hasattr(self, '_cursor_timer'):
             self._cursor_timer.stop()
-        pos_before = self.scenePos()
+        # 记录进入编辑时的右边界（场景坐标），退出后用它重新定位
+        editing_right = getattr(self, '_editing_right', None)
         self.is_editing = False
         self._editing_text = ""
         self._editing_right = None
         self._editing_scene_y = None
+        self._editing_origin_scene_pos = None
         # 恢复子字符可见性和颜色
         for child in self.childItems():
             if isinstance(child, QGraphicsSimpleTextItem):
                 child.setVisible(True)
                 child.setBrush(QBrush(self.text_color))
         self.update()
+
         if new_text != self.full_text and self.scene():
             old_text = self.full_text
             cmd = EditTextCommand(self.scene(), self, old_text, new_text)
             cmd.execute()
             self.scene().undo_stack.push(cmd)
         else:
-            # 文字未变化时也恢复正常包围盒，但保持图层场景坐标不动
             self.rebuild()
 
-        # 点击空白处结束编辑时，不让 rebuild 的右边缘补偿改变图层位置
-        if self.parentItem():
-            self.setPos(self.parentItem().mapFromScene(pos_before))
-        else:
-            self.setPos(pos_before)
+        # 用固定的右边界重新定位，消除 rebuild 里 moveBy 的影响
+        if editing_right is not None:
+            new_scene_x = editing_right - self._rect.width()
+            new_scene_y = self.scenePos().y()
+            if self.parentItem():
+                self.setPos(self.parentItem().mapFromScene(QPointF(new_scene_x, new_scene_y)))
+            else:
+                self.setPos(new_scene_x, new_scene_y)
+
         if self.scene():
             self.scene().update_connectors(self)
             self.scene().update_image_text_connectors(self)
 
     def cancel_inline_editing(self):
-        """取消内联编辑：恢复原始文字和颜色，位置不变"""
+        """取消内联编辑：恢复原始文字和颜色，右边界不变"""
         if hasattr(self, '_cursor_timer'):
             self._cursor_timer.stop()
-        pos_before = self.scenePos()
+        editing_right = getattr(self, '_editing_right', None)
         self.is_editing = False
         self._editing_text = ""
         self._editing_right = None
         self._editing_scene_y = None
-        # rebuild 恢复原始 _rect
+        self._editing_origin_scene_pos = None
         self.rebuild()
-        # 强制还原位置
-        if self.parentItem():
-            self.setPos(self.parentItem().mapFromScene(pos_before))
-        else:
-            self.setPos(pos_before)
+        # 用固定的右边界重新定位
+        if editing_right is not None:
+            new_scene_x = editing_right - self._rect.width()
+            new_scene_y = self.scenePos().y()
+            if self.parentItem():
+                self.setPos(self.parentItem().mapFromScene(QPointF(new_scene_x, new_scene_y)))
+            else:
+                self.setPos(new_scene_x, new_scene_y)
         for child in self.childItems():
             if isinstance(child, QGraphicsSimpleTextItem):
                 child.setVisible(True)
@@ -3381,7 +3393,8 @@ class VTextItem(BaseElement):
             self.chars_per_column * char_h * LINE_HEIGHT_RATIO
             if self.auto_height else self.box_height
         )
-        right_edge = self._rect.right()
+        # 去掉 rebuild 里 adjusted(-2,-2,2,2) 带来的 2px 右边偏移，保持与非编辑状态对齐
+        right_edge = self._rect.right() - 2
         cursor_y = 0
         col_idx = 0
         positions = []
@@ -3499,29 +3512,45 @@ class VTextItem(BaseElement):
             painter.setFont(main_font)
             painter.setPen(QColor(255, 255, 255))  # 白色文字
 
-            right_edge = self._rect.right()
+            right_edge = self._rect.right() - 2
+
+            # 获取选区范围
+            sel_start, sel_end = -1, -1
+            if self.inline_editor and self.inline_editor.isVisible():
+                tc = self.inline_editor.textCursor()
+                if tc.hasSelection():
+                    sel_start = tc.selectionStart()
+                    sel_end = tc.selectionEnd()
 
             # 获取光标位置
             cursor_char_pos = -1
             if self.inline_editor and self.inline_editor.isVisible():
                 cursor_char_pos = self.inline_editor.textCursor().position()
 
+            # 先按列分组选中字符，计算每列的完整蓝色背景矩形
+            if sel_start >= 0:
+                col_sel = {}  # col_idx -> (min_y, max_y)
+                for item in positions:
+                    if item['char'] == '\n' or item['index'] >= len(preview_text):
+                        continue
+                    if sel_start <= item['index'] < sel_end:
+                        cidx = item['col_idx']
+                        top = item['cursor_y']
+                        bot = item['cursor_y'] + char_h
+                        if cidx not in col_sel:
+                            col_sel[cidx] = (top, bot)
+                        else:
+                            col_sel[cidx] = (min(col_sel[cidx][0], top), max(col_sel[cidx][1], bot))
+                # 按列绘制蓝色背景
+                for cidx, (top, bot) in col_sel.items():
+                    col_x = right_edge - (cidx + 1) * col_step
+                    painter.fillRect(QRectF(col_x, top, col_step, bot - top), QColor(0, 120, 215))
+
+            # 绘制所有字符
             for item in positions:
                 if item['index'] >= len(preview_text) or item['char'] == '\n':
                     continue
-                # 判断是否在选区内，选中的字符画反色（白底黑字）
-                in_selection = False
-                if self.inline_editor and self.inline_editor.isVisible():
-                    tc = self.inline_editor.textCursor()
-                    if tc.hasSelection():
-                        sel_start = tc.selectionStart()
-                        sel_end = tc.selectionEnd()
-                        in_selection = sel_start <= item['index'] < sel_end
-                if in_selection:
-                    painter.fillRect(item['rect'], QColor(255, 255, 255))
-                    painter.setPen(QColor(0, 0, 0))
-                else:
-                    painter.setPen(QColor(255, 255, 255))
+                painter.setPen(QColor(255, 255, 255))
                 painter.drawText(
                     QPointF(item['x'], item['cursor_y'] + char_h - main_fm.descent()),
                     item['char']
