@@ -6260,6 +6260,9 @@ class MainWindow(QMainWindow):
         # 主工具栏 - 编辑和格式化
         main_toolbar = QToolBar("编辑与格式")
         main_toolbar.setObjectName("toolbar_main")
+        main_toolbar.setMovable(False)
+        main_toolbar.setIconSize(QSize(16, 16))
+        main_toolbar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
         self.addToolBar(Qt.ToolBarArea.TopToolBarArea, main_toolbar)
         
         # === 基本编辑操作 ===
@@ -6306,7 +6309,8 @@ class MainWindow(QMainWindow):
         # === 字体格式 ===
         main_toolbar.addWidget(QLabel("字体:"))
         self.font_combo = QComboBox()
-        self.font_combo.setMinimumWidth(150)
+        self.font_combo.setMinimumWidth(120)
+        self.font_combo.setMaximumWidth(170)
         self.font_combo.setEditable(True)
         # 加载系统所有字体
         for f in QFontDatabase.families():
@@ -6333,12 +6337,13 @@ class MainWindow(QMainWindow):
         main_toolbar.addWidget(self.font_size_spin)
         
         self.color_button = QPushButton()
-        self.color_button.setFixedSize(32, 28)
+        self.color_button.setFixedSize(28, 24)
         self.color_button.setStyleSheet("""
             QPushButton {
                 background-color: black;
                 border: 2px solid rgba(255, 255, 255, 0.9);
-                border-radius: 6px;
+                border-radius: 4px;
+                padding: 0;
             }
             QPushButton:hover {
                 border: 2px solid rgba(0, 120, 215, 0.8);
@@ -6371,14 +6376,15 @@ class MainWindow(QMainWindow):
         self.manual_line_break_btn = QPushButton("手动换行")
         self.manual_line_break_btn.setCheckable(True)
         self.manual_line_break_btn.setChecked(True)
+        self.manual_line_break_btn.setMaximumHeight(28)
         self.manual_line_break_btn.setStyleSheet("""
             QPushButton {
                 background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
                     stop:0 rgba(255, 255, 255, 0.9),
                     stop:1 rgba(249, 249, 249, 0.9));
                 border: 1px solid rgba(0, 0, 0, 0.1);
-                border-radius: 6px;
-                padding: 6px 12px;
+                border-radius: 4px;
+                padding: 3px 8px;
                 font-weight: 500;
             }
             QPushButton:checked {
@@ -6403,7 +6409,7 @@ class MainWindow(QMainWindow):
         self.marquee_mode_combo.addItem("仅图片", "images")
         self.marquee_mode_combo.addItem("仅连接点元素", "connected")
         self.marquee_mode_combo.setToolTip("框选模式（Alt+M 循环切换）")
-        self.marquee_mode_combo.setFixedWidth(110)
+        self.marquee_mode_combo.setFixedWidth(96)
         self.marquee_mode_combo.currentIndexChanged.connect(
             lambda idx: self.set_marquee_mode(self.marquee_mode_combo.itemData(idx))
         )
@@ -6518,7 +6524,7 @@ class MainWindow(QMainWindow):
         show_all_images_action.triggered.connect(self.show_all_hidden_images)
         view_menu.addAction(show_all_images_action)
 
-        image_manage_action = QAction('图片管理模式  Alt+,', self)
+        image_manage_action = QAction('图片管理模式', self)
         image_manage_action.setShortcut('Alt+,')
         image_manage_action.triggered.connect(lambda: self.scene.toggle_image_manage_mode())
         view_menu.addAction(image_manage_action)
@@ -7293,14 +7299,35 @@ class MainWindow(QMainWindow):
                 stop:1 rgba(245, 245, 245, 0.95));
             border: none;
             border-bottom: 1px solid rgba(0, 0, 0, 0.1);
-            spacing: 8px;
-            padding: 6px;
+            spacing: 4px;
+            padding: 3px 4px;
         }
         
         QToolBar::separator {
             background-color: rgba(0, 0, 0, 0.1);
             width: 1px;
-            margin: 4px 2px;
+            margin: 3px 2px;
+        }
+
+        QToolBar#toolbar_main QToolButton {
+            padding: 3px 8px;
+            min-height: 20px;
+            border-radius: 4px;
+            font-size: 12px;
+            font-weight: 500;
+        }
+
+        QToolBar#toolbar_main QLabel {
+            font-size: 12px;
+            padding-left: 2px;
+            padding-right: 0px;
+        }
+
+        QToolBar#toolbar_main QComboBox,
+        QToolBar#toolbar_main QSpinBox {
+            min-height: 22px;
+            padding: 2px 6px;
+            font-size: 12px;
         }
         
         /* 按钮基础样式 - Fluent Design */
