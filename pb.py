@@ -53,9 +53,9 @@ class ConfigManager:
             'default_font_size': DEFAULT_FONT_SIZE,
             'default_line_width': DEFAULT_LINE_WIDTH,  # 默认连线粗细
             'bg_above_connectors': False,  # 背景图片是否在连线之上
-            'marquee_only_images': False,  # 框选时仅选择图片
-            'marquee_only_connected': False,  # 框选时仅选择有连接点的元素
-            'marquee_sort_order': 'right_to_left',  # 框选排序：right_to_left / left_to_right / top_to_bottom / bottom_to_top
+            'marquee_only_images': False,  # 框选时仅选择图片（兼容旧版）
+            'marquee_only_connected': False,  # 框选时仅选择有连接点的元素（兼容旧版）
+            'marquee_mode': 'all',  # 框选模式：all / images / connected
             'insert_image_to_bottom': False,  # 插入图片时置于底层
             'nudge_large_step': 10,  # Shift+方向键大步长（像素）
             'favorite_fonts': ['SimSun', 'Microsoft YaHei', '黑体', '楷体', 'Arial'],
@@ -3963,6 +3963,15 @@ class VImageItem(BaseElement):
             return
         self._build_image_context_menu(event.screenPos())
 
+    def paint(self, painter, option, widget):
+        """图片管理模式下，隐藏的图片显示为半透明虚框"""
+        scene = self.scene()
+        if scene and getattr(scene, 'image_manage_mode', False) and not self.isVisible():
+            # 强制绘制半透明虚框（即使 isVisible() 为 False，paint 不会被调用）
+            # 这里通过 drawForeground 或直接在 scene 里绘制，见下方 drawForeground
+            pass
+        super().paint(painter, option, widget)
+
     def boundingRect(self):
         return self._rect
 
@@ -4226,6 +4235,7 @@ class LayoutScene(QGraphicsScene):
         self.snap_threshold = 20  # 辅助线吸附距离（场景像素）
         self.resize_mode = False  # 图片调整大小模式
         self.stamping_session = None  # 盖章式批量复制会话
+        self.image_manage_mode = False  # 图片管理模式（Alt+, 切换）
         self.align_reference_mode = None  # 对齐基准点选模式
         self.align_reference_candidates = []
         self._pending_selection_click_item = None
@@ -4299,6 +4309,74 @@ class LayoutScene(QGraphicsScene):
         for item in self.items():
             if isinstance(item, VImageItem):
                 item._show_handles(enabled and item.isSelected())
+
+    def toggle_image_manage_mode(self):
+        """切换图片管理模式（Alt+,）：隐藏的图片显示为半透明虚框，点击切换显示/隐藏"""
+        self.image_manage_mode = not self.image_manage_mode
+
+        for item in self.items():
+            if isinstance(item, VImageItem):
+                if self.image_manage_mode:
+                    if not item.isVisible():
+                        item._was_hidden = True
+                        # 临时显示，设为半透明，禁止选中和移动避免误操作
+                        item.setVisible(True)
+                        if hasattr(item, 'p_item') and item.p_item:
+                            item.p_item.setOpacity(0.01)  # 几乎透明，让遮罩层负责视觉
+                        item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, False)
+                        item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, False)
+                    else:
+                        item._was_hidden = False
+                        item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, False)
+                        item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, False)
+                else:
+                    # 退出管理模式：恢复原始状态
+                    was_hidden = getattr(item, '_was_hidden', False)
+                    item.setVisible(not was_hidden)
+                    if hasattr(item, 'p_item') and item.p_item:
+                        item.p_item.setOpacity(item.image_opacity)
+                    item._was_hidden = False
+                    # 恢复交互标志
+                    item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, not item.locked)
+                    item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, not item.locked)
+
+        self.update()
+        if self.views():
+            mw = self.views()[0].window()
+            if self.image_manage_mode:
+                if hasattr(mw, 'status_bar'):
+                    mw.status_bar.showMessage('图片管理模式：点击图片切换显示/隐藏，再按 Alt+, 退出', 0)
+                self.views()[0].setCursor(Qt.CursorShape.PointingHandCursor)
+            else:
+                if hasattr(mw, 'status_bar'):
+                    mw.status_bar.showMessage('已退出图片管理模式', 3000)
+                self.views()[0].setCursor(Qt.CursorShape.ArrowCursor)
+
+    def drawForeground(self, painter, rect):
+        """图片管理模式下，给原本隐藏的图片画虚线边框和标注"""
+        if not self.image_manage_mode:
+            return
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        for item in self.items():
+            if isinstance(item, VImageItem) and getattr(item, '_was_hidden', False):
+                scene_rect = item.mapRectToScene(item.boundingRect())
+                # 半透明蓝色遮罩
+                painter.setOpacity(0.25)
+                painter.fillRect(scene_rect, QColor(0, 120, 215))
+                painter.setOpacity(1.0)
+                # 虚线边框
+                pen = QPen(QColor(0, 120, 215), 2, Qt.PenStyle.DashLine)
+                pen.setCosmetic(True)
+                painter.setPen(pen)
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.drawRect(scene_rect)
+                # 文件名提示
+                painter.setPen(QColor(255, 255, 255))
+                font = QFont('Arial', 9)
+                font.setBold(True)
+                painter.setFont(font)
+                name = os.path.basename(item.file_path)
+                painter.drawText(scene_rect, Qt.AlignmentFlag.AlignCenter, f'点击显示\n{name}')
 
     def drawBackground(self, painter, rect):
         # 绘制外部背景
@@ -4419,20 +4497,11 @@ class LayoutScene(QGraphicsScene):
             if clicked_item in newly_selected and len(newly_selected) == 1:
                 self.selection_order.append(clicked_item)
             else:
-                # 框选/Ctrl+A 等批量选中：按空间位置排序
-                sort_order = self.config_manager.get('marquee_sort_order', 'right_to_left')
-                if sort_order == 'right_to_left':
-                    key = lambda item: (-item.scenePos().x(), item.scenePos().y())
-                elif sort_order == 'left_to_right':
-                    key = lambda item: (item.scenePos().x(), item.scenePos().y())
-                elif sort_order == 'top_to_bottom':
-                    key = lambda item: (item.scenePos().y(), -item.scenePos().x())
-                else:  # bottom_to_top
-                    key = lambda item: (-item.scenePos().y(), -item.scenePos().x())
-                sorted_new = sorted(newly_selected, key=key)
-                # 如果点击的元素也在批量选中里，把它放到最前
+                # 框选/Ctrl+A 等批量选中：由 LayoutView 的实时扫描顺序决定，这里只补充未被扫到的元素
                 if clicked_item in newly_selected:
-                    sorted_new = [clicked_item] + [i for i in sorted_new if i != clicked_item]
+                    sorted_new = [clicked_item] + [i for i in newly_selected if i != clicked_item]
+                else:
+                    sorted_new = list(newly_selected)
                 self.selection_order.extend(sorted_new)
             
     def start_binding_mode(self, item):
@@ -4456,6 +4525,32 @@ class LayoutScene(QGraphicsScene):
 
     def mousePressEvent(self, event):
         """鼠标按下事件：处理元素点击、父子绑定、对齐基准选择和盖章会话"""
+        # 图片管理模式：点击图片切换显示/隐藏
+        if self.image_manage_mode and event.button() == Qt.MouseButton.LeftButton:
+            click_pos = event.scenePos()
+            # 手动遍历所有图片，检查点击位置是否在包围盒内
+            clicked_img = None
+            for item in self.items():
+                if isinstance(item, VImageItem):
+                    scene_rect = item.mapRectToScene(item.boundingRect())
+                    if scene_rect.contains(click_pos):
+                        clicked_img = item
+                        break
+            if clicked_img:
+                if getattr(clicked_img, '_was_hidden', False):
+                    # 原来是隐藏的，现在显示它
+                    clicked_img._was_hidden = False
+                    if hasattr(clicked_img, 'p_item') and clicked_img.p_item:
+                        clicked_img.p_item.setOpacity(clicked_img.image_opacity)
+                else:
+                    # 原来是显示的，现在隐藏它
+                    clicked_img._was_hidden = True
+                    if hasattr(clicked_img, 'p_item') and clicked_img.p_item:
+                        clicked_img.p_item.setOpacity(0.01)
+                self.update()
+                event.accept()
+                return
+
         if event.button() == Qt.MouseButton.LeftButton:
             raw = self.itemAt(event.scenePos(), QTransform())
             clicked_item = raw
@@ -5620,17 +5715,15 @@ class LayoutView(QGraphicsView):
         path.addPolygon(scene_polygon)
 
         scene = self.scene()
-        only_images = scene.config_manager.get('marquee_only_images', False)
-        only_connected = scene.config_manager.get('marquee_only_connected', False)
+        mode = scene.config_manager.get('marquee_mode', 'all')
         scene.clearSelection()
         items = scene.items(path, self._marquee_mode, Qt.SortOrder.DescendingOrder, self.transform())
 
         for item in items:
-            if only_images:
+            if mode == 'images':
                 if isinstance(item, VImageItem) and not getattr(item, 'locked', False):
                     item.setSelected(True)
-            elif only_connected:
-                # 仅选择连接点可见的文字或图片
+            elif mode == 'connected':
                 if isinstance(item, (VImageItem, VTextItem)) and not getattr(item, 'locked', False):
                     cp = getattr(item, 'connection_point', None)
                     if cp and cp.isVisible():
@@ -5847,17 +5940,16 @@ class LayoutView(QGraphicsView):
                 scene_polygon = self.mapToScene(current_rect)
                 path = QPainterPath()
                 path.addPolygon(scene_polygon)
-                only_images = scene.config_manager.get('marquee_only_images', False)
-                only_connected = scene.config_manager.get('marquee_only_connected', False)
+                mode = scene.config_manager.get('marquee_mode', 'all')
                 items_in_rect = scene.items(path, self._marquee_mode,
                                             Qt.SortOrder.DescendingOrder, self.transform())
                 for item in items_in_rect:
                     if item in self._marquee_sweep_order:
                         continue
-                    if only_images:
+                    if mode == 'images':
                         if isinstance(item, VImageItem) and not getattr(item, 'locked', False):
                             self._marquee_sweep_order.append(item)
-                    elif only_connected:
+                    elif mode == 'connected':
                         if isinstance(item, (VImageItem, VTextItem)) and not getattr(item, 'locked', False):
                             cp = getattr(item, 'connection_point', None)
                             if cp and cp.isVisible():
@@ -6077,15 +6169,19 @@ class MainWindow(QMainWindow):
         sidebar = QDockWidget("层级 & 属性", self)
         sidebar.setObjectName("dock_hierarchy")
         sidebar.setAllowedAreas(Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea)
+        self._eye_visible_icon = self._make_eye_icon(True)
+        self._eye_hidden_icon = self._make_eye_icon(False)
         self.tree_widget = QTreeWidget()
-        self.tree_widget.setHeaderLabels(["排版元素", "位置"])
-        self.tree_widget.setColumnWidth(0, 180)
+        self.tree_widget.setHeaderLabels(["", "排版元素", "位置"])
+        self.tree_widget.setColumnWidth(0, 34)
+        self.tree_widget.setColumnWidth(1, 180)
+        self.tree_widget.setAllColumnsShowFocus(True)
         self.tree_widget.itemClicked.connect(self._on_tree_item_clicked)
-        self.tree_widget.itemChanged.connect(self._on_tree_item_changed)
         sidebar.setWidget(self.tree_widget)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, sidebar)
         self._tree_item_counter = 0  # 全局编号计数器
         self._tree_updating = False   # 防止 itemChanged 递归触发
+        self._tree_nodes_by_item = {}
         
         # 左侧：素材库面板
         self.asset_library_dock = AssetLibraryDockWidget(self.scene.asset_manager, self)
@@ -6100,6 +6196,8 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(self.view)
         self.create_menu_bar()
         self.create_toolbars()
+        # 同步框选模式 UI 初始状态
+        self._sync_marquee_mode_ui()
         
         # 创建状态栏
         self.status_bar = self.statusBar()
@@ -6298,6 +6396,19 @@ class MainWindow(QMainWindow):
         self.manual_line_break_btn.toggled.connect(self.toggle_manual_line_break)
         main_toolbar.addWidget(self.manual_line_break_btn)
 
+        main_toolbar.addSeparator()
+        main_toolbar.addWidget(QLabel("框选:"))
+        self.marquee_mode_combo = QComboBox()
+        self.marquee_mode_combo.addItem("全选", "all")
+        self.marquee_mode_combo.addItem("仅图片", "images")
+        self.marquee_mode_combo.addItem("仅连接点元素", "connected")
+        self.marquee_mode_combo.setToolTip("框选模式（Alt+M 循环切换）")
+        self.marquee_mode_combo.setFixedWidth(110)
+        self.marquee_mode_combo.currentIndexChanged.connect(
+            lambda idx: self.set_marquee_mode(self.marquee_mode_combo.itemData(idx))
+        )
+        main_toolbar.addWidget(self.marquee_mode_combo)
+
     def create_menu_bar(self):
         menubar = self.menuBar()
         file_menu = menubar.addMenu('文件')
@@ -6406,6 +6517,11 @@ class MainWindow(QMainWindow):
         show_all_images_action = QAction('显示所有隐藏图片', self)
         show_all_images_action.triggered.connect(self.show_all_hidden_images)
         view_menu.addAction(show_all_images_action)
+
+        image_manage_action = QAction('图片管理模式  Alt+,', self)
+        image_manage_action.setShortcut('Alt+,')
+        image_manage_action.triggered.connect(lambda: self.scene.toggle_image_manage_mode())
+        view_menu.addAction(image_manage_action)
         
         background_opacity_action = QAction('设置背景透明度...', self)
         background_opacity_action.triggered.connect(self.set_background_opacity)
@@ -6459,35 +6575,26 @@ class MainWindow(QMainWindow):
         self.auto_exit_paste_action.toggled.connect(self.toggle_auto_exit_setting)
         edit_menu.addAction(self.auto_exit_paste_action)
 
-        self.marquee_filter_action = QAction('框选时仅选中图片', self)
-        self.marquee_filter_action.setCheckable(True)
-        self.marquee_filter_action.setChecked(self.scene.config_manager.get('marquee_only_images', False))
-        self.marquee_filter_action.toggled.connect(self.toggle_marquee_filter_setting)
-        edit_menu.addAction(self.marquee_filter_action)
-
-        self.marquee_connected_action = QAction('框选时仅选中有连接点的元素', self)
-        self.marquee_connected_action.setCheckable(True)
-        self.marquee_connected_action.setChecked(self.scene.config_manager.get('marquee_only_connected', False))
-        self.marquee_connected_action.toggled.connect(self.toggle_marquee_connected_setting)
-        edit_menu.addAction(self.marquee_connected_action)
-
-        edit_menu.addSeparator()
-        marquee_sort_menu = edit_menu.addMenu('框选排序方式（影响智能连接顺序）')
-        sort_group_actions = []
+        # 框选模式：三选一，替代原来的两个开关
+        marquee_mode_menu = edit_menu.addMenu('框选模式  [Alt+M 循环切换]')
+        self._marquee_mode_actions = {}
         for label, value in [
-            ('从右到左（竖排默认）', 'right_to_left'),
-            ('从左到右', 'left_to_right'),
-            ('从上到下', 'top_to_bottom'),
-            ('从下到上', 'bottom_to_top'),
+            ('全选（默认）', 'all'),
+            ('仅选图片', 'images'),
+            ('仅选有连接点的元素', 'connected'),
         ]:
             a = QAction(label, self)
             a.setCheckable(True)
             a.setData(value)
-            a.triggered.connect(lambda checked, v=value: self._set_marquee_sort_order(v))
-            marquee_sort_menu.addAction(a)
-            sort_group_actions.append(a)
-        self._marquee_sort_actions = sort_group_actions
-        self._sync_marquee_sort_check()
+            a.triggered.connect(lambda checked, v=value: self.set_marquee_mode(v))
+            marquee_mode_menu.addAction(a)
+            self._marquee_mode_actions[value] = a
+        self._sync_marquee_mode_ui()
+
+        cycle_marquee_action = QAction('循环切换框选模式', self)
+        cycle_marquee_action.setShortcut('Alt+M')
+        cycle_marquee_action.triggered.connect(self.cycle_marquee_mode)
+        edit_menu.addAction(cycle_marquee_action)
 
         self.insert_image_to_bottom_action = QAction('插入图片时置于底层', self)
         self.insert_image_to_bottom_action.setCheckable(True)
@@ -6504,49 +6611,40 @@ class MainWindow(QMainWindow):
         """切换粘贴后自动退出编辑的开关"""
         self.scene.config_manager.set('auto_exit_after_paste', enabled)
 
+    def set_marquee_mode(self, mode):
+        """设置框选模式：all / images / connected"""
+        self.scene.config_manager.set('marquee_mode', mode)
+        self._sync_marquee_mode_ui()
+        labels = {'all': '全选', 'images': '仅选图片', 'connected': '仅选有连接点的元素'}
+        self.status_bar.showMessage(f'框选模式：{labels.get(mode, mode)}  (Alt+M 循环切换)', 3000)
+
+    def cycle_marquee_mode(self):
+        """Alt+M 循环切换框选模式"""
+        modes = ['all', 'images', 'connected']
+        current = self.scene.config_manager.get('marquee_mode', 'all')
+        next_mode = modes[(modes.index(current) + 1) % len(modes)] if current in modes else 'all'
+        self.set_marquee_mode(next_mode)
+
+    def _sync_marquee_mode_ui(self):
+        """同步菜单和工具栏下拉框的选中状态"""
+        current = self.scene.config_manager.get('marquee_mode', 'all')
+        if hasattr(self, '_marquee_mode_actions'):
+            for value, action in self._marquee_mode_actions.items():
+                action.setChecked(value == current)
+        if hasattr(self, 'marquee_mode_combo'):
+            idx = self.marquee_mode_combo.findData(current)
+            if idx >= 0:
+                self.marquee_mode_combo.blockSignals(True)
+                self.marquee_mode_combo.setCurrentIndex(idx)
+                self.marquee_mode_combo.blockSignals(False)
+
     def toggle_marquee_filter_setting(self, enabled):
-        """切换框选时仅选中图片"""
-        self.scene.config_manager.set('marquee_only_images', enabled)
-        if enabled:
-            # 两个模式互斥
-            self.marquee_connected_action.blockSignals(True)
-            self.marquee_connected_action.setChecked(False)
-            self.marquee_connected_action.blockSignals(False)
-            self.scene.config_manager.set('marquee_only_connected', False)
-            self.status_bar.showMessage('模式已切换：框选仅选中图片', 3000)
-        else:
-            self.status_bar.showMessage('模式已切换：框选恢复正常过滤', 3000)
+        """兼容旧调用"""
+        self.set_marquee_mode('images' if enabled else 'all')
 
     def toggle_marquee_connected_setting(self, enabled):
-        """切换框选时仅选中有连接点的元素"""
-        self.scene.config_manager.set('marquee_only_connected', enabled)
-        if enabled:
-            # 两个模式互斥
-            self.marquee_filter_action.blockSignals(True)
-            self.marquee_filter_action.setChecked(False)
-            self.marquee_filter_action.blockSignals(False)
-            self.scene.config_manager.set('marquee_only_images', False)
-            self.status_bar.showMessage('模式已切换：框选仅选中有连接点的文字/图片', 3000)
-        else:
-            self.status_bar.showMessage('模式已切换：框选恢复正常过滤', 3000)
-
-    def _set_marquee_sort_order(self, value):
-        """设置框选排序方式"""
-        self.scene.config_manager.set('marquee_sort_order', value)
-        self._sync_marquee_sort_check()
-        labels = {
-            'right_to_left': '从右到左',
-            'left_to_right': '从左到右',
-            'top_to_bottom': '从上到下',
-            'bottom_to_top': '从下到上',
-        }
-        self.status_bar.showMessage(f'框选排序方式已设置为：{labels.get(value, value)}', 3000)
-
-    def _sync_marquee_sort_check(self):
-        """同步排序菜单的勾选状态"""
-        current = self.scene.config_manager.get('marquee_sort_order', 'right_to_left')
-        for a in self._marquee_sort_actions:
-            a.setChecked(a.data() == current)
+        """兼容旧调用"""
+        self.set_marquee_mode('connected' if enabled else 'all')
 
     def toggle_insert_image_to_bottom(self, enabled):
         """切换插入图片时是否置于底层"""
@@ -6824,6 +6922,7 @@ class MainWindow(QMainWindow):
                 self.status_bar.showMessage("右键=批量连接/对齐  Ctrl+G=保存组合")
             else:
                 self.status_bar.showMessage("")
+            self._sync_tree_selection_to_scene()
         except (RuntimeError, AttributeError):
             # 处理 C++ 对象已被删除的情况
             pass
@@ -6848,6 +6947,115 @@ class MainWindow(QMainWindow):
         h, ok2 = QInputDialog.getInt(self, "画布高度", "高度:", int(current_rect.height()), 100, 10000)
         if ok1 and ok2: self.scene.setSceneRect(0, 0, w, h)
 
+    def _make_eye_icon(self, visible):
+        """创建图层列表用的眼睛图标。"""
+        pixmap = QPixmap(22, 22)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        color = QColor(0, 120, 215) if visible else QColor(150, 150, 150)
+        pen = QPen(color, 2)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        eye_path = QPainterPath()
+        eye_path.moveTo(3, 11)
+        eye_path.cubicTo(7, 4, 15, 4, 19, 11)
+        eye_path.cubicTo(15, 18, 7, 18, 3, 11)
+        painter.drawPath(eye_path)
+
+        if visible:
+            painter.setBrush(QBrush(color))
+            painter.drawEllipse(QPointF(11, 11), 3, 3)
+        else:
+            painter.drawLine(5, 17, 17, 5)
+
+        painter.end()
+        return QIcon(pixmap)
+
+    def _tree_item_element(self, node):
+        return node.data(0, Qt.ItemDataRole.UserRole)
+
+    def _tree_key_for_item(self, item):
+        return id(item)
+
+    def _sync_tree_node_visibility(self, node):
+        item = self._tree_item_element(node)
+        if not item:
+            return
+        visible = item.isVisible()
+        node.setIcon(0, self._eye_visible_icon if visible else self._eye_hidden_icon)
+        node.setToolTip(0, "点击隐藏" if visible else "点击显示")
+        text_color = QColor(0, 100, 200) if isinstance(item, VImageItem) else QColor(30, 30, 30)
+        if not visible:
+            text_color = QColor(150, 150, 150)
+        node.setForeground(1, QBrush(text_color))
+        node.setForeground(2, QBrush(text_color))
+
+    def _set_element_visible_from_tree(self, item, visible):
+        if isinstance(item, VImageItem):
+            item.set_image_visible(visible)
+        else:
+            item.setVisible(visible)
+
+        # 同步父子连线可见性
+        for conn in self.scene.connectors:
+            if conn.parent_element == item or conn.child_element == item:
+                conn.setVisible(
+                    self.scene.show_connectors and
+                    conn.parent_element.isVisible() and
+                    conn.child_element.isVisible()
+                )
+
+        # 同步图文/通用连线可见性
+        for conn in self.scene.image_text_connectors:
+            if hasattr(conn, 'image_item') and hasattr(conn, 'text_item'):
+                i1, i2 = conn.image_item, conn.text_item
+            elif hasattr(conn, 'item1') and hasattr(conn, 'item2'):
+                i1, i2 = conn.item1, conn.item2
+            else:
+                continue
+            if i1 == item or i2 == item:
+                conn.setVisible(
+                    self.scene.show_image_text_connectors and
+                    i1.isVisible() and i2.isVisible()
+                )
+        self.scene.update()
+
+    def _sync_tree_selection_to_scene(self):
+        """画布选中变化时，在右侧列表中定位并高亮对应元素。"""
+        if self._tree_updating or not hasattr(self, 'tree_widget'):
+            return
+
+        selected = [
+            item for item in self.scene.selectedItems()
+            if isinstance(item, (VImageItem, VTextItem))
+        ]
+        if not selected:
+            self.tree_widget.clearSelection()
+            return
+
+        ordered = [
+            item for item in getattr(self.scene, 'selection_order', [])
+            if item in selected
+        ]
+        focus_item = ordered[-1] if ordered else selected[-1]
+
+        self._tree_updating = True
+        try:
+            self.tree_widget.clearSelection()
+            for item in selected:
+                node = self._tree_nodes_by_item.get(self._tree_key_for_item(item))
+                if node:
+                    node.setSelected(True)
+
+            focus_node = self._tree_nodes_by_item.get(self._tree_key_for_item(focus_item))
+            if focus_node:
+                self.tree_widget.setCurrentItem(focus_node, 1)
+                self.tree_widget.scrollToItem(focus_node, QAbstractItemView.ScrollHint.PositionAtCenter)
+        finally:
+            self._tree_updating = False
+
     def refresh_ui(self):
         try:
             # 检查场景是否还存在
@@ -6855,6 +7063,7 @@ class MainWindow(QMainWindow):
                 return
 
             self.tree_widget.clear()
+            self._tree_nodes_by_item = {}
             self._tree_item_counter = 0
             self._tree_updating = True
             def add_node(item, parent_node):
@@ -6864,21 +7073,21 @@ class MainWindow(QMainWindow):
 
                 if isinstance(item, VImageItem):
                     label = f"[{n}] 图片  {os.path.basename(item.file_path)}"
-                    node.setForeground(0, QBrush(QColor(0, 100, 200)))
                 else:
                     preview = item.full_text.replace('\n', '↵')[:12]
                     if len(item.full_text) > 12:
                         preview += '…'
                     label = f"[{n}] 文字  {preview}"
-                    node.setForeground(0, QBrush(QColor(30, 30, 30)))
 
                 pos = item.scenePos()
-                node.setText(0, label)
-                node.setText(1, f"({int(pos.x())}, {int(pos.y())})")
+                node.setText(1, label)
+                node.setText(2, f"({int(pos.x())}, {int(pos.y())})")
                 node.setData(0, Qt.ItemDataRole.UserRole, item)
-                # checkbox 控制显示/隐藏
-                node.setFlags(node.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-                node.setCheckState(0, Qt.CheckState.Checked if item.isVisible() else Qt.CheckState.Unchecked)
+                node.setData(1, Qt.ItemDataRole.UserRole, item)
+                node.setData(2, Qt.ItemDataRole.UserRole, item)
+                node.setFlags(node.flags() & ~Qt.ItemFlag.ItemIsUserCheckable)
+                self._sync_tree_node_visibility(node)
+                self._tree_nodes_by_item[self._tree_key_for_item(item)] = node
 
                 for child in item.childItems():
                     if isinstance(child, BaseElement):
@@ -6890,6 +7099,7 @@ class MainWindow(QMainWindow):
 
             self.tree_widget.expandAll()
             self._tree_updating = False
+            self._sync_tree_selection_to_scene()
             self.scene.update_all_connectors()
         except (RuntimeError, AttributeError):
             pass
@@ -6897,10 +7107,15 @@ class MainWindow(QMainWindow):
             pass
 
     def _on_tree_item_clicked(self, node, column):
-        """点击树节点，选中画布上对应的元素并居中显示"""
+        """点击眼睛切换显隐；点击列表内容选中画布元素并居中。"""
         try:
-            item = node.data(0, Qt.ItemDataRole.UserRole)
+            item = self._tree_item_element(node)
             if item and item.scene():
+                if column == 0:
+                    self._set_element_visible_from_tree(item, not item.isVisible())
+                    self._sync_tree_node_visibility(node)
+                    return
+
                 self.scene.clearSelection()
                 item.setSelected(True)
                 self.view.centerOn(item)
@@ -6908,38 +7123,8 @@ class MainWindow(QMainWindow):
             pass
 
     def _on_tree_item_changed(self, node, column):
-        """checkbox 勾选/取消 控制元素显示隐藏"""
-        if self._tree_updating or column != 0:
-            return
-        try:
-            item = node.data(0, Qt.ItemDataRole.UserRole)
-            if item and item.scene():
-                visible = node.checkState(0) == Qt.CheckState.Checked
-                item.setVisible(visible)
-                # 同步父子连线可见性
-                for conn in self.scene.connectors:
-                    if conn.parent_element == item or conn.child_element == item:
-                        # 只有两端都可见时才显示连线
-                        conn.setVisible(
-                            self.scene.show_connectors and
-                            conn.parent_element.isVisible() and
-                            conn.child_element.isVisible()
-                        )
-                # 同步图文连线可见性
-                for conn in self.scene.image_text_connectors:
-                    if hasattr(conn, 'image_item') and hasattr(conn, 'text_item'):
-                        i1, i2 = conn.image_item, conn.text_item
-                    elif hasattr(conn, 'item1') and hasattr(conn, 'item2'):
-                        i1, i2 = conn.item1, conn.item2
-                    else:
-                        continue
-                    if i1 == item or i2 == item:
-                        conn.setVisible(
-                            self.scene.show_image_text_connectors and
-                            i1.isVisible() and i2.isVisible()
-                        )
-        except (RuntimeError, AttributeError):
-            pass
+        """保留旧信号槽，兼容旧工程/旧 UI 调用。"""
+        return
 
     def export_image(self):
         path, _ = QFileDialog.getSaveFileName(self, "Export Image", "", "PNG (*.png)")
