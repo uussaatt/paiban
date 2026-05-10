@@ -1492,7 +1492,7 @@ class ProjectData:
                     scene.addItem(conn)
                     scene.image_text_connectors.append(conn)
                     conn.update_path()
-                    conn.setVisible(scene.show_image_text_connectors)
+                    scene.sync_connectors_visibility(id_map[img_id])
             elif conn_type == 'VGenericConnector':
                 item1_id = conn_data.get('item1_id', -1)
                 item2_id = conn_data.get('item2_id', -1)
@@ -1502,7 +1502,7 @@ class ProjectData:
                     scene.addItem(conn)
                     scene.image_text_connectors.append(conn)
                     conn.update_path()
-                    conn.setVisible(scene.show_image_text_connectors)
+                    scene.sync_connectors_visibility(id_map[item1_id])
         
         print(f"工程已加载: {len(id_map)} 个元素, {len(connectors_data)} 个父子连接, {len(image_text_connectors_data)} 个图文连接")
 
@@ -1790,14 +1790,14 @@ class AddConnectorCommand(UndoCommand):
                 self.scene.addItem(self.connector)
                 self.scene.connectors.append(self.connector)
             self.connector.update_path()
-            self.connector.setVisible(self.scene.show_connectors)
+            self.scene.sync_connectors_visibility()
         # 处理图文/通用连接器
         else:
             if self.connector not in self.scene.image_text_connectors:
                 self.scene.addItem(self.connector)
                 self.scene.image_text_connectors.append(self.connector)
             self.connector.update_path()
-            self.connector.setVisible(self.scene.show_image_text_connectors)
+            self.scene.sync_connectors_visibility()
 
     def undo(self):
         if isinstance(self.connector, VConnector):
@@ -2457,6 +2457,13 @@ class BaseElement(QGraphicsItem):
 
         x_edges = [x, x + rect.width(), x + rect.width() / 2]
         y_edges = [y, y + rect.height(), y + rect.height() / 2]
+
+        # 加入连接点的场景坐标作为额外吸附候选点
+        if hasattr(self, 'connection_point') and self.connection_point and self.connection_point.isVisible():
+            current_scene_pos = self.scenePos()
+            cp_scene = scene_pos + (self.connection_point.get_scene_center() - current_scene_pos)
+            x_edges.append(cp_scene.x())
+            y_edges.append(cp_scene.y())
 
         best_dx, best_dy = threshold + 1, threshold + 1
 
@@ -3761,14 +3768,32 @@ class VImageItem(BaseElement):
         self.update()
 
     def set_image_visible(self, visible):
-        """设置图片显示/隐藏"""
+        """设置图片显示/隐藏，同步相关连线可见性"""
         self.setVisible(visible)
         if not visible:
             self.setSelected(False)
             self._show_handles(False)
-        if self.scene():
-            self.scene().update_connectors(self)
-            self.scene().update_image_text_connectors(self)
+        if not self.scene():
+            return
+        sc = self.scene()
+        # 同步父子连线
+        for conn in sc.connectors:
+            if conn.parent_element == self or conn.child_element == self:
+                both_visible = conn.parent_element.isVisible() and conn.child_element.isVisible()
+                conn.setVisible(sc.show_connectors and both_visible)
+        # 同步图文连线
+        for conn in sc.image_text_connectors:
+            if hasattr(conn, 'image_item') and hasattr(conn, 'text_item'):
+                i1, i2 = conn.image_item, conn.text_item
+            elif hasattr(conn, 'item1') and hasattr(conn, 'item2'):
+                i1, i2 = conn.item1, conn.item2
+            else:
+                continue
+            if i1 == self or i2 == self:
+                both_visible = i1.isVisible() and i2.isVisible()
+                conn.setVisible(sc.show_image_text_connectors and both_visible)
+        sc.update_connectors(self)
+        sc.update_image_text_connectors(self)
 
     def toggle_image_visible(self):
         """切换图片显示/隐藏"""
@@ -4229,6 +4254,7 @@ class LayoutScene(QGraphicsScene):
         self.image_text_binding_mode = False  
         self.image_text_source = None
         self.selection_order = []  # 记录选中顺序
+        self.last_selection_by_marquee = False  # 最后一次选中是否为框选
         self.background_pixmap = None  # 背景图片缓存
         self.guides = []          # 辅助线列表
         self.show_guides = True   # 辅助线显示开关
@@ -4493,8 +4519,9 @@ class LayoutScene(QGraphicsScene):
         newly_selected = current_selected - previous_set
         if newly_selected:
             clicked_item = self._pending_selection_click_item
-            # 单击选中：优先把点击的元素排在最前
+            # 单击/Ctrl加选：标记为非框选
             if clicked_item in newly_selected and len(newly_selected) == 1:
+                self.last_selection_by_marquee = False
                 self.selection_order.append(clicked_item)
             else:
                 # 框选/Ctrl+A 等批量选中：由 LayoutView 的实时扫描顺序决定，这里只补充未被扫到的元素
@@ -4635,7 +4662,7 @@ class LayoutScene(QGraphicsScene):
         self.addItem(conn)
         self.connectors.append(conn)
         conn.update_path()
-        conn.setVisible(self.show_connectors)
+        self.sync_connectors_visibility(child)
 
     def remove_child_connectors(self, child):
         to_rem = [c for c in self.connectors if c.child_element == child]
@@ -4809,19 +4836,50 @@ class LayoutScene(QGraphicsScene):
     def update_all_connectors(self):
         for c in self.connectors:
             c.update_path()
-            c.setVisible(self.show_connectors)
+        self.sync_connectors_visibility()
+
+    def _connector_items_visible(self, *items):
+        return all(item is not None and item.isVisible() for item in items)
+
+    def _image_text_connector_items(self, conn):
+        if hasattr(conn, 'image_item') and hasattr(conn, 'text_item'):
+            return conn.image_item, conn.text_item
+        if hasattr(conn, 'item1') and hasattr(conn, 'item2'):
+            return conn.item1, conn.item2
+        return None, None
+
+    def sync_connectors_visibility(self, changed_item=None):
+        for conn in self.connectors:
+            if changed_item is not None and conn.parent_element != changed_item and conn.child_element != changed_item:
+                continue
+            conn.setVisible(
+                self.show_connectors and
+                self._connector_items_visible(conn.parent_element, conn.child_element)
+            )
+
+        for conn in self.image_text_connectors:
+            item1, item2 = self._image_text_connector_items(conn)
+            if item1 is None or item2 is None:
+                continue
+            if changed_item is not None and item1 != changed_item and item2 != changed_item:
+                continue
+            conn.setVisible(
+                self.show_image_text_connectors and
+                self._connector_items_visible(item1, item2)
+            )
     
     def set_connectors_visible(self, visible):
         """控制所有连接器的可见性"""
         self.show_connectors = visible
         for c in self.connectors:
-            c.setVisible(visible)
+            c.setVisible(visible and self._connector_items_visible(c.parent_element, c.child_element))
     
     def set_image_text_connectors_visible(self, visible):
         """控制图文连接器的可见性"""
         self.show_image_text_connectors = visible
         for c in self.image_text_connectors:
-            c.setVisible(visible)
+            item1, item2 = self._image_text_connector_items(c)
+            c.setVisible(visible and self._connector_items_visible(item1, item2))
     
     def set_connection_points_visible(self, visible):
         """控制所有连接点的可见性"""
@@ -5043,28 +5101,50 @@ class LayoutScene(QGraphicsScene):
         """更新所有图文连接器"""
         for conn in self.image_text_connectors:
             conn.update_path()
-            conn.setVisible(self.show_image_text_connectors)
+        self.sync_connectors_visibility()
     
     def auto_connect_selected_items(self):
-        """智能连接：按选中顺序将元素逐对连接。
-        
-        选中顺序决定连接顺序：第1个→第2个，第2个→第3个，依此类推。
-        支持图片-文字、图片-图片、文字-文字任意组合。
-        父子绑定的元素对会被自动跳过（已有红虚线连接）。
+        """智能连接：
+        - 框选后调用：按空间位置（从右到左、从上到下）排序，跳过父子关系
+        - Ctrl加选后调用：按选中顺序连线，跳过父子关系
         """
-        # 合并 selection_order 和 selectedItems，确保不遗漏
-        # selection_order 记录了点击顺序，selectedItems 补充框选等方式选中的元素
-        ordered = list(self.selection_order)
-        for item in self.selectedItems():
-            if isinstance(item, (VImageItem, VTextItem)) and item not in ordered:
-                ordered.append(item)
+        selected = [item for item in self.selectedItems()
+                    if isinstance(item, (VImageItem, VTextItem)) and item.scene() == self]
 
-        items = [item for item in ordered
-                 if isinstance(item, (VImageItem, VTextItem)) and item.scene() == self]
-
-        if len(items) < 2:
+        if len(selected) < 2:
             self._show_status_message("请至少选中两个元素进行智能连接", 3000)
             return
+
+        def has_ancestor_relation(a, b):
+            p = a.parentItem()
+            while p:
+                if p == b:
+                    return True
+                p = p.parentItem()
+            p = b.parentItem()
+            while p:
+                if p == a:
+                    return True
+                p = p.parentItem()
+            return False
+
+        if self.last_selection_by_marquee:
+            # 框选：按连接点位置从右到左、从上到下排序
+            def sort_key(it):
+                cp = getattr(it, 'connection_point', None)
+                if cp and cp.isVisible():
+                    p = cp.get_scene_center()
+                else:
+                    p = it.scenePos()
+                return (p.y(), -p.x())
+            items = sorted(selected, key=sort_key)
+        else:
+            # Ctrl加选：按选中顺序
+            ordered = list(self.selection_order)
+            for item in selected:
+                if item not in ordered:
+                    ordered.append(item)
+            items = [item for item in ordered if item in selected]
 
         commands = []
         skipped_parent_child = 0
@@ -5073,8 +5153,7 @@ class LayoutScene(QGraphicsScene):
         for item1, item2 in zip(items, items[1:]):
             if item1 == item2:
                 continue
-            # 跳过已有父子绑定关系的元素对（已有红虚线）
-            if self._has_parent_child_relation(item1, item2):
+            if has_ancestor_relation(item1, item2):
                 skipped_parent_child += 1
                 continue
 
@@ -5943,21 +6022,37 @@ class LayoutView(QGraphicsView):
                 mode = scene.config_manager.get('marquee_mode', 'all')
                 items_in_rect = scene.items(path, self._marquee_mode,
                                             Qt.SortOrder.DescendingOrder, self.transform())
+                newly_entered = []
                 for item in items_in_rect:
                     if item in self._marquee_sweep_order:
                         continue
                     if mode == 'images':
                         if isinstance(item, VImageItem) and not getattr(item, 'locked', False):
-                            self._marquee_sweep_order.append(item)
+                            newly_entered.append(item)
                     elif mode == 'connected':
                         if isinstance(item, (VImageItem, VTextItem)) and not getattr(item, 'locked', False):
                             cp = getattr(item, 'connection_point', None)
                             if cp and cp.isVisible():
-                                self._marquee_sweep_order.append(item)
+                                newly_entered.append(item)
                     else:
                         if isinstance(item, (VImageItem, VTextItem)) and \
                                 (item.flags() & QGraphicsItem.GraphicsItemFlag.ItemIsSelectable):
-                            self._marquee_sweep_order.append(item)
+                            newly_entered.append(item)
+
+                # 新进入的元素按连接点到鼠标距离排序（最近的排前面，模拟扫过顺序）
+                if newly_entered:
+                    mouse_scene = self.mapToScene(event.pos())
+
+                    def dist_to_mouse(it):
+                        cp = getattr(it, 'connection_point', None)
+                        if cp and cp.isVisible():
+                            p = cp.get_scene_center()
+                        else:
+                            p = it.scenePos()
+                        return (p.x() - mouse_scene.x()) ** 2 + (p.y() - mouse_scene.y()) ** 2
+
+                    newly_entered.sort(key=dist_to_mouse)
+                    self._marquee_sweep_order.extend(newly_entered)
 
             self.viewport().update()
             event.accept()
@@ -6003,6 +6098,7 @@ class LayoutView(QGraphicsView):
                 selected_set = set(scene.selectedItems())
                 scene.selection_order = [item for item in self._marquee_sweep_order
                                          if item in selected_set]
+            scene.last_selection_by_marquee = True  # 标记为框选
             self._marquee_sweep_order = []
             self._marquee_band.hide()
             event.accept()
