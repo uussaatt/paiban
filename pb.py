@@ -5179,6 +5179,122 @@ class LayoutScene(QGraphicsScene):
         print(msg)
         self._show_status_message(msg, 4000)
     
+    def group_chain_connect(self):
+        """组合连接：将选中的图片+子文字视为组合，按位置顺序依次连接 b点→a点。
+        
+        每个组合：
+          a点 = 图片连接点（顶部）
+          b点 = 子文字连接点（底部），若无子文字则用图片连接点
+        连接规则：第N组b点 → 第N+1组a点
+        排序：按图片连接点位置，从上到下、同行从右到左
+        """
+        selected = [item for item in self.selectedItems()
+                    if isinstance(item, VImageItem) and item.scene() == self]
+
+        if len(selected) < 2:
+            self._show_status_message("请至少选中两张图片进行组合连接", 3000)
+            return
+
+        # 识别每个组合的 a、b 点
+        groups = []
+        for img in selected:
+            # a 点：图片连接点（需可见）
+            point_a = img
+
+            # b 点：找连接点可见的子文字，没有则用图片本身
+            child_texts = [c for c in img.childItems() if isinstance(c, VTextItem)]
+            point_b = img  # 默认用图片
+            for ct in child_texts:
+                cp = getattr(ct, 'connection_point', None)
+                if cp and cp.isVisible():
+                    point_b = ct
+                    break
+
+            groups.append({
+                'image': img,
+                'point_a': point_a,
+                'point_b': point_b,
+            })
+
+        # 按图片连接点位置排序：从上到下（Y升序），同行从右到左（X降序）
+        def sort_key(g):
+            cp = getattr(g['image'], 'connection_point', None)
+            if cp and cp.isVisible():
+                p = cp.get_scene_center()
+            else:
+                p = g['image'].scenePos()
+            return (p.y(), -p.x())
+
+        groups.sort(key=sort_key)
+
+        # 依次连接：第N组b点 → 第N+1组a点
+        commands = []
+        skipped = 0
+
+        for i in range(len(groups) - 1):
+            src = groups[i]['point_b']    # 当前组 b 点
+            dst = groups[i + 1]['point_a']  # 下一组 a 点
+
+            if src == dst:
+                skipped += 1
+                continue
+
+            cmd = self._make_connector_command(src, dst)
+            if cmd is None:
+                skipped += 1
+                continue
+
+            cmd.execute()
+            commands.append(cmd)
+
+        if commands:
+            self.undo_stack.push(MacroCommand(self, commands))
+
+        msg = f"组合连接完成：新增 {len(commands)} 条连线"
+        if skipped:
+            msg += f"，跳过 {skipped} 对"
+        print(msg)
+        self._show_status_message(msg, 4000)
+
+    def connect_image_points_right_to_left(self):
+        """连接图片a点：按从右到左顺序，依次连接选中图片的连接点"""
+        images = [item for item in self.selectedItems()
+                  if isinstance(item, VImageItem) and item.scene() == self]
+
+        if len(images) < 2:
+            self._show_status_message("请至少选中两张图片", 3000)
+            return
+
+        # 按连接点X降序（从右到左），同X按Y升序（从上到下）
+        def sort_key(img):
+            cp = getattr(img, 'connection_point', None)
+            if cp and cp.isVisible():
+                p = cp.get_scene_center()
+            else:
+                p = img.scenePos()
+            return (-p.x(), p.y())
+
+        images.sort(key=sort_key)
+
+        commands = []
+        skipped = 0
+        for img1, img2 in zip(images, images[1:]):
+            cmd = self._make_connector_command(img1, img2)
+            if cmd is None:
+                skipped += 1
+                continue
+            cmd.execute()
+            commands.append(cmd)
+
+        if commands:
+            self.undo_stack.push(MacroCommand(self, commands))
+
+        msg = f"图片连接点连线完成：新增 {len(commands)} 条"
+        if skipped:
+            msg += f"，跳过 {skipped} 对"
+        print(msg)
+        self._show_status_message(msg, 4000)
+
     def connect_by_position(self):
         """按位置连接：上下相邻的图片和文字自动连接"""
         selected = self.selectedItems()
@@ -6511,6 +6627,17 @@ class MainWindow(QMainWindow):
         )
         main_toolbar.addWidget(self.marquee_mode_combo)
 
+        main_toolbar.addSeparator()
+        btn_group_connect = QAction("组合连接", self)
+        btn_group_connect.setToolTip("将选中图片+子文字视为组合，按位置顺序依次连接 b点→a点")
+        btn_group_connect.triggered.connect(lambda: self.scene.group_chain_connect())
+        main_toolbar.addAction(btn_group_connect)
+
+        btn_img_connect = QAction("图片连接点连线", self)
+        btn_img_connect.setToolTip("按从右到左顺序，依次连接选中图片的连接点")
+        btn_img_connect.triggered.connect(lambda: self.scene.connect_image_points_right_to_left())
+        main_toolbar.addAction(btn_img_connect)
+
     def create_menu_bar(self):
         menubar = self.menuBar()
         file_menu = menubar.addMenu('文件')
@@ -6558,6 +6685,11 @@ class MainWindow(QMainWindow):
         batch_copy_action.setShortcut('Ctrl+Shift+D')
         batch_copy_action.triggered.connect(self.batch_copy)
         asset_menu.addAction(batch_copy_action)
+
+        group_connect_action = QAction('组合连接', self)
+        group_connect_action.setToolTip("将选中图片+子文字视为组合，按位置顺序依次连接 b点→a点")
+        group_connect_action.triggered.connect(lambda: self.scene.group_chain_connect())
+        asset_menu.addAction(group_connect_action)
 
         open_library_action = QAction('切换素材库面板', self)
         open_library_action.setShortcut('F9')
