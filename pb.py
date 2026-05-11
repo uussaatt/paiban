@@ -6036,6 +6036,11 @@ class LayoutView(QGraphicsView):
         self._marquee_sweep_order = []  # 框选过程中鼠标扫过的元素顺序
         self._pan_start = QPoint()
         self._main_window = None
+        self._smart_brush_enabled = False
+        self._smart_brush_active = False
+        self._smart_brush_radius = 18
+        self._smart_brush_pos = QPoint()
+        self._smart_brush_seen = set()
         # 辅助线拖拽状态
         self._guide_dragging = False       # 正在从标尺拖出辅助线
         self._guide_orientation = None     # 拖出方向
@@ -6046,6 +6051,109 @@ class LayoutView(QGraphicsView):
 
     def set_main_window(self, mw):
         self._main_window = mw
+
+    def set_smart_brush_enabled(self, enabled):
+        self._smart_brush_enabled = enabled
+        self._smart_brush_active = False
+        self._smart_brush_seen.clear()
+        if enabled:
+            self.setCursor(Qt.CursorShape.CrossCursor)
+            msg = "智能笔刷：涂抹对象加入选区；按住 Alt 涂抹从选区中减去"
+        else:
+            self.setCursor(Qt.CursorShape.ArrowCursor)
+            msg = "已退出智能笔刷"
+        if self._main_window and hasattr(self._main_window, 'status_bar'):
+            self._main_window.status_bar.showMessage(msg, 0 if enabled else 3000)
+        self.viewport().update()
+
+    def is_smart_brush_enabled(self):
+        return self._smart_brush_enabled
+
+    def set_smart_brush_radius(self, radius):
+        self._smart_brush_radius = max(4, min(120, int(radius)))
+        if self._main_window and hasattr(self._main_window, 'smart_brush_size_spin'):
+            spin = self._main_window.smart_brush_size_spin
+            if spin.value() != self._smart_brush_radius:
+                spin.blockSignals(True)
+                spin.setValue(self._smart_brush_radius)
+                spin.blockSignals(False)
+        self.viewport().update()
+        if self._smart_brush_enabled and self._main_window and hasattr(self._main_window, 'status_bar'):
+            self._main_window.status_bar.showMessage(f"智能笔刷大小：{self._smart_brush_radius}px", 1200)
+
+    def adjust_smart_brush_radius(self, delta):
+        self.set_smart_brush_radius(self._smart_brush_radius + delta)
+
+    def _smart_brush_scene_path(self, pos):
+        center = self.mapToScene(pos)
+        scale = max(abs(self.transform().m11()), 0.001)
+        radius = self._smart_brush_radius / scale
+        path = QPainterPath()
+        path.addEllipse(center, radius, radius)
+        return path
+
+    def _smart_brush_allows_item(self, item):
+        if not isinstance(item, (VImageItem, VTextItem)):
+            return False
+        if getattr(item, 'locked', False):
+            return False
+        if not (item.flags() & QGraphicsItem.GraphicsItemFlag.ItemIsSelectable):
+            return False
+        mode = self.scene().config_manager.get('marquee_mode', 'all') if self.scene() else 'all'
+        if mode == 'images':
+            return isinstance(item, VImageItem)
+        if mode == 'connected':
+            cp = getattr(item, 'connection_point', None)
+            return bool(cp and cp.isVisible())
+        return True
+
+    def _items_under_smart_brush(self, pos):
+        if not self.scene():
+            return []
+        path = self._smart_brush_scene_path(pos)
+        raw_items = self.scene().items(path, Qt.ItemSelectionMode.IntersectsItemShape,
+                                       Qt.SortOrder.DescendingOrder, self.transform())
+        found = []
+        seen = set()
+        for item in raw_items:
+            element = item
+            while element and not isinstance(element, (VImageItem, VTextItem)):
+                element = element.parentItem()
+            if element and element not in seen and self._smart_brush_allows_item(element):
+                found.append(element)
+                seen.add(element)
+        return found
+
+    def _apply_smart_brush_at(self, pos, subtract=False):
+        scene = self.scene()
+        if not scene:
+            return
+        changed = False
+        for item in self._items_under_smart_brush(pos):
+            key = (item, subtract)
+            if key in self._smart_brush_seen:
+                continue
+            self._smart_brush_seen.add(key)
+            if subtract:
+                if item.isSelected():
+                    item.setSelected(False)
+                    if item in scene.selection_order:
+                        scene.selection_order = [i for i in scene.selection_order if i != item]
+                    changed = True
+            else:
+                if not item.isSelected():
+                    item.setSelected(True)
+                    if item in scene.selection_order:
+                        scene.selection_order = [i for i in scene.selection_order if i != item]
+                    scene.selection_order.append(item)
+                    changed = True
+        if changed:
+            scene.last_selection_by_marquee = False
+            if self._main_window and hasattr(self._main_window, 'status_bar'):
+                action = "减去" if subtract else "加入"
+                self._main_window.status_bar.showMessage(
+                    f"智能笔刷：已{action}对象，当前选中 {len(scene.selectedItems())} 个", 1500
+                )
 
     def _connection_point_at(self, pos, tolerance=7, exclude_point=None):
         if not self.scene():
@@ -6129,6 +6237,15 @@ class LayoutView(QGraphicsView):
         # 标尺画在 viewport 上
         painter = QPainter(self.viewport())
         self._draw_rulers(painter)
+        if self._smart_brush_enabled:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            subtract = QApplication.keyboardModifiers() & Qt.KeyboardModifier.AltModifier
+            color = QColor(230, 70, 70, 210) if subtract else QColor(0, 150, 255, 210)
+            fill = QColor(color)
+            fill.setAlpha(35)
+            painter.setPen(QPen(color, 2))
+            painter.setBrush(QBrush(fill))
+            painter.drawEllipse(self._smart_brush_pos, self._smart_brush_radius, self._smart_brush_radius)
         painter.end()
 
     def scrollContentsBy(self, dx, dy):
@@ -6236,6 +6353,14 @@ class LayoutView(QGraphicsView):
 
     def mousePressEvent(self, event):
         pos = event.pos()
+        if self._smart_brush_enabled and event.button() == Qt.MouseButton.LeftButton:
+            self._smart_brush_active = True
+            self._smart_brush_seen.clear()
+            self._smart_brush_pos = pos
+            self._apply_smart_brush_at(pos, bool(event.modifiers() & Qt.KeyboardModifier.AltModifier))
+            self.viewport().update()
+            event.accept()
+            return
         # 处理中键平移
         if event.button() == Qt.MouseButton.MiddleButton:
             self._is_panning = True
@@ -6306,6 +6431,14 @@ class LayoutView(QGraphicsView):
 
     def mouseMoveEvent(self, event):
         self._sync_connection_point_hover(event.pos())
+        if self._smart_brush_enabled:
+            self._smart_brush_pos = event.pos()
+            if self._smart_brush_active and event.buttons() & Qt.MouseButton.LeftButton:
+                self._apply_smart_brush_at(event.pos(), bool(event.modifiers() & Qt.KeyboardModifier.AltModifier))
+                self.viewport().update()
+                event.accept()
+                return
+            self.viewport().update()
 
         # 标尺辅助线拖拽预览
         if self._guide_dragging and self._guide_preview:
@@ -6389,9 +6522,17 @@ class LayoutView(QGraphicsView):
             self._hovered_connection_point._hovered = False
             self._hovered_connection_point.update()
             self._hovered_connection_point = None
+        self._smart_brush_active = False
         super().leaveEvent(event)
 
     def mouseReleaseEvent(self, event):
+        if self._smart_brush_enabled and event.button() == Qt.MouseButton.LeftButton:
+            self._smart_brush_active = False
+            self._smart_brush_seen.clear()
+            self.viewport().update()
+            event.accept()
+            return
+
         # 结束辅助线拖拽
         if self._guide_dragging:
             self._guide_dragging = False
@@ -7017,6 +7158,23 @@ class MainWindow(QMainWindow):
             "选中图片后显示缩放控制点",
             checkable=True
         )
+        self.btn_smart_brush = self._add_toolbar_action(
+            main_toolbar,
+            "智能笔刷",
+            self.toggle_smart_brush,
+            "涂抹对象加入选区；按住 Alt 涂抹从选区中减去",
+            None,
+            checkable=True
+        )
+        main_toolbar.addWidget(QLabel("笔刷:"))
+        self.smart_brush_size_spin = QSpinBox()
+        self.smart_brush_size_spin.setRange(4, 120)
+        self.smart_brush_size_spin.setValue(self.view._smart_brush_radius)
+        self.smart_brush_size_spin.setSuffix("px")
+        self.smart_brush_size_spin.setFixedWidth(72)
+        self.smart_brush_size_spin.setToolTip("智能笔刷大小（快捷键 [ / ]）")
+        self.smart_brush_size_spin.valueChanged.connect(self.view.set_smart_brush_radius)
+        main_toolbar.addWidget(self.smart_brush_size_spin)
 
         main_toolbar.addSeparator()
         self._add_toolbar_action(main_toolbar, "右对齐", self.align_right, "按右边缘对齐选中对象")
@@ -7244,6 +7402,27 @@ class MainWindow(QMainWindow):
         cycle_marquee_action.triggered.connect(self.cycle_marquee_mode)
         edit_menu.addAction(cycle_marquee_action)
 
+        smart_brush_action = QAction('智能笔刷', self)
+        smart_brush_action.setCheckable(True)
+        smart_brush_action.setShortcut('B')
+        smart_brush_action.toggled.connect(self.toggle_smart_brush)
+        smart_brush_action.toggled.connect(
+            lambda checked: self.btn_smart_brush.setChecked(checked)
+            if hasattr(self, 'btn_smart_brush') and self.btn_smart_brush.isChecked() != checked else None
+        )
+        edit_menu.addAction(smart_brush_action)
+        self.smart_brush_action = smart_brush_action
+
+        brush_smaller_action = QAction('缩小智能笔刷', self)
+        brush_smaller_action.setShortcut('[')
+        brush_smaller_action.triggered.connect(lambda: self.view.adjust_smart_brush_radius(-4))
+        edit_menu.addAction(brush_smaller_action)
+
+        brush_larger_action = QAction('放大智能笔刷', self)
+        brush_larger_action.setShortcut(']')
+        brush_larger_action.triggered.connect(lambda: self.view.adjust_smart_brush_radius(4))
+        edit_menu.addAction(brush_larger_action)
+
         self.insert_image_to_bottom_action = QAction('插入图片时置于底层', self)
         self.insert_image_to_bottom_action.setCheckable(True)
         self.insert_image_to_bottom_action.setChecked(self.scene.config_manager.get('insert_image_to_bottom', False))
@@ -7399,6 +7578,11 @@ class MainWindow(QMainWindow):
             selected_items[0].start_inline_editing()
         else:
             print("请先选择一个文字元素")
+
+    def toggle_smart_brush(self, enabled):
+        self.view.set_smart_brush_enabled(enabled)
+        if hasattr(self, 'smart_brush_action') and self.smart_brush_action.isChecked() != enabled:
+            self.smart_brush_action.setChecked(enabled)
 
     def toggle_resize_mode(self, enabled):
         """切换图片调整大小模式"""
