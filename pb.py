@@ -204,6 +204,7 @@ class AssetManager:
                     'column_spacing': item.column_spacing,
                     'auto_height': item.auto_height,
                     'manual_line_break': item.manual_line_break,
+                    'layer_eye_color': getattr(item, 'layer_eye_color', None),
                     'connection_point_visible': connection_point_visible,
                     'scene_pos': (item.scenePos().x(), item.scenePos().y()),
                     'local_pos': (item.x(), item.y()),
@@ -256,7 +257,40 @@ class AssetManager:
         text_count = sum(1 for item in items if isinstance(item, VTextItem))
         image_count = sum(1 for item in items if isinstance(item, VImageItem))
         group_name = f"组合_{text_count}文字_{image_count}图片"
-        
+
+        # 生成缩略图：把选中元素渲染到 QPixmap
+        thumb_path = ''
+        try:
+            if scene and scene.views():
+                # 计算所有元素的包围盒（场景坐标）
+                combined = QRectF()
+                for item in items:
+                    r = QRectF(item.scenePos(), item.boundingRect().size())
+                    combined = combined.united(r)
+                if not combined.isEmpty():
+                    margin = 10
+                    combined = combined.adjusted(-margin, -margin, margin, margin)
+                    # 渲染到 QImage，最大 300x400
+                    max_w, max_h = 300, 400
+                    scale = min(max_w / combined.width(), max_h / combined.height(), 1.0)
+                    img_w = max(1, int(combined.width() * scale))
+                    img_h = max(1, int(combined.height() * scale))
+                    img = QImage(img_w, img_h, QImage.Format.Format_ARGB32)
+                    img.fill(QColor(250, 250, 245))
+                    painter = QPainter(img)
+                    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+                    # 隐藏连接点和辅助线，只渲染元素本身
+                    scene._rendering_thumb = True
+                    scene.render(painter, QRectF(0, 0, img_w, img_h), combined)
+                    scene._rendering_thumb = False
+                    painter.end()
+                    thumb_path = os.path.join(ASSETS_DIR, f"group_{len(self.assets['groups'])}_thumb.png")
+                    img.save(thumb_path)
+                    print(f"缩略图已保存: {thumb_path}")
+        except Exception as e:
+            print(f"生成缩略图失败: {e}")
+            thumb_path = ''
+
         # 创建组合素材数据
         group_asset = {
             'id': len(self.assets['groups']),
@@ -264,6 +298,7 @@ class AssetManager:
             'items': items_data,
             'image_text_connections': image_text_connections,
             'item_count': len(items),
+            'thumb_path': thumb_path,
             'created_time': QDateTime.currentDateTime().toString()
         }
         
@@ -285,7 +320,7 @@ class AssetManager:
                 break
         
         if asset_to_remove:
-            # 删除相关的图片文件
+            # 删除相关的图片文件和缩略图
             for item_data in asset_to_remove['items']:
                 if item_data['type'] == 'VImageItem':
                     try:
@@ -293,7 +328,14 @@ class AssetManager:
                             os.remove(item_data['path'])
                     except:
                         pass
-            
+            # 删除缩略图
+            thumb = asset_to_remove.get('thumb_path', '')
+            if thumb and os.path.exists(thumb):
+                try:
+                    os.remove(thumb)
+                except:
+                    pass
+
             # 从列表中删除
             self.assets['groups'] = [a for a in self.assets['groups'] if a['id'] != asset_id]
             self.save_assets()
@@ -740,6 +782,119 @@ class FontPickerDialog(QDialog):
         return dlg.selected_font(), ok
 
 
+class GroupAssetPreviewPopup(QWidget):
+    """组合素材悬停预览浮窗"""
+    def __init__(self, parent=None):
+        super().__init__(parent, Qt.WindowType.ToolTip | Qt.WindowType.FramelessWindowHint)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setWindowFlags(Qt.WindowType.ToolTip | Qt.WindowType.FramelessWindowHint |
+                            Qt.WindowType.WindowStaysOnTopHint)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(6)
+
+        self._container = QWidget(self)
+        self._container.setStyleSheet("""
+            QWidget {
+                background: rgba(255,255,255,0.97);
+                border: 1px solid rgba(0,0,0,0.15);
+                border-radius: 8px;
+            }
+        """)
+        inner = QVBoxLayout(self._container)
+        inner.setContentsMargins(10, 10, 10, 10)
+        inner.setSpacing(6)
+
+        self._title = QLabel()
+        self._title.setStyleSheet("font-weight:bold; font-size:13px; color:#323130;")
+        inner.addWidget(self._title)
+
+        self._img_row = QHBoxLayout()
+        self._img_row.setSpacing(4)
+        inner.addLayout(self._img_row)
+
+        self._text_label = QLabel()
+        self._text_label.setStyleSheet("font-size:12px; color:#605e5c;")
+        self._text_label.setWordWrap(True)
+        inner.addWidget(self._text_label)
+
+        layout.addWidget(self._container)
+        self.setFixedWidth(260)
+
+    def show_asset(self, asset, global_pos):
+        # 清空旧图片
+        while self._img_row.count():
+            w = self._img_row.takeAt(0).widget()
+            if w:
+                w.deleteLater()
+
+        name = asset.get('name', '')
+        items = asset.get('items', [])
+        text_count = sum(1 for d in items if d['type'] == 'VTextItem')
+        image_count = sum(1 for d in items if d['type'] == 'VImageItem')
+        self._title.setText(f"{name}  ({image_count}图 {text_count}文)")
+
+        # 优先显示缩略图
+        thumb_path = asset.get('thumb_path', '')
+        if thumb_path and os.path.exists(thumb_path):
+            pix = QPixmap(thumb_path)
+            if not pix.isNull():
+                lbl = QLabel()
+                scaled = pix.scaled(220, 300,
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation)
+                lbl.setPixmap(scaled)
+                lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                lbl.setStyleSheet("border:1px solid #eee; border-radius:4px; background:#fafaf5;")
+                self._img_row.addWidget(lbl)
+        else:
+            # 没有缩略图时显示各图片小图
+            img_items = [d for d in items if d['type'] == 'VImageItem']
+            for d in img_items[:4]:
+                path = d.get('path', '')
+                lbl = QLabel()
+                lbl.setFixedSize(52, 52)
+                lbl.setStyleSheet("border:1px solid #ddd; border-radius:4px; background:#f5f5f5;")
+                if os.path.exists(path):
+                    pix = QPixmap(path).scaled(50, 50,
+                        Qt.AspectRatioMode.KeepAspectRatio,
+                        Qt.TransformationMode.SmoothTransformation)
+                    lbl.setPixmap(pix)
+                    lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                else:
+                    lbl.setText("?")
+                    lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                self._img_row.addWidget(lbl)
+            if image_count > 4:
+                more = QLabel(f"+{image_count-4}")
+                more.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                more.setStyleSheet("color:#888; font-size:11px;")
+                self._img_row.addWidget(more)
+        self._img_row.addStretch()
+
+        # 显示文字内容（最多3条，每条最多20字）
+        text_items = [d for d in items if d['type'] == 'VTextItem']
+        lines = []
+        for d in text_items[:3]:
+            t = d.get('text', '').replace('\n', ' ')
+            lines.append(t[:20] + ('…' if len(t) > 20 else ''))
+        if text_count > 3:
+            lines.append(f"…共{text_count}条文字")
+        self._text_label.setText('\n'.join(lines) if lines else '')
+
+        self.adjustSize()
+        # 定位：在鼠标右侧，避免超出屏幕
+        screen = QApplication.primaryScreen().availableGeometry()
+        x = global_pos.x() + 16
+        y = global_pos.y()
+        if x + self.width() > screen.right():
+            x = global_pos.x() - self.width() - 8
+        if y + self.height() > screen.bottom():
+            y = screen.bottom() - self.height()
+        self.move(x, y)
+        self.show()
+
+
 class AssetLibraryDockWidget(QDockWidget):
     """素材库停靠面板"""
     def __init__(self, asset_manager, main_window):
@@ -772,6 +927,15 @@ class AssetLibraryDockWidget(QDockWidget):
         self.group_list.setDefaultDropAction(Qt.DropAction.CopyAction)
         self.group_list.itemDoubleClicked.connect(self.rename_group_asset)
         self.group_list.startDrag = self._start_group_drag
+        self.group_list.setMouseTracking(True)
+        self.group_list.mouseMoveEvent = self._on_group_list_mouse_move
+        self.group_list.leaveEvent = self._on_group_list_leave
+        self._preview_popup = GroupAssetPreviewPopup()
+        self._preview_timer = QTimer()
+        self._preview_timer.setSingleShot(True)
+        self._preview_timer.timeout.connect(self._show_preview)
+        self._preview_pos = None
+        self._preview_asset = None
         gl.addWidget(self.group_list)
         gb = QHBoxLayout()
         btn_use = QPushButton("使用"); btn_use.setMaximumHeight(30); btn_use.setProperty("class", "primary")
@@ -883,6 +1047,32 @@ class AssetLibraryDockWidget(QDockWidget):
         drag.setHotSpot(QPoint(60, 15))
         drag.exec(Qt.DropAction.CopyAction)
 
+    def _on_group_list_mouse_move(self, event):
+        """鼠标在组合列表上移动时，延迟显示预览"""
+        item = self.group_list.itemAt(event.pos())
+        if item:
+            asset = item.data(Qt.ItemDataRole.UserRole)
+            if asset != self._preview_asset:
+                self._preview_asset = asset
+                self._preview_pos = self.group_list.mapToGlobal(event.pos())
+                self._preview_timer.start(500)  # 悬停 500ms 后显示
+        else:
+            self._hide_preview()
+        QListWidget.mouseMoveEvent(self.group_list, event)
+
+    def _on_group_list_leave(self, event):
+        self._hide_preview()
+        QListWidget.leaveEvent(self.group_list, event)
+
+    def _show_preview(self):
+        if self._preview_asset and self._preview_pos:
+            self._preview_popup.show_asset(self._preview_asset, self._preview_pos)
+
+    def _hide_preview(self):
+        self._preview_timer.stop()
+        self._preview_asset = None
+        self._preview_popup.hide()
+
     def refresh_assets(self):
         self.asset_manager.load_assets()
         self.group_list.clear()
@@ -914,7 +1104,7 @@ class AssetLibraryDockWidget(QDockWidget):
                 new_item = VTextItem(item_data['text'], item_data['font_size'], item_data['box_height'])
                 new_item.font_family = item_data['font_family']
                 new_item.text_color = QColor(item_data['text_color'])
-                for k in ('chars_per_column', 'column_spacing', 'auto_height', 'manual_line_break'):
+                for k in ('chars_per_column', 'column_spacing', 'auto_height', 'manual_line_break', 'layer_eye_color'):
                     if k in item_data:
                         setattr(new_item, k, item_data[k])
                 new_item.rebuild()
@@ -1210,6 +1400,8 @@ class AssetLibraryWidget(QWidget):
                         new_item.auto_height = item_data['auto_height']
                     if 'manual_line_break' in item_data:
                         new_item.manual_line_break = item_data['manual_line_break']
+                    if 'layer_eye_color' in item_data:
+                        new_item.layer_eye_color = item_data['layer_eye_color']
                     
                     new_item.rebuild()
                         
@@ -1336,6 +1528,7 @@ class ProjectData:
                 data['column_spacing'] = item.column_spacing
                 data['auto_height'] = item.auto_height
                 data['manual_line_break'] = item.manual_line_break
+                data['layer_eye_color'] = getattr(item, 'layer_eye_color', None)
                 if item.connection_point:
                     data['connection_point_visible'] = item.connection_point.isVisible()
             elif isinstance(item, VImageItem):
@@ -1432,6 +1625,7 @@ class ProjectData:
                     item.auto_height = d['auto_height']
                 if 'manual_line_break' in d:
                     item.manual_line_break = d['manual_line_break']
+                item.layer_eye_color = d.get('layer_eye_color')
                 item.rebuild()
             elif d['type'] == 'VImageItem':
                 item = VImageItem(d['path'], d['width'])
@@ -2851,6 +3045,7 @@ class VTextItem(BaseElement):
         self.chars_per_column = 15  # 每列字符数，可以调整
         self.auto_height = True  # 是否自动调整高度
         self.manual_line_break = True  # 是否启用手动换行（响应\n字符）
+        self.layer_eye_color = None  # 用户指定的层级眼睛颜色：yellow/red/green/None
         
         # 列间距属性
         self.column_spacing = COLUMN_SPACING  # 列间距（所有列间距相同）
@@ -4775,6 +4970,7 @@ class LayoutScene(QGraphicsScene):
                 clone.column_spacing = item.column_spacing
                 clone.auto_height = item.auto_height
                 clone.manual_line_break = item.manual_line_break
+                clone.layer_eye_color = getattr(item, 'layer_eye_color', None)
                 clone.rebuild()
                 # 同步连接点可见性
                 if item.connection_point and clone.connection_point:
@@ -5380,6 +5576,7 @@ class LayoutScene(QGraphicsScene):
                     'column_spacing': item.column_spacing,
                     'auto_height': item.auto_height,
                     'manual_line_break': item.manual_line_break,
+                    'layer_eye_color': getattr(item, 'layer_eye_color', None),
                     'connection_point_visible': connection_point_visible,
                     'scene_pos': (item.scenePos().x(), item.scenePos().y()),
                     'local_pos': (item.x(), item.y()),
@@ -5444,7 +5641,7 @@ class LayoutScene(QGraphicsScene):
                 new_item = VTextItem(item_data['text'], item_data['font_size'], item_data['box_height'])
                 new_item.font_family = item_data['font_family']
                 new_item.text_color = QColor(item_data['text_color'])
-                for k in ('chars_per_column', 'column_spacing', 'auto_height', 'manual_line_break'):
+                for k in ('chars_per_column', 'column_spacing', 'auto_height', 'manual_line_break', 'layer_eye_color'):
                     if k in item_data:
                         setattr(new_item, k, item_data[k])
                 new_item.rebuild()
@@ -6373,6 +6570,7 @@ class MainWindow(QMainWindow):
         self.scene = LayoutScene(self)
         self.scene.setSceneRect(0, 0, 7054, 5021)
         self.scene.selectionChanged.connect(self.on_selection_changed)
+        self._last_selected_images = []  # 缓存最后一次选中的图片列表
         self.view = LayoutView(self.scene)
         self.view.set_main_window(self)
         
@@ -6385,7 +6583,7 @@ class MainWindow(QMainWindow):
         self._eye_hidden_icon = self._make_eye_icon(False)
         self.tree_widget = QTreeWidget()
         self.tree_widget.setHeaderLabels(["", "排版元素", "位置"])
-        self.tree_widget.setColumnWidth(0, 34)
+        self.tree_widget.setColumnWidth(0, 50)
         self.tree_widget.setColumnWidth(1, 180)
         self.tree_widget.setAllColumnsShowFocus(True)
         self.tree_widget.itemClicked.connect(self._on_tree_item_clicked)
@@ -6457,6 +6655,10 @@ class MainWindow(QMainWindow):
         s = QSettings("VertiLayout", "VertiLayoutPro")
         s.setValue("geometry", self.saveGeometry())
         s.setValue("windowState", self.saveState())
+        # 保存层级面板列宽
+        s.setValue("tree_col0_width", self.tree_widget.columnWidth(0))
+        s.setValue("tree_col1_width", self.tree_widget.columnWidth(1))
+        s.setValue("tree_col2_width", self.tree_widget.columnWidth(2))
 
     def _restore_window_state(self):
         s = QSettings("VertiLayout", "VertiLayoutPro")
@@ -6466,6 +6668,13 @@ class MainWindow(QMainWindow):
             self.restoreGeometry(geom)
         if state:
             self.restoreState(state)
+        # 恢复层级面板列宽
+        if s.contains("tree_col0_width"):
+            self.tree_widget.setColumnWidth(0, int(s.value("tree_col0_width")))
+        if s.contains("tree_col1_width"):
+            self.tree_widget.setColumnWidth(1, int(s.value("tree_col1_width")))
+        if s.contains("tree_col2_width"):
+            self.tree_widget.setColumnWidth(2, int(s.value("tree_col2_width")))
 
     def closeEvent(self, event):
         """窗口关闭时停止定时器，保存窗口状态"""
@@ -6823,6 +7032,19 @@ class MainWindow(QMainWindow):
             "按从右到左顺序连接选中图片的连接点"
         )
 
+        main_toolbar.addSeparator()
+        main_toolbar.addWidget(QLabel("框选:"))
+        self.marquee_mode_combo = QComboBox()
+        self.marquee_mode_combo.addItem("全选", "all")
+        self.marquee_mode_combo.addItem("仅图片", "images")
+        self.marquee_mode_combo.addItem("仅连接点元素", "connected")
+        self.marquee_mode_combo.setToolTip("框选模式（Alt+M 循环切换）")
+        self.marquee_mode_combo.setFixedWidth(110)
+        self.marquee_mode_combo.currentIndexChanged.connect(
+            lambda idx: self.set_marquee_mode(self.marquee_mode_combo.itemData(idx))
+        )
+        main_toolbar.addWidget(self.marquee_mode_combo)
+
         spacer = QWidget()
         spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         main_toolbar.addWidget(spacer)
@@ -7028,6 +7250,21 @@ class MainWindow(QMainWindow):
         self.insert_image_to_bottom_action.toggled.connect(self.toggle_insert_image_to_bottom)
         edit_menu.addAction(self.insert_image_to_bottom_action)
 
+        eye_role_from_selection_menu = edit_menu.addMenu('设置选中文字眼睛颜色')
+        for color_key, color_label in [
+            ('yellow', '设为黄色眼睛'),
+            ('red', '设为红色眼睛'),
+            ('green', '设为绿色眼睛'),
+        ]:
+            action = QAction(color_label, self)
+            action.triggered.connect(
+                lambda checked=False, c=color_key: self.set_layer_eye_role_from_selection(c)
+            )
+            eye_role_from_selection_menu.addAction(action)
+        clear_eye_action = QAction('清除眼睛颜色', self)
+        clear_eye_action.triggered.connect(lambda: self.set_layer_eye_role_from_selection(None))
+        eye_role_from_selection_menu.addAction(clear_eye_action)
+
         edit_menu.addSeparator()
         nudge_step_action = QAction('设置Shift+方向键步长...', self)
         nudge_step_action.triggered.connect(self.set_nudge_large_step)
@@ -7043,6 +7280,31 @@ class MainWindow(QMainWindow):
         self._sync_marquee_mode_ui()
         labels = {'all': '全选', 'images': '仅选图片', 'connected': '仅选有连接点的元素'}
         self.status_bar.showMessage(f'框选模式：{labels.get(mode, mode)}  (Alt+M 循环切换)', 3000)
+
+    def _selected_texts_for_eye_role(self):
+        selected_texts = [
+            item for item in self.scene.selectedItems()
+            if isinstance(item, VTextItem)
+        ]
+        if not selected_texts:
+            self.status_bar.showMessage("请先在画布上选中文字", 3000)
+            return []
+        return selected_texts
+
+    def set_layer_eye_role_from_selection(self, color_key):
+        text_items = self._selected_texts_for_eye_role()
+        if not text_items:
+            return
+        if color_key not in {'yellow', 'red', 'green', None}:
+            return
+        for text_item in text_items:
+            text_item.layer_eye_color = color_key
+        self.refresh_ui()
+        color_names = {'yellow': '黄色', 'red': '红色', 'green': '绿色', None: '无'}
+        self.status_bar.showMessage(
+            f"已将 {len(text_items)} 个文字的眼睛颜色设为：{color_names[color_key]}",
+            3000
+        )
 
     def cycle_marquee_mode(self):
         """Alt+M 循环切换框选模式"""
@@ -7344,6 +7606,9 @@ class MainWindow(QMainWindow):
             selected = self.scene.selectedItems()
             images = [i for i in selected if isinstance(i, VImageItem)]
             texts = [i for i in selected if isinstance(i, VTextItem)]
+            # 缓存选中的图片列表，供层级面板批量操作使用
+            if images:
+                self._last_selected_images = list(images)
             self.update_property_summary(selected, texts, images)
             if images and not texts:
                 self.status_bar.showMessage("拖拽蓝色控制点可缩放图片  角点=等比缩放  边中点=单向拉伸  右键=更多选项")
@@ -7378,14 +7643,15 @@ class MainWindow(QMainWindow):
         h, ok2 = QInputDialog.getInt(self, "画布高度", "高度:", int(current_rect.height()), 100, 10000)
         if ok1 and ok2: self.scene.setSceneRect(0, 0, w, h)
 
-    def _make_eye_icon(self, visible):
-        """创建图层列表用的眼睛图标。"""
+    def _make_eye_icon(self, visible, color=None):
+        """创建图层列表用的眼睛图标，支持自定义颜色。"""
         pixmap = QPixmap(22, 22)
         pixmap.fill(Qt.GlobalColor.transparent)
         painter = QPainter(pixmap)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
-        color = QColor(0, 120, 215) if visible else QColor(150, 150, 150)
+        if color is None:
+            color = QColor(0, 120, 215) if visible else QColor(150, 150, 150)
         pen = QPen(color, 2)
         painter.setPen(pen)
         painter.setBrush(Qt.BrushStyle.NoBrush)
@@ -7415,7 +7681,20 @@ class MainWindow(QMainWindow):
         if not item:
             return
         visible = item.isVisible()
-        node.setIcon(0, self._eye_visible_icon if visible else self._eye_hidden_icon)
+
+        # 彩色眼睛由用户给文字设置的标记决定，不再按位置推断。
+        eye_color = None
+        if isinstance(item, VTextItem):
+            color_key = self._get_child_text_eye_color(item)
+            eye_color = {
+                'yellow': QColor(220, 180, 0),
+                'red': QColor(200, 50, 50),
+                'green': QColor(40, 160, 70),
+            }.get(color_key)
+
+        if not visible:
+            eye_color = None  # 隐藏时统一用灰色
+        node.setIcon(0, self._make_eye_icon(visible, eye_color))
         node.setToolTip(0, "点击隐藏" if visible else "点击显示")
         text_color = QColor(0, 100, 200) if isinstance(item, VImageItem) else QColor(30, 30, 30)
         if not visible:
@@ -7508,7 +7787,27 @@ class MainWindow(QMainWindow):
                     preview = item.full_text.replace('\n', '↵')[:12]
                     if len(item.full_text) > 12:
                         preview += '…'
-                    label = f"[{n}] 文字  {preview}"
+                    # 如果是图片的子文字，加位置标记
+                    tag = ''
+                    parent = item.parentItem()
+                    if isinstance(parent, VImageItem):
+                        siblings = [c for c in parent.childItems() if isinstance(c, VTextItem)]
+                        if len(siblings) > 1:
+                            xs = [c.scenePos().x() for c in siblings]
+                            ys = [c.scenePos().y() for c in siblings]
+                            sx, sy = item.scenePos().x(), item.scenePos().y()
+                            marks = []
+                            if sx == max(xs):
+                                marks.append('最右')
+                            if sx == min(xs):
+                                marks.append('最左')
+                            if sy == min(ys):
+                                marks.append('最上')
+                            if sy == max(ys):
+                                marks.append('最下')
+                            if marks:
+                                tag = f" [{'/'.join(marks)}]"
+                    label = f"[{n}] 文字  {preview}{tag}"
 
                 pos = item.scenePos()
                 node.setText(1, label)
@@ -7538,11 +7837,28 @@ class MainWindow(QMainWindow):
             pass
 
     def _on_tree_item_clicked(self, node, column):
-        """点击眼睛切换显隐；点击列表内容选中画布元素并居中。"""
+        """点击眼睛切换显隐；点击列表内容选中画布元素并居中。
+        若点击的是用户指定过颜色的子文字眼睛，且画布上有多个选中图片，则按同色标记批量操作。
+        """
         try:
             item = self._tree_item_element(node)
             if item and item.scene():
                 if column == 0:
+                    # 判断是否是用户指定了彩色眼睛的子文字
+                    color_key = self._get_child_text_role(item)
+                    if color_key and isinstance(item, VTextItem) and isinstance(item.parentItem(), VImageItem):
+                        # 用缓存的选中图片列表（避免点击面板时选中状态已变）
+                        selected_images = [i for i in getattr(self, '_last_selected_images', [])
+                                           if isinstance(i, VImageItem) and i.scene()]
+                        if len(selected_images) > 1:
+                            new_visible = not item.isVisible()
+                            for img in selected_images:
+                                target = self._get_role_child(img, color_key)
+                                if target:
+                                    self._set_element_visible_from_tree(target, new_visible)
+                            self.refresh_ui()
+                            return
+
                     self._set_element_visible_from_tree(item, not item.isVisible())
                     self._sync_tree_node_visibility(node)
                     return
@@ -7552,6 +7868,27 @@ class MainWindow(QMainWindow):
                 self.view.centerOn(item)
         except (RuntimeError, AttributeError):
             pass
+
+    def _get_child_text_role(self, item):
+        """返回当前子文字的用户指定眼睛颜色，否则返回 None。"""
+        return self._get_child_text_eye_color(item)
+
+    def _get_child_text_eye_color(self, item):
+        """返回当前子文字应显示的彩色眼睛颜色 key，否则返回 None。"""
+        if not isinstance(item, VTextItem):
+            return None
+        color_key = getattr(item, 'layer_eye_color', None)
+        return color_key if color_key in {'yellow', 'red', 'green'} else None
+
+    def _get_role_child(self, img, color_key):
+        """从图片的子文字中找到用户标记为对应颜色的那个。"""
+        siblings = [c for c in img.childItems() if isinstance(c, VTextItem)]
+        if not siblings:
+            return None
+        for c in siblings:
+            if self._get_child_text_eye_color(c) == color_key:
+                return c
+        return None
 
     def _on_tree_item_changed(self, node, column):
         """保留旧信号槽，兼容旧工程/旧 UI 调用。"""
