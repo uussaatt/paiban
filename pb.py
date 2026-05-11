@@ -774,11 +774,11 @@ class AssetLibraryDockWidget(QDockWidget):
         self.group_list.startDrag = self._start_group_drag
         gl.addWidget(self.group_list)
         gb = QHBoxLayout()
-        btn_use = QPushButton("使用"); btn_use.setMaximumHeight(25)
+        btn_use = QPushButton("使用"); btn_use.setMaximumHeight(30); btn_use.setProperty("class", "primary")
         btn_use.clicked.connect(self.use_group_asset_selected); gb.addWidget(btn_use)
-        btn_ren = QPushButton("重命名"); btn_ren.setMaximumHeight(25)
+        btn_ren = QPushButton("重命名"); btn_ren.setMaximumHeight(30)
         btn_ren.clicked.connect(self.rename_group_asset_selected); gb.addWidget(btn_ren)
-        btn_del = QPushButton("删除"); btn_del.setMaximumHeight(25)
+        btn_del = QPushButton("删除"); btn_del.setMaximumHeight(30)
         btn_del.setProperty("class", "danger")
         btn_del.clicked.connect(self.delete_group_asset); gb.addWidget(btn_del)
         gl.addLayout(gb)
@@ -795,13 +795,13 @@ class AssetLibraryDockWidget(QDockWidget):
         self.snippet_list.itemClicked.connect(self._insert_snippet)
         tl.addWidget(self.snippet_list)
         tb = QHBoxLayout()
-        btn_add = QPushButton("添加"); btn_add.setMaximumHeight(25)
+        btn_add = QPushButton("添加"); btn_add.setMaximumHeight(30); btn_add.setProperty("class", "primary")
         btn_add.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         btn_add.clicked.connect(self._add_snippet); tb.addWidget(btn_add)
-        btn_edit = QPushButton("编辑"); btn_edit.setMaximumHeight(25)
+        btn_edit = QPushButton("编辑"); btn_edit.setMaximumHeight(30)
         btn_edit.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         btn_edit.clicked.connect(self._edit_snippet); tb.addWidget(btn_edit)
-        btn_sdel = QPushButton("删除"); btn_sdel.setMaximumHeight(25)
+        btn_sdel = QPushButton("删除"); btn_sdel.setMaximumHeight(30)
         btn_sdel.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         btn_sdel.setProperty("class", "danger")
         btn_sdel.clicked.connect(self._delete_snippet); tb.addWidget(btn_sdel)
@@ -6389,7 +6389,12 @@ class MainWindow(QMainWindow):
         self.tree_widget.setColumnWidth(1, 180)
         self.tree_widget.setAllColumnsShowFocus(True)
         self.tree_widget.itemClicked.connect(self._on_tree_item_clicked)
-        sidebar.setWidget(self.tree_widget)
+        self.sidebar_tabs = QTabWidget()
+        self.sidebar_tabs.setObjectName("sidebar_tabs")
+        self.sidebar_tabs.addTab(self.tree_widget, "层级")
+        self.property_panel = self.create_property_panel()
+        self.sidebar_tabs.addTab(self.property_panel, "属性")
+        sidebar.setWidget(self.sidebar_tabs)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, sidebar)
         self._tree_item_counter = 0  # 全局编号计数器
         self._tree_updating = False   # 防止 itemChanged 递归触发
@@ -6419,6 +6424,7 @@ class MainWindow(QMainWindow):
         # 快捷键提示
         hint = QLabel("  放大: Ctrl+=   缩小: Ctrl+-   合适屏幕: Ctrl+0   撤销: Ctrl+Z   保存: Ctrl+S   导出: Ctrl+E   素材库: F9")
         hint.setStyleSheet("color: gray; font-size: 11px;")
+        hint.setText("  当前模式：编辑   选中对象：0")
         self.status_bar.addWidget(hint)
         
         # 连接视图变换信号来更新缩放显示
@@ -6467,8 +6473,136 @@ class MainWindow(QMainWindow):
             self.timer.stop()
         self._save_window_state()
         event.accept()
+
+    def create_property_panel(self):
+        panel = QWidget()
+        panel.setObjectName("property_panel")
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(10)
+
+        self.property_summary_label = QLabel("未选择对象")
+        self.property_summary_label.setObjectName("propertySummary")
+        self.property_summary_label.setWordWrap(True)
+        layout.addWidget(self.property_summary_label)
+
+        text_group = QGroupBox("文字样式")
+        text_layout = QFormLayout(text_group)
+        text_layout.setContentsMargins(10, 14, 10, 10)
+        text_layout.setHorizontalSpacing(8)
+        text_layout.setVerticalSpacing(8)
+
+        self.font_combo = QComboBox()
+        self.font_combo.setMinimumWidth(120)
+        self.font_combo.setEditable(True)
+        for f in QFontDatabase.families():
+            self.font_combo.addItem(f)
+        default_font = self.scene.config_manager.get('default_font_family', DEFAULT_FONT)
+        idx = self.font_combo.findText(default_font)
+        if idx >= 0:
+            self.font_combo.setCurrentIndex(idx)
+        else:
+            self.font_combo.setCurrentText(default_font)
+        self.font_combo.currentTextChanged.connect(
+            lambda name: self.change_selected_font(QFont(name))
+        )
+        text_layout.addRow("字体", self.font_combo)
+
+        self.font_size_spin = QSpinBox()
+        self.font_size_spin.setRange(8, 200)
+        default_font_size = self.scene.config_manager.get('default_font_size', DEFAULT_FONT_SIZE)
+        self.font_size_spin.setValue(default_font_size)
+        self.font_size_spin.setSuffix("px")
+        self.font_size_spin.valueChanged.connect(self.change_selected_font_size)
+        text_layout.addRow("字号", self.font_size_spin)
+
+        self.color_button = QPushButton()
+        self.color_button.setFixedHeight(30)
+        self.color_button.setToolTip("选择文字颜色")
+        self.color_button.clicked.connect(self.change_selected_color)
+        text_layout.addRow("颜色", self.color_button)
+        self._set_color_button_color(QColor("black"))
+        layout.addWidget(text_group)
+
+        layout_group = QGroupBox("竖排参数")
+        layout_form = QFormLayout(layout_group)
+        layout_form.setContentsMargins(10, 14, 10, 10)
+        layout_form.setHorizontalSpacing(8)
+        layout_form.setVerticalSpacing(8)
+
+        self.chars_per_column_spin = QSpinBox()
+        self.chars_per_column_spin.setRange(5, 50)
+        self.chars_per_column_spin.setValue(15)
+        self.chars_per_column_spin.setSuffix("字")
+        self.chars_per_column_spin.valueChanged.connect(self.change_chars_per_column)
+        layout_form.addRow("每列字数", self.chars_per_column_spin)
+
+        self.column_spacing_spin = QSpinBox()
+        self.column_spacing_spin.setRange(0, 200)
+        self.column_spacing_spin.setValue(COLUMN_SPACING)
+        self.column_spacing_spin.setSuffix("px")
+        self.column_spacing_spin.valueChanged.connect(self.change_column_spacing)
+        layout_form.addRow("列间距", self.column_spacing_spin)
+
+        self.manual_line_break_btn = QPushButton("手动换行")
+        self.manual_line_break_btn.setCheckable(True)
+        self.manual_line_break_btn.setChecked(True)
+        self.manual_line_break_btn.setProperty("class", "toggle")
+        self.manual_line_break_btn.toggled.connect(self.toggle_manual_line_break)
+        layout_form.addRow("", self.manual_line_break_btn)
+        layout.addWidget(layout_group)
+
+        selection_group = QGroupBox("选择模式")
+        selection_form = QFormLayout(selection_group)
+        selection_form.setContentsMargins(10, 14, 10, 10)
+        selection_form.setHorizontalSpacing(8)
+        selection_form.setVerticalSpacing(8)
+
+        self.marquee_mode_combo = QComboBox()
+        self.marquee_mode_combo.addItem("全选", "all")
+        self.marquee_mode_combo.addItem("仅图片", "images")
+        self.marquee_mode_combo.addItem("仅连接点元素", "connected")
+        self.marquee_mode_combo.setToolTip("框选模式，Alt+M 可循环切换")
+        self.marquee_mode_combo.currentIndexChanged.connect(
+            lambda idx: self.set_marquee_mode(self.marquee_mode_combo.itemData(idx))
+        )
+        selection_form.addRow("框选", self.marquee_mode_combo)
+        layout.addWidget(selection_group)
+
+        layout.addStretch(1)
+        return panel
+
+    def _set_color_button_color(self, color):
+        self.color_button.setText(color.name().upper())
+        self.color_button.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {color.name()};
+                color: {"white" if color.lightness() < 128 else "#24292f"};
+                border: 1px solid #8c959f;
+                border-radius: 5px;
+                padding: 4px 10px;
+                font-weight: 600;
+            }}
+            QPushButton:hover {{
+                border: 1px solid #0969da;
+            }}
+        """)
+
+    def update_property_summary(self, selected, texts, images):
+        if not hasattr(self, 'property_summary_label'):
+            return
+        if not selected:
+            self.property_summary_label.setText("未选择对象")
+        elif texts and not images:
+            self.property_summary_label.setText(f"已选择 {len(texts)} 个文字对象")
+        elif images and not texts:
+            self.property_summary_label.setText(f"已选择 {len(images)} 张图片")
+        else:
+            self.property_summary_label.setText(
+                f"已选择 {len(selected)} 个对象：{len(texts)} 个文字，{len(images)} 张图片"
+            )
     
-    def create_toolbars(self):
+    def create_toolbars_legacy(self):
         # 主工具栏 - 编辑和格式化
         main_toolbar = QToolBar("编辑与格式")
         main_toolbar.setObjectName("toolbar_main")
@@ -6628,15 +6762,73 @@ class MainWindow(QMainWindow):
         main_toolbar.addWidget(self.marquee_mode_combo)
 
         main_toolbar.addSeparator()
-        btn_group_connect = QAction("组合连接", self)
+        btn_group_connect = QAction("垂直连接", self)
         btn_group_connect.setToolTip("将选中图片+子文字视为组合，按位置顺序依次连接 b点→a点")
         btn_group_connect.triggered.connect(lambda: self.scene.group_chain_connect())
         main_toolbar.addAction(btn_group_connect)
 
-        btn_img_connect = QAction("图片连接点连线", self)
+        btn_img_connect = QAction("水平连接", self)
         btn_img_connect.setToolTip("按从右到左顺序，依次连接选中图片的连接点")
         btn_img_connect.triggered.connect(lambda: self.scene.connect_image_points_right_to_left())
         main_toolbar.addAction(btn_img_connect)
+
+    def _add_toolbar_action(self, toolbar, text, slot, tooltip=None, shortcut=None, checkable=False):
+        action = QAction(text, self)
+        if tooltip:
+            action.setToolTip(tooltip)
+            action.setStatusTip(tooltip)
+        if shortcut:
+            action.setShortcut(shortcut)
+        action.setCheckable(checkable)
+        if checkable:
+            action.toggled.connect(slot)
+        else:
+            action.triggered.connect(lambda checked=False: slot())
+        toolbar.addAction(action)
+        return action
+
+    def create_toolbars(self):
+        main_toolbar = QToolBar("主要操作")
+        main_toolbar.setObjectName("toolbar_main")
+        main_toolbar.setMovable(False)
+        main_toolbar.setIconSize(QSize(18, 18))
+        main_toolbar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+        self.addToolBar(Qt.ToolBarArea.TopToolBarArea, main_toolbar)
+
+        self._add_toolbar_action(main_toolbar, "添加文本", self.add_text, "在画布中添加竖排文字")
+        self._add_toolbar_action(main_toolbar, "插入图片", self.add_image, "插入图片素材")
+        self._add_toolbar_action(main_toolbar, "编辑文字", self.edit_selected_text, "编辑当前选中的文字")
+
+        main_toolbar.addSeparator()
+        self._add_toolbar_action(main_toolbar, "撤销", self.undo, "撤销上一步操作", "Ctrl+Z")
+        self.btn_resize = self._add_toolbar_action(
+            main_toolbar,
+            "调整图片",
+            self.toggle_resize_mode,
+            "选中图片后显示缩放控制点",
+            checkable=True
+        )
+
+        main_toolbar.addSeparator()
+        self._add_toolbar_action(main_toolbar, "右对齐", self.align_right, "按右边缘对齐选中对象")
+        self._add_toolbar_action(main_toolbar, "顶部对齐", self.align_top, "按顶部边缘对齐选中对象")
+        self._add_toolbar_action(main_toolbar, "智能连接", self.auto_connect_selected, "按选中顺序连接元素")
+
+        main_toolbar.addSeparator()
+        self._add_toolbar_action(main_toolbar, "垂直连接", lambda: self.scene.group_chain_connect(), "将选中图片+子文字视为组合，按位置顺序依次连接 b点→a点")
+        self._add_toolbar_action(
+            main_toolbar,
+            "水平连接",
+            lambda: self.scene.connect_image_points_right_to_left(),
+            "按从右到左顺序连接选中图片的连接点"
+        )
+
+        spacer = QWidget()
+        spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        main_toolbar.addWidget(spacer)
+        hint = QLabel("文字与排版参数在右侧「属性」页")
+        hint.setObjectName("toolbarHint")
+        main_toolbar.addWidget(hint)
 
     def create_menu_bar(self):
         menubar = self.menuBar()
@@ -6686,7 +6878,7 @@ class MainWindow(QMainWindow):
         batch_copy_action.triggered.connect(self.batch_copy)
         asset_menu.addAction(batch_copy_action)
 
-        group_connect_action = QAction('组合连接', self)
+        group_connect_action = QAction('垂直连接', self)
         group_connect_action.setToolTip("将选中图片+子文字视为组合，按位置顺序依次连接 b点→a点")
         group_connect_action.triggered.connect(lambda: self.scene.group_chain_connect())
         asset_menu.addAction(group_connect_action)
@@ -7088,7 +7280,7 @@ class MainWindow(QMainWindow):
             for item in selected_items:
                 item.text_color = color
                 item.rebuild()
-            self.color_button.setStyleSheet(f"background-color: {color.name()}; border: 1px solid gray;")
+            self._set_color_button_color(color)
     
     def toggle_manual_line_break(self, enabled):
         selected_items = [item for item in self.scene.selectedItems() if isinstance(item, VTextItem)]
@@ -7122,16 +7314,20 @@ class MainWindow(QMainWindow):
                 self.font_size_spin.blockSignals(True)
                 self.chars_per_column_spin.blockSignals(True)
                 self.column_spacing_spin.blockSignals(True)
+                self.manual_line_break_btn.blockSignals(True)
 
                 self.font_combo.setCurrentText(item.font_family)
                 self.font_size_spin.setValue(item.font_size)
                 self.chars_per_column_spin.setValue(item.chars_per_column)
                 self.column_spacing_spin.setValue(item.column_spacing)
+                self.manual_line_break_btn.setChecked(item.manual_line_break)
+                self._set_color_button_color(item.text_color)
                 
                 self.font_combo.blockSignals(False)
                 self.font_size_spin.blockSignals(False)
                 self.chars_per_column_spin.blockSignals(False)
                 self.column_spacing_spin.blockSignals(False)
+                self.manual_line_break_btn.blockSignals(False)
         except (RuntimeError, AttributeError):
             # 处理 C++ 对象已被删除的情况
             pass
@@ -7148,6 +7344,7 @@ class MainWindow(QMainWindow):
             selected = self.scene.selectedItems()
             images = [i for i in selected if isinstance(i, VImageItem)]
             texts = [i for i in selected if isinstance(i, VTextItem)]
+            self.update_property_summary(selected, texts, images)
             if images and not texts:
                 self.status_bar.showMessage("拖拽蓝色控制点可缩放图片  角点=等比缩放  边中点=单向拉伸  右键=更多选项")
             elif texts and not images:
@@ -7809,6 +8006,210 @@ class MainWindow(QMainWindow):
         
         QScrollBar::handle:horizontal:hover {
             background: rgba(0, 0, 0, 0.5);
+        }
+
+        /* Professional editor refinements */
+        QMainWindow {
+            background-color: #f6f8fa;
+        }
+
+        QToolBar {
+            background: #ffffff;
+            border: none;
+            border-bottom: 1px solid #d8dee4;
+            spacing: 6px;
+            padding: 6px 8px;
+        }
+
+        QToolBar::separator {
+            background-color: #d0d7de;
+            width: 1px;
+            margin: 5px 4px;
+        }
+
+        QToolBar#toolbar_main QToolButton {
+            background: #ffffff;
+            border: 1px solid #d0d7de;
+            border-radius: 5px;
+            color: #24292f;
+            padding: 5px 11px;
+            min-height: 24px;
+            font-size: 12px;
+            font-weight: 500;
+        }
+
+        QToolBar#toolbar_main QToolButton:hover {
+            background: #f6f8fa;
+            border-color: #0969da;
+        }
+
+        QToolBar#toolbar_main QToolButton:pressed,
+        QToolBar#toolbar_main QToolButton:checked {
+            background: #0969da;
+            border-color: #0969da;
+            color: #ffffff;
+        }
+
+        QLabel#toolbarHint {
+            color: #57606a;
+            padding-right: 4px;
+            font-size: 12px;
+        }
+
+        QPushButton, QToolButton {
+            background: #ffffff;
+            border: 1px solid #d0d7de;
+            border-radius: 5px;
+            color: #24292f;
+            padding: 6px 12px;
+            min-height: 24px;
+            font-size: 13px;
+            font-weight: 500;
+        }
+
+        QPushButton:hover, QToolButton:hover {
+            background: #f6f8fa;
+            border-color: #0969da;
+        }
+
+        QPushButton:pressed, QToolButton:pressed {
+            background: #eaeef2;
+        }
+
+        QPushButton[class="primary"] {
+            background: #0969da;
+            border-color: #0969da;
+            color: #ffffff;
+            font-weight: 600;
+        }
+
+        QPushButton[class="primary"]:hover {
+            background: #075fc5;
+            border-color: #075fc5;
+        }
+
+        QPushButton[class="danger"] {
+            background: #cf222e;
+            border-color: #cf222e;
+            color: #ffffff;
+            font-weight: 600;
+        }
+
+        QPushButton[class="danger"]:hover {
+            background: #a40e26;
+            border-color: #a40e26;
+        }
+
+        QPushButton[class="toggle"]:checked {
+            background: #0969da;
+            border-color: #0969da;
+            color: #ffffff;
+        }
+
+        QDockWidget {
+            background: #ffffff;
+            border: 1px solid #d8dee4;
+            border-radius: 0;
+        }
+
+        QDockWidget::title {
+            background: #f6f8fa;
+            border-bottom: 1px solid #d8dee4;
+            padding: 7px 8px;
+            font-weight: 600;
+            color: #24292f;
+        }
+
+        QTabWidget::pane {
+            border: 1px solid #d8dee4;
+            border-radius: 4px;
+            background: #ffffff;
+        }
+
+        QTabBar::tab {
+            background: #f6f8fa;
+            border: 1px solid #d8dee4;
+            border-bottom: none;
+            border-top-left-radius: 4px;
+            border-top-right-radius: 4px;
+            padding: 7px 13px;
+            color: #57606a;
+        }
+
+        QTabBar::tab:selected {
+            background: #ffffff;
+            color: #24292f;
+            font-weight: 600;
+        }
+
+        QListWidget, QTreeWidget {
+            background: #ffffff;
+            border: 1px solid #d8dee4;
+            border-radius: 5px;
+            padding: 4px;
+            alternate-background-color: #f6f8fa;
+            selection-background-color: #ddf4ff;
+            selection-color: #24292f;
+        }
+
+        QListWidget::item {
+            border-radius: 4px;
+            padding: 7px 8px;
+            margin: 1px;
+        }
+
+        QListWidget::item:hover,
+        QTreeWidget::item:hover {
+            background: #f6f8fa;
+        }
+
+        QListWidget::item:selected,
+        QTreeWidget::item:selected {
+            background: #ddf4ff;
+            color: #24292f;
+        }
+
+        QGroupBox {
+            background: #ffffff;
+            border: 1px solid #d8dee4;
+            border-radius: 5px;
+            margin-top: 8px;
+            font-weight: 600;
+            color: #24292f;
+        }
+
+        QGroupBox::title {
+            subcontrol-origin: margin;
+            left: 8px;
+            padding: 0 4px;
+            background: #ffffff;
+        }
+
+        QLabel#propertySummary {
+            background: #f6f8fa;
+            border: 1px solid #d8dee4;
+            border-radius: 5px;
+            color: #57606a;
+            padding: 8px;
+        }
+
+        QSpinBox, QLineEdit, QTextEdit, QComboBox {
+            background: #ffffff;
+            border: 1px solid #d0d7de;
+            border-radius: 5px;
+            padding: 5px 7px;
+            color: #24292f;
+            min-height: 22px;
+        }
+
+        QSpinBox:focus, QLineEdit:focus, QTextEdit:focus, QComboBox:focus {
+            border: 1px solid #0969da;
+        }
+
+        QStatusBar {
+            background: #ffffff;
+            border-top: 1px solid #d8dee4;
+            color: #57606a;
         }
         """
         
