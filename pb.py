@@ -6765,7 +6765,14 @@ class LayoutView(QGraphicsView):
                 path = url.toLocalFile()
                 if path.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp')):
                     pos = self.mapToScene(event.position().toPoint())
-                    img = VImageItem(path, target_width=DEFAULT_FONT_SIZE*4)
+                    pix = QPixmap(path)
+                    if not pix.isNull():
+                        canvas_w = self.scene().sceneRect().width()
+                        max_w = int(canvas_w * 0.3)
+                        target_w = min(pix.width(), max_w)
+                    else:
+                        target_w = DEFAULT_FONT_SIZE * 4
+                    img = VImageItem(path, target_width=target_w)
                     img.setPos(pos)
                     if self.scene().config_manager.get('insert_image_to_bottom', False):
                         img.setZValue(-1)
@@ -7661,7 +7668,15 @@ class MainWindow(QMainWindow):
     def add_image(self):
         path, _ = QFileDialog.getOpenFileName(self, "选择图片", "", "Images (*.png *.jpg *.jpeg *.bmp)")
         if path:
-            img = VImageItem(path, target_width=DEFAULT_FONT_SIZE*4)
+            # 读取原始尺寸，限制最大宽度为画布宽度的 30%
+            pix = QPixmap(path)
+            if not pix.isNull():
+                canvas_w = self.scene.sceneRect().width()
+                max_w = int(canvas_w * 0.3)
+                target_w = min(pix.width(), max_w)
+            else:
+                target_w = DEFAULT_FONT_SIZE * 4
+            img = VImageItem(path, target_width=target_w)
             center = self.view.mapToScene(self.view.viewport().rect().center())
             img.setPos(center)
             if self.scene.config_manager.get('insert_image_to_bottom', False):
