@@ -6719,15 +6719,23 @@ class LayoutView(QGraphicsView):
                     self.fitInView(selection_rect, Qt.AspectRatioMode.KeepAspectRatio)
                     self.transformChanged.emit()
     def dragEnterEvent(self, event):
-        # 允许组合素材或文件进入
-        if event.mimeData().hasFormat('application/x-group-asset-id') or event.mimeData().hasUrls():
+        mime = event.mimeData()
+        if (mime.hasFormat('application/x-group-asset-id') or
+                mime.hasUrls() or
+                mime.hasImage() or
+                mime.hasFormat('image/png') or
+                mime.hasFormat('image/jpeg')):
             event.acceptProposedAction()
         else:
             super().dragEnterEvent(event)
 
     def dragMoveEvent(self, event):
-        # 必须实现移动事件，否则鼠标会显示禁止图标
-        if event.mimeData().hasFormat('application/x-group-asset-id') or event.mimeData().hasUrls():
+        mime = event.mimeData()
+        if (mime.hasFormat('application/x-group-asset-id') or
+                mime.hasUrls() or
+                mime.hasImage() or
+                mime.hasFormat('image/png') or
+                mime.hasFormat('image/jpeg')):
             event.acceptProposedAction()
         else:
             super().dragMoveEvent(event)
@@ -6777,6 +6785,41 @@ class LayoutView(QGraphicsView):
                     if self.scene().config_manager.get('insert_image_to_bottom', False):
                         img.setZValue(-1)
                     self.scene().add_item_with_undo(img)
+            event.acceptProposedAction()
+            return
+
+        # 处理从其他软件拖入的图片数据（image/png、image/jpeg 等）
+        mime = event.mimeData()
+        pix = None
+        if mime.hasImage():
+            img_data = mime.imageData()
+            if img_data:
+                pix = QPixmap.fromImage(img_data)
+        elif mime.hasFormat('image/png') or mime.hasFormat('image/jpeg'):
+            fmt = 'image/png' if mime.hasFormat('image/png') else 'image/jpeg'
+            ba = mime.data(fmt)
+            pix = QPixmap()
+            pix.loadFromData(ba)
+
+        if pix and not pix.isNull():
+            # 保存为临时文件
+            import tempfile
+            suffix = '.png'
+            tmp = tempfile.NamedTemporaryFile(suffix=suffix, delete=False,
+                                              dir=ASSETS_DIR, prefix='dropped_')
+            tmp_path = tmp.name
+            tmp.close()
+            pix.save(tmp_path, 'PNG')
+
+            pos = self.mapToScene(event.position().toPoint())
+            canvas_w = self.scene().sceneRect().width()
+            max_w = int(canvas_w * 0.3)
+            target_w = min(pix.width(), max_w)
+            img = VImageItem(tmp_path, target_width=target_w)
+            img.setPos(pos)
+            if self.scene().config_manager.get('insert_image_to_bottom', False):
+                img.setZValue(-1)
+            self.scene().add_item_with_undo(img)
             event.acceptProposedAction()
     
 
