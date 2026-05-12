@@ -58,6 +58,7 @@ class ConfigManager:
             'marquee_mode': 'all',  # 框选模式：all / images / connected
             'insert_image_to_bottom': False,  # 插入图片时置于底层
             'nudge_large_step': 10,  # Shift+方向键大步长（像素）
+            'smart_brush_radius': 18,  # 智能笔刷默认大小
             'favorite_fonts': ['SimSun', 'Microsoft YaHei', '黑体', '楷体', 'Arial'],
             'favorite_sizes': [10, 12, 14, 16, 18, 20, 24, 30, 36, 48, 72],
         }
@@ -4527,9 +4528,55 @@ class LayoutScene(QGraphicsScene):
     def set_resize_mode(self, enabled):
         """切换图片调整大小模式"""
         self.resize_mode = enabled
-        for item in self.items():
-            if isinstance(item, VImageItem):
-                item._show_handles(enabled and item.isSelected())
+        if enabled:
+            # 进入调整模式时记录所有选中图片的原始状态
+            self._resize_snapshot = {}
+            for item in self.items():
+                if isinstance(item, VImageItem) and item.isSelected():
+                    self._resize_snapshot[item] = {
+                        'rect': QRectF(item._rect),
+                        'pos': item.scenePos(),
+                        'width': item.target_width,
+                    }
+                    item._show_handles(True)
+        else:
+            # 退出时清除记录
+            self._resize_snapshot = {}
+            for item in self.items():
+                if isinstance(item, VImageItem):
+                    item._show_handles(False)
+
+    def confirm_resize(self):
+        """确认调整：清除记录，退出模式"""
+        self._resize_snapshot = {}
+        self.set_resize_mode(False)
+        if self.views():
+            mw = self.views()[0].window()
+            if hasattr(mw, 'btn_resize'):
+                mw.btn_resize.setChecked(False)
+            if hasattr(mw, 'status_bar'):
+                mw.status_bar.showMessage("调整已确认", 3000)
+
+    def cancel_resize(self):
+        """取消调整：还原所有图片到进入调整模式前的状态"""
+        snapshot = getattr(self, '_resize_snapshot', {})
+        for item, state in snapshot.items():
+            if item.scene() == self:
+                # 还原尺寸
+                item._apply_resize(state['rect'], state['pos'])
+                # 还原位置
+                if item.parentItem():
+                    item.setPos(item.parentItem().mapFromScene(state['pos']))
+                else:
+                    item.setPos(state['pos'])
+        self._resize_snapshot = {}
+        self.set_resize_mode(False)
+        if self.views():
+            mw = self.views()[0].window()
+            if hasattr(mw, 'btn_resize'):
+                mw.btn_resize.setChecked(False)
+            if hasattr(mw, 'status_bar'):
+                mw.status_bar.showMessage("调整已取消，已还原原始大小和位置", 3000)
 
     def toggle_image_manage_mode(self):
         """切换图片管理模式（Alt+,）：隐藏的图片显示为半透明虚框，点击切换显示/隐藏"""
@@ -5804,6 +5851,10 @@ class LayoutScene(QGraphicsScene):
 
         # ESC键取消连接模式
         if event.key() == Qt.Key.Key_Escape:
+            if self.resize_mode:
+                self.cancel_resize()
+                event.accept()
+                return
             if self.connection_mode:
                 self.cancel_connection_mode()
                 event.accept()
@@ -5831,6 +5882,12 @@ class LayoutScene(QGraphicsScene):
                 event.accept()
                 return
         
+        # 调整图片模式：回车确认
+        if self.resize_mode and event.key() == Qt.Key.Key_Return:
+            self.confirm_resize()
+            event.accept()
+            return
+
         if event.modifiers() == Qt.KeyboardModifier.ControlModifier:
             if event.key() == Qt.Key.Key_Z:
                 self.undo()
@@ -6038,7 +6095,7 @@ class LayoutView(QGraphicsView):
         self._main_window = None
         self._smart_brush_enabled = False
         self._smart_brush_active = False
-        self._smart_brush_radius = 18
+        self._smart_brush_radius = 18  # 会在 set_main_window 后从配置更新
         self._smart_brush_pos = QPoint()
         self._smart_brush_seen = set()
         # 辅助线拖拽状态
@@ -6051,13 +6108,17 @@ class LayoutView(QGraphicsView):
 
     def set_main_window(self, mw):
         self._main_window = mw
+        # 从配置读取笔刷默认大小
+        if hasattr(mw, 'scene') and mw.scene:
+            r = mw.scene.config_manager.get('smart_brush_radius', 18)
+            self._smart_brush_radius = max(4, min(120, int(r)))
 
     def set_smart_brush_enabled(self, enabled):
         self._smart_brush_enabled = enabled
         self._smart_brush_active = False
         self._smart_brush_seen.clear()
         if enabled:
-            self.setCursor(Qt.CursorShape.CrossCursor)
+            self.setCursor(Qt.CursorShape.BlankCursor)  # 隐藏系统光标，用圆形笔刷圈代替
             msg = "智能笔刷：涂抹对象加入选区；按住 Alt 涂抹从选区中减去"
         else:
             self.setCursor(Qt.CursorShape.ArrowCursor)
@@ -6530,6 +6591,9 @@ class LayoutView(QGraphicsView):
             self._smart_brush_active = False
             self._smart_brush_seen.clear()
             self.viewport().update()
+            # 完成选择后自动退出笔刷模式
+            if self._main_window:
+                self._main_window.toggle_smart_brush(False)
             event.accept()
             return
 
@@ -6566,6 +6630,21 @@ class LayoutView(QGraphicsView):
         else:
             super().mouseReleaseEvent(event)
     
+    def mouseDoubleClickEvent(self, event):
+        """双击空白处：调整图片模式下确认调整"""
+        if event.button() == Qt.MouseButton.LeftButton and self.scene():
+            if self.scene().resize_mode:
+                # 检查是否双击在空白处（不是图片上）
+                item = self.itemAt(event.pos())
+                element = item
+                while element and not isinstance(element, VImageItem):
+                    element = element.parentItem() if element else None
+                if not element:
+                    self.scene().confirm_resize()
+                    event.accept()
+                    return
+        super().mouseDoubleClickEvent(event)
+
     def wheelEvent(self, event):
         if event.modifiers() == Qt.KeyboardModifier.ShiftModifier:
             # Shift+滚轮 保留原始滚动行为
@@ -6726,6 +6805,7 @@ class MainWindow(QMainWindow):
         self.tree_widget.setHeaderLabels(["", "排版元素", "位置"])
         self.tree_widget.setColumnWidth(0, 50)
         self.tree_widget.setColumnWidth(1, 180)
+        self.tree_widget.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.tree_widget.setAllColumnsShowFocus(True)
         self.tree_widget.itemClicked.connect(self._on_tree_item_clicked)
         self.sidebar_tabs = QTabWidget()
@@ -7367,14 +7447,14 @@ class MainWindow(QMainWindow):
         snap_threshold_action.triggered.connect(self.set_snap_threshold)
         view_menu.addAction(snap_threshold_action)
         
-        # 添加连线菜单
-        connector_menu = menubar.addMenu('连线')
+        # 编辑行为菜单（合并原连线菜单）
+        edit_menu = menubar.addMenu('编辑设置')
+
+        # 连线设置
         set_line_width_action = QAction('设置连线粗细...', self)
         set_line_width_action.triggered.connect(lambda: self.set_line_width())
-        connector_menu.addAction(set_line_width_action)
-
-        # 编辑行为菜单
-        edit_menu = menubar.addMenu('编辑设置')
+        edit_menu.addAction(set_line_width_action)
+        edit_menu.addSeparator()
         self.auto_exit_paste_action = QAction('粘贴后自动退出编辑', self)
         self.auto_exit_paste_action.setCheckable(True)
         self.auto_exit_paste_action.setChecked(self.scene.config_manager.get('auto_exit_after_paste', False))
@@ -7448,6 +7528,10 @@ class MainWindow(QMainWindow):
         nudge_step_action = QAction('设置Shift+方向键步长...', self)
         nudge_step_action.triggered.connect(self.set_nudge_large_step)
         edit_menu.addAction(nudge_step_action)
+
+        brush_size_action = QAction('设置笔刷默认大小...', self)
+        brush_size_action.triggered.connect(self.set_default_brush_size)
+        edit_menu.addAction(brush_size_action)
 
     def toggle_auto_exit_setting(self, enabled):
         """切换粘贴后自动退出编辑的开关"""
@@ -7529,6 +7613,19 @@ class MainWindow(QMainWindow):
             self.scene.config_manager.set('nudge_large_step', val)
             self.status_bar.showMessage(f'Shift+方向键步长已设置为 {val}px', 3000)
 
+    def set_default_brush_size(self):
+        """设置智能笔刷默认大小"""
+        current = self.scene.config_manager.get('smart_brush_radius', 18)
+        val, ok = QInputDialog.getInt(self, "笔刷默认大小", "笔刷半径（像素）:", current, 4, 120)
+        if ok:
+            self.scene.config_manager.set('smart_brush_radius', val)
+            self.view._smart_brush_radius = val
+            if hasattr(self, 'smart_brush_size_spin'):
+                self.smart_brush_size_spin.blockSignals(True)
+                self.smart_brush_size_spin.setValue(val)
+                self.smart_brush_size_spin.blockSignals(False)
+            self.status_bar.showMessage(f'笔刷默认大小已设置为 {val}px', 3000)
+
     def show_canvas_context_menu(self, pos):
         """画布空白处右键菜单"""
         menu = QMenu(self)
@@ -7588,7 +7685,7 @@ class MainWindow(QMainWindow):
         """切换图片调整大小模式"""
         self.scene.set_resize_mode(enabled)
         if enabled:
-            self.status_bar.showMessage("调整大小模式：选中图片后拖拽控制点缩放  方块=等比  圆点=单向  再次点击按钮退出")
+            self.status_bar.showMessage("调整大小模式：拖拽控制点缩放  回车/双击空白=确认  Esc=取消还原")
         else:
             self.status_bar.showMessage("已退出调整大小模式")
     
@@ -7943,9 +8040,9 @@ class MainWindow(QMainWindow):
                 if node:
                     node.setSelected(True)
 
+            # 滚动到最后选中的元素，但不用 setCurrentItem 避免蓝框只跟一个节点
             focus_node = self._tree_nodes_by_item.get(self._tree_key_for_item(focus_item))
             if focus_node:
-                self.tree_widget.setCurrentItem(focus_node, 1)
                 self.tree_widget.scrollToItem(focus_node, QAbstractItemView.ScrollHint.PositionAtCenter)
         finally:
             self._tree_updating = False
