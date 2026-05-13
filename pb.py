@@ -783,6 +783,80 @@ class FontPickerDialog(QDialog):
         return dlg.selected_font(), ok
 
 
+class ToastNotification(QWidget):
+    """右下角弹出通知，自动消失"""
+    def __init__(self, parent=None):
+        super().__init__(parent, Qt.WindowType.ToolTip | Qt.WindowType.FramelessWindowHint |
+                         Qt.WindowType.WindowStaysOnTopHint)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(14, 10, 14, 10)
+        layout.setSpacing(8)
+
+        self._icon_label = QLabel("⚠")
+        self._icon_label.setStyleSheet("font-size:18px;")
+        layout.addWidget(self._icon_label)
+
+        self._msg_label = QLabel()
+        self._msg_label.setWordWrap(True)
+        self._msg_label.setMaximumWidth(280)
+        self._msg_label.setStyleSheet("font-size:13px; color:#323130;")
+        layout.addWidget(self._msg_label)
+
+        self.setStyleSheet("""
+            QWidget {
+                background-color: #ffffff;
+                border: 1px solid rgba(0,0,0,0.15);
+                border-radius: 8px;
+            }
+            QLabel { border: none; background: transparent; }
+        """)
+
+        self._timer = QTimer(self)
+        self._timer.setSingleShot(True)
+        self._timer.timeout.connect(self._fade_out)
+
+        self._anim = QPropertyAnimation(self, b"windowOpacity")
+        self._anim.setDuration(400)
+        self._anim.finished.connect(self._on_anim_finished)
+
+    def show_message(self, message, icon="⚠", duration=4000):
+        self._icon_label.setText(icon)
+        self._msg_label.setText(message)
+        self.adjustSize()
+        self._position_bottom_right()
+        self.setWindowOpacity(0.0)
+        self.show()
+        self._anim.stop()
+        self._anim.setStartValue(0.0)
+        self._anim.setEndValue(1.0)
+        self._anim.start()
+        self._timer.start(duration)
+
+    def _position_bottom_right(self):
+        screen = QApplication.primaryScreen().availableGeometry()
+        margin = 20
+        x = screen.right() - self.width() - margin
+        y = screen.bottom() - self.height() - margin
+        self.move(x, y)
+
+    def _fade_out(self):
+        self._anim.stop()
+        self._anim.setStartValue(self.windowOpacity())
+        self._anim.setEndValue(0.0)
+        self._anim.start()
+
+    def _on_anim_finished(self):
+        if self.windowOpacity() == 0.0:
+            self.hide()
+
+    def mousePressEvent(self, event):
+        """点击立即关闭"""
+        self._timer.stop()
+        self._fade_out()
+
+
 class GroupAssetPreviewPopup(QWidget):
     """组合素材悬停预览浮窗"""
     def __init__(self, parent=None):
@@ -4888,8 +4962,9 @@ class LayoutScene(QGraphicsScene):
             # ----------------------------------------
 
             self.stamping_session = {
-                'stamps': [],  
-                'initial_items': all_items_to_process # 现在这里包含了父级及其所有子级
+                'stamps': [],
+                'initial_items': all_items_to_process,
+                'moved': False  # 是否真正拖动过
             }
 
     def mouseReleaseEvent(self, event):
@@ -5838,10 +5913,12 @@ class LayoutScene(QGraphicsScene):
             event.accept()
             return
 
-        # 盖章会话按键拦截：空格盖章，ESC放弃
+        # 盖章会话按键拦截：空格盖章（需要鼠标正在按下拖动中），ESC放弃
         if self.stamping_session:
             if event.key() == Qt.Key.Key_Space:
-                self.stamp_current_selection()
+                # 只有鼠标正在按下时才允许空格盖章，避免普通拖动时误触
+                if QApplication.mouseButtons() & Qt.MouseButton.LeftButton:
+                    self.stamp_current_selection()
                 event.accept()
                 return
             elif event.key() == Qt.Key.Key_Escape:
@@ -6011,30 +6088,38 @@ class LayoutScene(QGraphicsScene):
 
         print(f"已完成对齐，基准对象: {type(ref).__name__}")
 
+    def _top_level_selected(self):
+        """只取顶层选中元素，子级跟着父级移动不需要单独对齐"""
+        all_selected = [item for item in self.selectedItems() if isinstance(item, BaseElement)]
+        selected_set = set(all_selected)
+        return [item for item in all_selected
+                if not isinstance(item.parentItem(), BaseElement) or
+                item.parentItem() not in selected_set]
+
     def align_top(self, items=None):
         if items is None:
-            items = [item for item in self.selectedItems() if isinstance(item, BaseElement)]
+            items = self._top_level_selected()
         if len(items) < 2:
             return
-        self._start_align_reference_mode('top', items, '请在画布中点选一个已选对象作为“顶部对齐”基准，按 ESC 可取消')
-    
+        self._start_align_reference_mode('top', items, '请在画布中点选一个已选对象作为"顶部对齐"基准，按 ESC 可取消')
+
     def align_right(self, items=None):
         if items is None:
-            items = [item for item in self.selectedItems() if isinstance(item, BaseElement)]
+            items = self._top_level_selected()
         if len(items) < 2:
             return
-        self._start_align_reference_mode('right', items, '请在画布中点选一个已选对象作为“右对齐”基准，按 ESC 可取消')
-    
+        self._start_align_reference_mode('right', items, '请在画布中点选一个已选对象作为"右对齐"基准，按 ESC 可取消')
+
     def align_center_horizontal(self, items=None):
         if items is None:
-            items = [item for item in self.selectedItems() if isinstance(item, BaseElement)]
+            items = self._top_level_selected()
         if len(items) < 2:
             return
-        self._start_align_reference_mode('center_h', items, '请在画布中点选一个已选对象作为“水平居中”基准，按 ESC 可取消')
-    
+        self._start_align_reference_mode('center_h', items, '请在画布中点选一个已选对象作为"水平居中"基准，按 ESC 可取消')
+
     def align_center_vertical(self, items=None):
         if items is None:
-            items = [item for item in self.selectedItems() if isinstance(item, BaseElement)]
+            items = self._top_level_selected()
         if len(items) < 2:
             return
         self._start_align_reference_mode('center_v', items, '请在画布中点选一个已选对象作为“垂直居中”基准，按 ESC 可取消')
@@ -6280,10 +6365,13 @@ class LayoutView(QGraphicsView):
         scene.clearSelection()
         items = scene.items(path, self._marquee_mode, Qt.SortOrder.DescendingOrder, self.transform())
 
+        has_connector_in_rect = False
         for item in items:
             if mode == 'images':
                 if isinstance(item, VImageItem) and not getattr(item, 'locked', False):
                     item.setSelected(True)
+                elif isinstance(item, (VImageTextConnector, VGenericConnector)):
+                    has_connector_in_rect = True
             elif mode == 'connected':
                 if isinstance(item, (VImageItem, VTextItem)) and not getattr(item, 'locked', False):
                     cp = getattr(item, 'connection_point', None)
@@ -6292,6 +6380,13 @@ class LayoutView(QGraphicsView):
             else:
                 if item.flags() & QGraphicsItem.GraphicsItemFlag.ItemIsSelectable:
                     item.setSelected(True)
+
+        # 仅图片模式下框选到连线时弹出提示
+        if mode == 'images' and has_connector_in_rect:
+            mw = self._main_window
+            if mw and hasattr(mw, '_toast'):
+                mw._toast.show_message(
+                    "框选范围内有连线未被选中\n当前模式：仅图片\nAlt+M 切换为「全选」模式", "⚠", 4000)
 
     def paintEvent(self, event):
         super().paintEvent(event)
@@ -6487,7 +6582,19 @@ class LayoutView(QGraphicsView):
                 event.accept()
                 return
             
-            # 4. 如果点击的是普通非锁定物体，执行系统默认的选择/拖拽逻辑
+            # 4. 仅图片模式下，点击连线时阻止选中并弹提示
+            if hit_element is None and raw_hit is not None:
+                # raw_hit 可能是连线
+                if isinstance(raw_hit, (VImageTextConnector, VGenericConnector)):
+                    mode = self.scene().config_manager.get('marquee_mode', 'all')
+                    if mode == 'images':
+                        if self._main_window and hasattr(self._main_window, '_toast'):
+                            self._main_window._toast.show_message(
+                                "当前模式：仅图片\n连线无法选中\nAlt+M 切换为「全选」模式", "⚠", 4000)
+                        event.accept()
+                        return
+
+            # 5. 如果点击的是普通非锁定物体，执行系统默认的选择/拖拽逻辑
             super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
@@ -6840,6 +6947,8 @@ class MainWindow(QMainWindow):
         self.scene = LayoutScene(self)
         self.scene.setSceneRect(0, 0, 7054, 5021)
         self.scene.selectionChanged.connect(self.on_selection_changed)
+        self._current_project_path = None  # 当前工程文件路径
+        self._toast = ToastNotification()
         self._last_selected_images = []  # 缓存最后一次选中的图片列表
         self.view = LayoutView(self.scene)
         self.view.set_main_window(self)
@@ -6948,7 +7057,26 @@ class MainWindow(QMainWindow):
             self.tree_widget.setColumnWidth(2, int(s.value("tree_col2_width")))
 
     def closeEvent(self, event):
-        """窗口关闭时停止定时器，保存窗口状态"""
+        """窗口关闭时提示保存，停止定时器，保存窗口状态"""
+        # 检查是否有元素（有内容才提示）
+        has_content = any(
+            isinstance(item, (VImageItem, VTextItem))
+            for item in self.scene.items()
+        )
+        if has_content:
+            reply = QMessageBox.question(
+                self, "保存工程",
+                "是否在关闭前保存当前工程？",
+                QMessageBox.StandardButton.Save |
+                QMessageBox.StandardButton.Discard |
+                QMessageBox.StandardButton.Cancel
+            )
+            if reply == QMessageBox.StandardButton.Save:
+                self.quick_save_proj()
+            elif reply == QMessageBox.StandardButton.Cancel:
+                event.ignore()
+                return
+
         if hasattr(self, 'timer'):
             self.timer.stop()
         self._save_window_state()
@@ -7346,7 +7474,7 @@ class MainWindow(QMainWindow):
         
         new_action = QAction('新建', self)
         new_action.setShortcut('Ctrl+N')
-        new_action.triggered.connect(lambda: self.scene.clear())
+        new_action.triggered.connect(self.new_project)
         file_menu.addAction(new_action)
         
         file_menu.addSeparator()
@@ -7356,10 +7484,15 @@ class MainWindow(QMainWindow):
         open_action.triggered.connect(self.load_proj)
         file_menu.addAction(open_action)
         
-        save_action = QAction('保存工程...', self)
+        save_action = QAction('快速保存', self)
         save_action.setShortcut('Ctrl+S')
-        save_action.triggered.connect(self.save_proj)
+        save_action.triggered.connect(self.quick_save_proj)
         file_menu.addAction(save_action)
+
+        save_as_action = QAction('另存为...', self)
+        save_as_action.setShortcut('Ctrl+Shift+S')
+        save_as_action.triggered.connect(self.save_proj)
+        file_menu.addAction(save_as_action)
         
         file_menu.addSeparator()
         
@@ -7956,7 +8089,15 @@ class MainWindow(QMainWindow):
             elif images and texts:
                 self.status_bar.showMessage("右键=批量连接/对齐  Ctrl+G=保存组合")
             else:
-                self.status_bar.showMessage("")
+                # 检查是否选中了连线，且当前是仅图片模式
+                connectors = [i for i in selected if isinstance(i, (VImageTextConnector, VGenericConnector))]
+                mode = self.scene.config_manager.get('marquee_mode', 'all')
+                if connectors and mode == 'images':
+                    self.status_bar.showMessage("已选中连线 — 当前仅图片模式，Alt+M 切换为全选模式", 5000)
+                elif connectors:
+                    self.status_bar.showMessage("已选中连线，右键可设置粗细或删除  Delete=删除")
+                else:
+                    self.status_bar.showMessage("")
             self._sync_tree_selection_to_scene()
         except (RuntimeError, AttributeError):
             # 处理 C++ 对象已被删除的情况
@@ -8272,13 +8413,46 @@ class MainWindow(QMainWindow):
                 self.scene.set_connection_points_visible(original_show_connection_points)
                 self.scene.set_guides_visible(original_show_guides)
 
+    def new_project(self):
+        """新建工程，提示保存当前工程"""
+        if self.scene.items():
+            reply = QMessageBox.question(
+                self, "新建工程",
+                "当前工程尚未保存，是否先保存？",
+                QMessageBox.StandardButton.Save |
+                QMessageBox.StandardButton.Discard |
+                QMessageBox.StandardButton.Cancel
+            )
+            if reply == QMessageBox.StandardButton.Cancel:
+                return
+            if reply == QMessageBox.StandardButton.Save:
+                self.save_proj()
+        self.scene.clear()
+        self.scene.undo_stack.clear()
+
     def save_proj(self):
-        path, _ = QFileDialog.getSaveFileName(self, "Save Project", "", "VLayout (*.vlayout)")
-        if path: ProjectData.save(self.scene, path)
+        """另存为：弹出对话框选择路径"""
+        path, _ = QFileDialog.getSaveFileName(self, "保存工程", "", "VLayout (*.vlayout)")
+        if path:
+            ProjectData.save(self.scene, path)
+            self._current_project_path = path
+            self.setWindowTitle(f"VertiLayout Pro - {os.path.basename(path)}")
+            self.status_bar.showMessage(f"已保存: {path}", 3000)
+
+    def quick_save_proj(self):
+        """快速保存：直接覆盖当前文件，没有路径时弹对话框"""
+        if self._current_project_path:
+            ProjectData.save(self.scene, self._current_project_path)
+            self.status_bar.showMessage(f"已保存: {self._current_project_path}", 3000)
+        else:
+            self.save_proj()
 
     def load_proj(self):
-        path, _ = QFileDialog.getOpenFileName(self, "Load Project", "", "VLayout (*.vlayout)")
-        if path: ProjectData.load(self.scene, path)
+        path, _ = QFileDialog.getOpenFileName(self, "打开工程", "", "VLayout (*.vlayout)")
+        if path:
+            ProjectData.load(self.scene, path)
+            self._current_project_path = path
+            self.setWindowTitle(f"VertiLayout Pro - {os.path.basename(path)}")
     
     def set_background_image(self):
         """设置默认背景图片"""
