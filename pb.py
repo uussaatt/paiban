@@ -63,6 +63,7 @@ class ConfigManager:
             'insert_image_max_width_ratio': 0.3,  # 插入图片最大宽度（画布宽度的比例）
             'insert_image_default_width': 0,  # 插入图片默认宽度（px），0表示按比例自动
             'insert_image_default_height': 0,  # 插入图片默认高度（px），0表示按宽度比例自动
+            'insert_image_use_custom_size': False,  # 是否使用自定义插入尺寸
             'favorite_fonts': ['SimSun', 'Microsoft YaHei', '黑体', '楷体', 'Arial'],
             'favorite_sizes': [10, 12, 14, 16, 18, 20, 24, 30, 36, 48, 72],
         }
@@ -7860,6 +7861,13 @@ class MainWindow(QMainWindow):
         
     def _calc_insert_size(self, pix, scene):
         """计算插入图片的目标宽高，返回 (width, height)，height=0 表示按比例自动"""
+        use_custom = scene.config_manager.get('insert_image_use_custom_size', False)
+        if not use_custom:
+            # 关闭自定义：按原图大小插入
+            if not pix.isNull():
+                return pix.width(), pix.height()
+            return DEFAULT_FONT_SIZE * 4, 0
+
         fixed_w = scene.config_manager.get('insert_image_default_width', 0)
         fixed_h = scene.config_manager.get('insert_image_default_height', 0)
         if fixed_w and fixed_w > 0:
@@ -8606,6 +8614,7 @@ class MainWindow(QMainWindow):
         """设置插入图片的默认宽高（px）"""
         cur_w = self.scene.config_manager.get('insert_image_default_width', 0)
         cur_h = self.scene.config_manager.get('insert_image_default_height', 0)
+        use_custom = self.scene.config_manager.get('insert_image_use_custom_size', False)
         canvas_w = int(self.scene.sceneRect().width())
         canvas_h = int(self.scene.sceneRect().height())
 
@@ -8613,11 +8622,14 @@ class MainWindow(QMainWindow):
         dialog.setWindowTitle("插入图片默认大小")
         layout = QFormLayout(dialog)
 
+        chk_enable = QCheckBox("开启自定义插入尺寸")
+        chk_enable.setChecked(use_custom)
+        layout.addRow(chk_enable)
+
         spin_w = QSpinBox()
-        spin_w.setRange(0, 20000)
+        spin_w.setRange(1, 20000)
         spin_w.setValue(cur_w if cur_w else canvas_w)
         spin_w.setSuffix(" px")
-        spin_w.setSpecialValueText("自动")
         layout.addRow(f"宽度（画布宽={canvas_w}px）:", spin_w)
 
         spin_h = QSpinBox()
@@ -8627,9 +8639,16 @@ class MainWindow(QMainWindow):
         spin_h.setSpecialValueText("按比例自动")
         layout.addRow(f"高度（画布高={canvas_h}px）:", spin_h)
 
-        hint = QLabel("宽高均设为0则按画布30%自动缩放\n高度设为0则按宽度比例自动计算")
+        hint = QLabel("关闭时按原图大小插入\n高度设为0则按宽度比例自动计算")
         hint.setStyleSheet("color: gray; font-size: 11px;")
         layout.addRow(hint)
+
+        # 联动：未开启时禁用输入框
+        def on_toggle(checked):
+            spin_w.setEnabled(checked)
+            spin_h.setEnabled(checked)
+        chk_enable.toggled.connect(on_toggle)
+        on_toggle(use_custom)
 
         btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         btns.accepted.connect(dialog.accept)
@@ -8637,11 +8656,13 @@ class MainWindow(QMainWindow):
         layout.addRow(btns)
 
         if dialog.exec() == QDialog.DialogCode.Accepted:
+            enabled = chk_enable.isChecked()
             w, h = spin_w.value(), spin_h.value()
+            self.scene.config_manager.set('insert_image_use_custom_size', enabled)
             self.scene.config_manager.set('insert_image_default_width', w)
             self.scene.config_manager.set('insert_image_default_height', h)
-            if w == 0:
-                self.status_bar.showMessage("插入图片大小：自动（画布宽度30%）", 3000)
+            if not enabled:
+                self.status_bar.showMessage("插入图片大小：按原图大小", 3000)
             else:
                 self.status_bar.showMessage(f"插入图片默认大小已设置为 {w} × {h if h else '自动'}px", 3000)
     
