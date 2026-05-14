@@ -59,6 +59,10 @@ class ConfigManager:
             'insert_image_to_bottom': False,  # 插入图片时置于底层
             'nudge_large_step': 10,  # Shift+方向键大步长（像素）
             'smart_brush_radius': 18,  # 智能笔刷默认大小
+            'default_save_dir': '',  # 默认保存目录
+            'insert_image_max_width_ratio': 0.3,  # 插入图片最大宽度（画布宽度的比例）
+            'insert_image_default_width': 0,  # 插入图片默认宽度（px），0表示按比例自动
+            'insert_image_default_height': 0,  # 插入图片默认高度（px），0表示按宽度比例自动
             'favorite_fonts': ['SimSun', 'Microsoft YaHei', '黑体', '楷体', 'Arial'],
             'favorite_sizes': [10, 12, 14, 16, 18, 20, 24, 30, 36, 48, 72],
         }
@@ -3991,24 +3995,32 @@ class ResizeHandle(QGraphicsItem):
 
 class VImageItem(BaseElement):
     """Image Item that fits into columns"""
-    def __init__(self, path, target_width=DEFAULT_FONT_SIZE):
+    def __init__(self, path, target_width=DEFAULT_FONT_SIZE, target_height=0):
         super().__init__()
         self.file_path = path
         self.target_width = target_width
         self.connection_point = None
         self._handles = []
         self._orig_ratio = 1.0
-        self.image_opacity = 1.0  # 图片透明度 0.0-1.0
-        self.locked = False       # 锁定状态
+        self.image_opacity = 1.0
+        self.locked = False
 
         pix = QPixmap(path)
         if not pix.isNull():
             self._orig_ratio = pix.height() / pix.width()
-            target_h = target_width * self._orig_ratio
-            self.p_item = QGraphicsPixmapItem(pix.scaled(
-                int(target_width), int(target_h),
-                Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation))
+            if target_height and target_height > 0:
+                # 强制指定宽高
+                target_h = target_height
+                self.p_item = QGraphicsPixmapItem(pix.scaled(
+                    int(target_width), int(target_h),
+                    Qt.AspectRatioMode.IgnoreAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation))
+            else:
+                target_h = target_width * self._orig_ratio
+                self.p_item = QGraphicsPixmapItem(pix.scaled(
+                    int(target_width), int(target_h),
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation))
             self.p_item.setParentItem(self)
             self._rect = QRectF(0, 0, target_width, target_h)
         else:
@@ -6881,13 +6893,9 @@ class LayoutView(QGraphicsView):
                 if path.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp')):
                     pos = self.mapToScene(event.position().toPoint())
                     pix = QPixmap(path)
-                    if not pix.isNull():
-                        canvas_w = self.scene().sceneRect().width()
-                        max_w = int(canvas_w * 0.3)
-                        target_w = min(pix.width(), max_w)
-                    else:
-                        target_w = DEFAULT_FONT_SIZE * 4
-                    img = VImageItem(path, target_width=target_w)
+                    mw = self.window()
+                    w, h = mw._calc_insert_size(pix, self.scene()) if not pix.isNull() else (DEFAULT_FONT_SIZE * 4, 0)
+                    img = VImageItem(path, target_width=w, target_height=h)
                     img.setPos(pos)
                     if self.scene().config_manager.get('insert_image_to_bottom', False):
                         img.setZValue(-1)
@@ -6919,9 +6927,8 @@ class LayoutView(QGraphicsView):
             pix.save(tmp_path, 'PNG')
 
             pos = self.mapToScene(event.position().toPoint())
-            canvas_w = self.scene().sceneRect().width()
-            max_w = int(canvas_w * 0.3)
-            target_w = min(pix.width(), max_w)
+            mw = self.window()
+            target_w = mw._calc_insert_width(pix, self.scene()) if not pix.isNull() else DEFAULT_FONT_SIZE * 4
             img = VImageItem(tmp_path, target_width=target_w)
             img.setPos(pos)
             if self.scene().config_manager.get('insert_image_to_bottom', False):
@@ -7064,16 +7071,18 @@ class MainWindow(QMainWindow):
             for item in self.scene.items()
         )
         if has_content:
-            reply = QMessageBox.question(
-                self, "保存工程",
-                "是否在关闭前保存当前工程？",
-                QMessageBox.StandardButton.Save |
-                QMessageBox.StandardButton.Discard |
-                QMessageBox.StandardButton.Cancel
-            )
-            if reply == QMessageBox.StandardButton.Save:
+            msg_box = QMessageBox(self)
+            msg_box.setWindowTitle("保存工程")
+            msg_box.setText("是否在关闭前保存当前工程？")
+            btn_save = msg_box.addButton("保存", QMessageBox.ButtonRole.AcceptRole)
+            btn_discard = msg_box.addButton("不保存退出", QMessageBox.ButtonRole.DestructiveRole)
+            btn_cancel = msg_box.addButton("取消", QMessageBox.ButtonRole.RejectRole)
+            msg_box.setDefaultButton(btn_save)
+            msg_box.exec()
+            clicked = msg_box.clickedButton()
+            if clicked == btn_save:
                 self.quick_save_proj()
-            elif reply == QMessageBox.StandardButton.Cancel:
+            elif clicked == btn_cancel:
                 event.ignore()
                 return
 
@@ -7507,6 +7516,14 @@ class MainWindow(QMainWindow):
         set_default_font_action = QAction('设置默认字体...', self)
         set_default_font_action.triggered.connect(self.set_default_font)
         file_menu.addAction(set_default_font_action)
+
+        set_save_dir_action = QAction('设置默认保存目录...', self)
+        set_save_dir_action.triggered.connect(self.set_default_save_dir)
+        file_menu.addAction(set_save_dir_action)
+
+        set_img_size_action = QAction('设置插入图片默认大小...', self)
+        set_img_size_action.triggered.connect(self.set_insert_image_size)
+        file_menu.addAction(set_img_size_action)
         
         # 添加素材菜单
         asset_menu = menubar.addMenu('素材')
@@ -7841,18 +7858,31 @@ class MainWindow(QMainWindow):
         t.setPos(center)
         self.scene.add_item_with_undo(t)
         
+    def _calc_insert_size(self, pix, scene):
+        """计算插入图片的目标宽高，返回 (width, height)，height=0 表示按比例自动"""
+        fixed_w = scene.config_manager.get('insert_image_default_width', 0)
+        fixed_h = scene.config_manager.get('insert_image_default_height', 0)
+        if fixed_w and fixed_w > 0:
+            w = int(fixed_w)
+            h = int(fixed_h) if fixed_h and fixed_h > 0 else 0
+            return w, h
+        # 默认：画布宽度30%，高度按比例
+        ratio = scene.config_manager.get('insert_image_max_width_ratio', 0.3)
+        canvas_w = scene.sceneRect().width()
+        max_w = int(canvas_w * ratio)
+        w = min(pix.width(), max_w) if not pix.isNull() else DEFAULT_FONT_SIZE * 4
+        return w, 0
+
+    def _calc_insert_width(self, pix, scene):
+        w, _ = self._calc_insert_size(pix, scene)
+        return w
+
     def add_image(self):
         path, _ = QFileDialog.getOpenFileName(self, "选择图片", "", "Images (*.png *.jpg *.jpeg *.bmp)")
         if path:
-            # 读取原始尺寸，限制最大宽度为画布宽度的 30%
             pix = QPixmap(path)
-            if not pix.isNull():
-                canvas_w = self.scene.sceneRect().width()
-                max_w = int(canvas_w * 0.3)
-                target_w = min(pix.width(), max_w)
-            else:
-                target_w = DEFAULT_FONT_SIZE * 4
-            img = VImageItem(path, target_width=target_w)
+            w, h = self._calc_insert_size(pix, self.scene) if not pix.isNull() else (DEFAULT_FONT_SIZE * 4, 0)
+            img = VImageItem(path, target_width=w, target_height=h)
             center = self.view.mapToScene(self.view.viewport().rect().center())
             img.setPos(center)
             if self.scene.config_manager.get('insert_image_to_bottom', False):
@@ -8432,10 +8462,13 @@ class MainWindow(QMainWindow):
 
     def save_proj(self):
         """另存为：弹出对话框选择路径"""
-        path, _ = QFileDialog.getSaveFileName(self, "保存工程", "", "VLayout (*.vlayout)")
+        default_dir = self.scene.config_manager.get('default_save_dir', '') or \
+                      (os.path.dirname(self._current_project_path) if self._current_project_path else '')
+        path, _ = QFileDialog.getSaveFileName(self, "保存工程", default_dir, "VLayout (*.vlayout)")
         if path:
             ProjectData.save(self.scene, path)
             self._current_project_path = path
+            self.scene.config_manager.set('default_save_dir', os.path.dirname(path))
             self.setWindowTitle(f"VertiLayout Pro - {os.path.basename(path)}")
             self.status_bar.showMessage(f"已保存: {path}", 3000)
 
@@ -8448,10 +8481,13 @@ class MainWindow(QMainWindow):
             self.save_proj()
 
     def load_proj(self):
-        path, _ = QFileDialog.getOpenFileName(self, "打开工程", "", "VLayout (*.vlayout)")
+        default_dir = self.scene.config_manager.get('default_save_dir', '') or \
+                      (os.path.dirname(self._current_project_path) if self._current_project_path else '')
+        path, _ = QFileDialog.getOpenFileName(self, "打开工程", default_dir, "VLayout (*.vlayout)")
         if path:
             ProjectData.load(self.scene, path)
             self._current_project_path = path
+            self.scene.config_manager.set('default_save_dir', os.path.dirname(path))
             self.setWindowTitle(f"VertiLayout Pro - {os.path.basename(path)}")
     
     def set_background_image(self):
@@ -8557,6 +8593,57 @@ class MainWindow(QMainWindow):
                 f"默认字体已设置为:\n字体: {font.family()}\n大小: {font.pointSize()}px\n\n新添加的文字将使用此字体。"
             )
             print(f"默认字体已设置: {font.family()}, {font.pointSize()}px")
+
+    def set_default_save_dir(self):
+        """设置默认保存目录"""
+        current = self.scene.config_manager.get('default_save_dir', '')
+        path = QFileDialog.getExistingDirectory(self, "选择默认保存目录", current)
+        if path:
+            self.scene.config_manager.set('default_save_dir', path)
+            self.status_bar.showMessage(f"默认保存目录已设置为: {path}", 3000)
+
+    def set_insert_image_size(self):
+        """设置插入图片的默认宽高（px）"""
+        cur_w = self.scene.config_manager.get('insert_image_default_width', 0)
+        cur_h = self.scene.config_manager.get('insert_image_default_height', 0)
+        canvas_w = int(self.scene.sceneRect().width())
+        canvas_h = int(self.scene.sceneRect().height())
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("插入图片默认大小")
+        layout = QFormLayout(dialog)
+
+        spin_w = QSpinBox()
+        spin_w.setRange(0, 20000)
+        spin_w.setValue(cur_w if cur_w else canvas_w)
+        spin_w.setSuffix(" px")
+        spin_w.setSpecialValueText("自动")
+        layout.addRow(f"宽度（画布宽={canvas_w}px）:", spin_w)
+
+        spin_h = QSpinBox()
+        spin_h.setRange(0, 20000)
+        spin_h.setValue(cur_h if cur_h else canvas_h)
+        spin_h.setSuffix(" px")
+        spin_h.setSpecialValueText("按比例自动")
+        layout.addRow(f"高度（画布高={canvas_h}px）:", spin_h)
+
+        hint = QLabel("宽高均设为0则按画布30%自动缩放\n高度设为0则按宽度比例自动计算")
+        hint.setStyleSheet("color: gray; font-size: 11px;")
+        layout.addRow(hint)
+
+        btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        btns.accepted.connect(dialog.accept)
+        btns.rejected.connect(dialog.reject)
+        layout.addRow(btns)
+
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            w, h = spin_w.value(), spin_h.value()
+            self.scene.config_manager.set('insert_image_default_width', w)
+            self.scene.config_manager.set('insert_image_default_height', h)
+            if w == 0:
+                self.status_bar.showMessage("插入图片大小：自动（画布宽度30%）", 3000)
+            else:
+                self.status_bar.showMessage(f"插入图片默认大小已设置为 {w} × {h if h else '自动'}px", 3000)
     
     def apply_fluent_design_style(self):
         """应用Fluent Design风格样式"""
