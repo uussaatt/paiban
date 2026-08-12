@@ -4,6 +4,7 @@ import json
 import math
 import copy
 import os
+from xml.sax.saxutils import escape as xml_escape
 from PyQt6.QtWidgets import *
 from PyQt6.QtCore import *
 from PyQt6.QtGui import *
@@ -14,6 +15,7 @@ DEFAULT_FONT = "SimSun"
 DEFAULT_FONT_SIZE = 24
 COLUMN_SPACING = 10
 LINE_HEIGHT_RATIO = 1.2
+CORELDRAW_EXPORT_DPI = 600  # Scene pixels to millimeters for CorelDRAW SVG export.
 ASSETS_DIR = "assets"  # 素材库目录
 DEFAULT_LINE_WIDTH = 3  # 默认连接线粗细（像素）
 CONFIG_FILE = "config.json"  # 配置文件
@@ -588,7 +590,7 @@ class FontPickerDialog(QDialog):
         self.size_spin = QSpinBox()
         self.size_spin.setRange(4, 400)
         self.size_spin.setValue(self._selected_size)
-        self.size_spin.setSuffix(" px")
+        self.size_spin.setSuffix(" pt")
         self.size_spin.setFixedWidth(80)
         self.size_spin.valueChanged.connect(self._on_size_spin_changed)
         size_ctrl_row.addWidget(self.size_spin)
@@ -777,7 +779,9 @@ class FontPickerDialog(QDialog):
 
     # ── 结果获取 ──────────────────────────────────────────────────────────────
     def selected_font(self) -> QFont:
-        return QFont(self._selected_family, self._selected_size)
+        f = QFont(self._selected_family)
+        f.setPointSize(self._selected_size)
+        return f
 
     @staticmethod
     def get_font(current_font: QFont, config_manager, parent=None, title="选择字体"):
@@ -2904,29 +2908,37 @@ class BaseElement(QGraphicsItem):
 
     def paint(self, painter, option, widget):
         if self.isSelected():
-            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
             rect = self.boundingRect()
-            outer_width = 4
-            inner_width = 2
-            dash_pattern = [5, 3]
 
-            painter.setBrush(QBrush(QColor(0, 120, 215, 28)))
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.drawRect(rect)
-
-            outer_pen = QPen(QColor(255, 255, 255, 235), outer_width, Qt.PenStyle.SolidLine)
-            outer_pen.setCosmetic(True)
-            outer_pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
-            painter.setPen(outer_pen)
+            # ── CDR 风格：无填充背景，1px 蓝色虚线外框 ──────────────────
+            dash_pen = QPen(QColor(0, 120, 215, 220), 1, Qt.PenStyle.DashLine)
+            dash_pen.setCosmetic(True)
+            dash_pen.setDashPattern([4, 3])
+            painter.setPen(dash_pen)
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawRect(rect)
 
-            inner_pen = QPen(QColor(255, 140, 0, 255), inner_width, Qt.PenStyle.SolidLine)
-            inner_pen.setCosmetic(True)
-            inner_pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
-            painter.setPen(inner_pen)
-            painter.drawRect(rect)
+            # ── 四角白色锚点节点（4×4px，Cosmetic） ─────────────────────
+            node_pen = QPen(QColor(0, 100, 200), 1)
+            node_pen.setCosmetic(True)
+            node_brush = QBrush(QColor(255, 255, 255))
+            painter.setPen(node_pen)
+            painter.setBrush(node_brush)
+            # 节点尺寸在场景坐标中对应屏幕 4px
+            if self.scene() and self.scene().views():
+                scale = self.scene().views()[0].transform().m11()
+                ns = 4.0 / scale if scale > 0 else 4.0
+            else:
+                ns = 4.0
+            hs = ns / 2
+            for cx, cy in [
+                (rect.left(),  rect.top()),
+                (rect.right(), rect.top()),
+                (rect.left(),  rect.bottom()),
+                (rect.right(), rect.bottom()),
+            ]:
+                painter.drawRect(QRectF(cx - hs, cy - hs, ns, ns))
     
     def toggle_connection_point(self):
         """切换连接点的可见性"""
@@ -2940,7 +2952,13 @@ class BaseElement(QGraphicsItem):
                 print(f"{element_type}连接点已显示")
 
 class InlineTextEditor(QTextEdit):
-    """原位内联编辑器：透明覆盖层，只负责接收键盘输入，视觉由 VTextItem.paint 负责"""
+    """原位内联编辑器：透明覆盖层，只负责接收键盘输入，视觉由 VTextItem.paint 负责。
+    
+    重构亮点：
+    1. inputMethodQuery 重写，强制 IME 候选框对齐到当前竖排光标的物理位置
+    2. cursorPositionChanged 实时通知 VTextItem 重绘，消除光标滞后感
+    3. 完全透明，零视觉干扰，所有绘制权交给 VTextItem.paint
+    """
     editingFinished = pyqtSignal(str)
     editingCancelled = pyqtSignal()
 
@@ -2950,7 +2968,7 @@ class InlineTextEditor(QTextEdit):
         self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
-        # 完全透明，无边框——视觉效果由 VTextItem 自己画，但光标需要可见
+        # 完全透明，无边框——视觉效果由 VTextItem 自己画
         self.setStyleSheet("""
             QTextEdit {
                 background: transparent;
@@ -2971,12 +2989,69 @@ class InlineTextEditor(QTextEdit):
         self.text_item = None
         # 每次文字变化时通知 VTextItem 实时预览
         self.textChanged.connect(self._on_text_changed)
+        # 光标移动时也要立即重绘（任务一：消除选区/光标滞后）
+        self.cursorPositionChanged.connect(self._on_cursor_moved)
 
     def _on_text_changed(self):
         if self.text_item and self.text_item.is_editing:
             self.text_item._editing_text = self.toPlainText()
             self.text_item._update_editing_rect()
             self.text_item.update()
+
+    def _on_cursor_moved(self):
+        """光标移动/选区变化时立即触发 VTextItem 重绘，消除卡顿感"""
+        if self.text_item and self.text_item.is_editing:
+            self.text_item.update()
+
+    # ── 任务二：IME 候选框物理对齐 ─────────────────────────────────────────
+    def inputMethodQuery(self, query):
+        """重写输入法查询，将光标物理矩形返回给输入法，使候选框贴准当前字符位置。"""
+        if query == Qt.InputMethodQuery.ImCursorRectangle and self.text_item and self.text_item.is_editing:
+            try:
+                rect = self._get_cursor_rect_in_viewport()
+                if rect is not None:
+                    return rect
+            except Exception:
+                pass
+        return super().inputMethodQuery(query)
+
+    def _get_cursor_rect_in_viewport(self):
+        """计算当前光标在视图坐标系中的物理矩形，供 IME 精确定位候选框。"""
+        text_item = self.text_item
+        if not text_item or not text_item.scene():
+            return None
+        views = text_item.scene().views()
+        if not views:
+            return None
+        view = views[0]
+
+        text = self.toPlainText()
+        cursor_pos = self.textCursor().position()
+        positions, _, main_fm, char_h, col_step = text_item._editing_layout(text)
+
+        # 找到当前光标对应的位置记录
+        cur_entry = None
+        for entry in positions:
+            if entry['index'] == cursor_pos:
+                cur_entry = entry
+                break
+        if cur_entry is None and positions:
+            cur_entry = positions[-1]
+        if cur_entry is None:
+            return None
+
+        # 光标位于该字符的顶端横线处（竖排）
+        item_x = cur_entry['rect'].left()
+        item_y = cur_entry['cursor_y']
+        item_w = col_step
+        item_h = char_h
+
+        # 将 item 本地坐标 → 场景坐标 → 视图坐标
+        scene_pt_tl = text_item.mapToScene(QPointF(item_x, item_y))
+        scene_pt_br = text_item.mapToScene(QPointF(item_x + item_w, item_y + item_h))
+        view_tl = view.mapFromScene(scene_pt_tl)
+        view_br = view.mapFromScene(scene_pt_br)
+        return QRect(view_tl, view_br)
 
     def insert_text_at_cursor(self, text):
         cursor = self.textCursor()
@@ -2988,7 +3063,8 @@ class InlineTextEditor(QTextEdit):
         self.original_text = text
 
         # 设置字体（与竖排渲染一致，影响光标高度）
-        font = QFont(text_item.font_family, text_item.font_size)
+        font = QFont(text_item.font_family)
+        font.setPointSize(text_item.font_size)
         self.setFont(font)
 
         self.blockSignals(True)
@@ -2997,9 +3073,9 @@ class InlineTextEditor(QTextEdit):
 
         # QTextEdit 只负责接收输入，视觉光标由 VTextItem.paint 自绘
         palette = self.palette()
-        palette.setColor(QPalette.ColorRole.Text, QColor(0, 0, 0, 0))       # 文字透明（由VTextItem画）
-        palette.setColor(QPalette.ColorRole.Base, QColor(0, 0, 0, 0))       # 背景透明
-        palette.setColor(QPalette.ColorRole.Window, QColor(0, 0, 0, 0))     # 窗口透明
+        palette.setColor(QPalette.ColorRole.Text, QColor(0, 0, 0, 0))
+        palette.setColor(QPalette.ColorRole.Base, QColor(0, 0, 0, 0))
+        palette.setColor(QPalette.ColorRole.Window, QColor(0, 0, 0, 0))
         self.setPalette(palette)
         self.setCursorWidth(0)
 
@@ -3045,7 +3121,7 @@ class InlineTextEditor(QTextEdit):
             super().keyPressEvent(event)
 
     def _handle_vertical_arrow(self, event):
-        """竖排方向键：上下=同列上下移动，左=移到右边列，右=移到左边列"""
+        """竖排方向键：上下=同列上下移动，左=移到左边列（col_idx更大），右=移到右边列（col_idx更小）"""
         if not self.text_item:
             return
         text = self.toPlainText()
@@ -3053,7 +3129,7 @@ class InlineTextEditor(QTextEdit):
         pos = cursor.position()
         positions, _, _, char_h, col_step = self.text_item._editing_layout(text)
 
-        # 找到当前光标对应的位置信息
+        # 找到当前光标对应的位置信息（优先精确匹配 index，退而求其次用末尾）
         cur_item = next((p for p in positions if p['index'] == pos), None)
         if cur_item is None and positions:
             cur_item = positions[-1]
@@ -3062,29 +3138,26 @@ class InlineTextEditor(QTextEdit):
         new_pos = pos
 
         if key == Qt.Key.Key_Up:
-            # 同列上移：找同列中 cursor_y 最近的上一个字符
             same_col = [p for p in positions if p['col_idx'] == cur_item['col_idx'] and p['index'] < pos]
             if same_col:
                 new_pos = same_col[-1]['index']
 
         elif key == Qt.Key.Key_Down:
-            # 同列下移：找同列中 cursor_y 最近的下一个字符
             same_col = [p for p in positions if p['col_idx'] == cur_item['col_idx'] and p['index'] > pos]
             if same_col:
                 new_pos = same_col[0]['index']
 
         elif key == Qt.Key.Key_Left:
-            # 竖排从右到左，Left = 移到左边列（col_idx 更大）
+            # 竖排从右到左：Left = 移到左边列（col_idx 更大的列）
             next_col = cur_item['col_idx'] + 1
             next_col_items = [p for p in positions if p['col_idx'] == next_col]
             if next_col_items:
-                # 找同列中 y 最接近的字符
                 target_y = cur_item['cursor_y']
                 closest = min(next_col_items, key=lambda p: abs(p['cursor_y'] - target_y))
                 new_pos = closest['index']
 
         elif key == Qt.Key.Key_Right:
-            # 竖排从右到左，Right = 移到右边列（col_idx 更小）
+            # 竖排从右到左：Right = 移到右边列（col_idx 更小的列）
             prev_col = cur_item['col_idx'] - 1
             if prev_col >= 0:
                 prev_col_items = [p for p in positions if p['col_idx'] == prev_col]
@@ -3153,8 +3226,10 @@ class VTextItem(BaseElement):
                 else: child.setParentItem(None)
             
         # 2. 准备基础字体
-        main_font = QFont(self.font_family, self.font_size)
-        small_font = QFont(self.font_family, int(self.font_size * 0.5))
+        main_font = QFont(self.font_family)
+        main_font.setPointSize(self.font_size)
+        small_font = QFont(self.font_family)
+        small_font.setPointSize(max(1, int(self.font_size * 0.5)))
         
         main_fm = QFontMetrics(main_font)
         small_fm = QFontMetrics(small_font)
@@ -3417,7 +3492,8 @@ class VTextItem(BaseElement):
             if self.scene(): self.scene().start_binding_mode(self)
 
     def change_font_settings(self):
-        current_font = QFont(self.font_family, self.font_size)
+        current_font = QFont(self.font_family)
+        current_font.setPointSize(self.font_size)
         cfg = self.scene().config_manager if self.scene() else None
         font, ok = FontPickerDialog.get_font(current_font, cfg, None, "选择字体")
         if ok:
@@ -3493,15 +3569,17 @@ class VTextItem(BaseElement):
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
-        """编辑状态下拖拽选中文字"""
+        """编辑状态下拖拽选中文字（任务一：实时同步选区，零卡顿）"""
         if self.is_editing and event.buttons() & Qt.MouseButton.LeftButton:
             pos = self._cursor_position_from_point(event.pos())
             if self.inline_editor and self._drag_select_start is not None:
                 cursor = self.inline_editor.textCursor()
+                # anchor 固定在拖拽起点，position 跟随鼠标实时更新
                 cursor.setPosition(self._drag_select_start)
                 cursor.setPosition(pos, QTextCursor.MoveMode.KeepAnchor)
                 self.inline_editor.setTextCursor(cursor)
-            self.update()
+                # 立即重绘，选区蓝块跟手
+                self.update()
             event.accept()
             return
         super().mouseMoveEvent(event)
@@ -3526,13 +3604,18 @@ class VTextItem(BaseElement):
         self._editing_scene_y = scene_rect.top()
         self._editing_origin_scene_pos = self.scenePos()  # 记录进入编辑时的原始场景位置
         self._cursor_visible = True
+        self._cursor_opacity = 1.0   # 任务三：用于平滑淡入淡出的透明度值
         self._drag_select_start = None  # 拖拽选择起始位置
 
-        # 启动光标闪烁定时器
+        # 任务三：与系统光标同步的 500ms 闪烁定时器
         if not hasattr(self, '_cursor_timer'):
             self._cursor_timer = QTimer()
             self._cursor_timer.timeout.connect(self._blink_cursor)
-        self._cursor_timer.start(500)
+        # 从系统设置读取闪烁间隔（fallback 500ms）
+        blink_rate = QApplication.cursorFlashTime() // 2
+        if blink_rate <= 0:
+            blink_rate = 500
+        self._cursor_timer.start(blink_rate)
 
         # 隐藏子字符，编辑期间由 paint 直接绘制预览
         for child in self.childItems():
@@ -3661,13 +3744,14 @@ class VTextItem(BaseElement):
             super().keyPressEvent(event)
 
     def _blink_cursor(self):
-        """光标闪烁"""
+        """光标闪烁（任务三：平滑切换，与系统节奏同步）"""
         self._cursor_visible = not getattr(self, '_cursor_visible', True)
         self.update()
 
     def _editing_layout(self, text):
         """返回竖排编辑预览的字符位置，供绘制光标和双击定位复用"""
-        main_font = QFont(self.font_family, self.font_size)
+        main_font = QFont(self.font_family)
+        main_font.setPointSize(self.font_size)
         main_fm = QFontMetrics(main_font)
         char_h = main_fm.height()
         col_step = self.font_size + self.column_spacing
@@ -3725,29 +3809,58 @@ class VTextItem(BaseElement):
         return positions, main_font, main_fm, char_h, col_step
 
     def _cursor_position_from_point(self, point):
-        """把双击位置换算成 QTextEdit 的字符索引，便于原地继续编辑"""
+        """把点击位置精确换算成字符索引（任务一重构）。
+        
+        竖排逻辑：
+        - 遍历每个字符的精确物理矩形（QRectF）
+        - 落在矩形内：上半 → 置于字符前，下半 → 置于字符后
+        - 落在矩形外：按列+Y方向的综合距离找最近字符
+        """
         text = self._editing_text if self.is_editing else self.full_text
         positions, _, _, char_h, _ = self._editing_layout(text)
         if not positions:
             return 0
 
+        px, py = point.x(), point.y()
+
+        # ── 第一优先级：点落在某字符矩形内部，精确判断上下半区 ──────────
+        for entry in positions:
+            rect = entry['rect']
+            # 稍微扩展判定区域，避免列间隙漏判
+            hit_rect = rect.adjusted(-1, 0, 1, 0)
+            if hit_rect.contains(QPointF(px, py)):
+                mid_y = rect.top() + rect.height() * 0.5
+                if py <= mid_y:
+                    # 点在字符上半部 → 光标置于字符之前
+                    return entry['index']
+                else:
+                    # 点在字符下半部 → 光标置于字符之后
+                    idx = entry['index']
+                    # 末尾哨兵（index == len(text)）不能 +1
+                    return idx + 1 if idx < len(text) else idx
+
+        # ── 第二优先级：落在字符矩形外，找综合距离最近的字符 ─────────────
+        # 竖排优先按列（X轴）判断所属列，再在列内按Y查找最近行
         best_index = len(text)
-        best_score = float('inf')
-        for item in positions:
-            rect = item['rect']
-            center = rect.center()
-            dx = abs(point.x() - center.x())
-            dy = abs(point.y() - center.y())
-            score = dx * 2.0 + dy
-            if rect.adjusted(-4, -char_h * 0.4, 4, char_h * 0.4).contains(point):
-                if point.y() > rect.center().y() and item['index'] < len(text):
-                    return item['index'] + 1
-                return item['index']
-            if score < best_score:
-                best_score = score
-                best_index = item['index']
-                if point.y() > center.y() and best_index < len(text):
-                    best_index += 1
+        best_dist = float('inf')
+
+        for entry in positions:
+            rect = entry['rect']
+            # 计算点到矩形的切比雪夫距离（列宽方向权重更大，优先归属到正确列）
+            cx = max(rect.left(), min(px, rect.right()))
+            cy = max(rect.top(), min(py, rect.bottom()))
+            dx = abs(px - cx) * 1.8   # X 方向加权，优先列归属
+            dy = abs(py - cy)
+            dist = dx + dy
+            if dist < best_dist:
+                best_dist = dist
+                mid_y = rect.top() + rect.height() * 0.5
+                idx = entry['index']
+                if py > mid_y and idx < len(text):
+                    best_index = idx + 1
+                else:
+                    best_index = idx
+
         return max(0, min(best_index, len(text)))
 
     def _update_editing_rect(self):
@@ -3782,77 +3895,84 @@ class VTextItem(BaseElement):
             self.inline_editor.setGeometry(view_rect)
 
     def paint(self, painter, option, widget):
-        """编辑状态下绘制原位文字层预览，非编辑状态走父类选中框逻辑"""
+        """编辑状态下绘制原位文字层预览：真·所见即所得（透明背景 + 原色文字 + 半透明选区）"""
         if self.is_editing:
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
             preview_text = self._editing_text if self._editing_text != "" or self.full_text == "" else self.full_text
             positions, main_font, main_fm, char_h, col_step = self._editing_layout(preview_text)
 
-            # 黑色背景块
-            painter.fillRect(self._rect, QColor(0, 0, 0))
-
-            painter.setFont(main_font)
-            painter.setPen(QColor(255, 255, 255))  # 白色文字
-
+            # ── 背景完全透明，不绘制任何底色 ─────────────────────────────
             right_edge = self._rect.right() - 2
 
-            # 获取选区范围
+            # ── 获取光标和选区信息 ─────────────────────────────────────────
             sel_start, sel_end = -1, -1
+            cursor_char_pos = -1
             if self.inline_editor and self.inline_editor.isVisible():
                 tc = self.inline_editor.textCursor()
+                cursor_char_pos = tc.position()
                 if tc.hasSelection():
                     sel_start = tc.selectionStart()
                     sel_end = tc.selectionEnd()
 
-            # 获取光标位置
-            cursor_char_pos = -1
-            if self.inline_editor and self.inline_editor.isVisible():
-                cursor_char_pos = self.inline_editor.textCursor().position()
-
-            # 先按列分组选中字符，计算每列的完整蓝色背景矩形
-            if sel_start >= 0:
-                col_sel = {}  # col_idx -> (min_y, max_y)
-                for item in positions:
-                    if item['char'] == '\n' or item['index'] >= len(preview_text):
+            # ── 第一层：半透明蓝色选区（绘制在文字下方） ─────────────────
+            if sel_start >= 0 and sel_end > sel_start:
+                col_sel = {}
+                for entry in positions:
+                    if entry['char'] == '\n' or entry['index'] >= len(preview_text):
                         continue
-                    if sel_start <= item['index'] < sel_end:
-                        cidx = item['col_idx']
-                        top = item['cursor_y']
-                        bot = item['cursor_y'] + char_h
+                    if sel_start <= entry['index'] < sel_end:
+                        cidx = entry['col_idx']
+                        top = entry['cursor_y']
+                        bot = entry['cursor_y'] + char_h
                         if cidx not in col_sel:
                             col_sel[cidx] = (top, bot)
                         else:
-                            col_sel[cidx] = (min(col_sel[cidx][0], top), max(col_sel[cidx][1], bot))
-                # 按列绘制蓝色背景
+                            col_sel[cidx] = (min(col_sel[cidx][0], top),
+                                             max(col_sel[cidx][1], bot))
                 for cidx, (top, bot) in col_sel.items():
                     col_x = right_edge - (cidx + 1) * col_step
-                    painter.fillRect(QRectF(col_x, top, col_step, bot - top), QColor(0, 120, 215))
+                    # alpha=70：半透明，文字颜色在选区上仍清晰可读
+                    painter.fillRect(QRectF(col_x, top, col_step, bot - top),
+                                     QColor(0, 120, 215, 70))
 
-            # 绘制所有字符
-            for item in positions:
-                if item['index'] >= len(preview_text) or item['char'] == '\n':
+            # ── 第二层：用原始文字颜色绘制字符 ───────────────────────────
+            painter.setFont(main_font)
+            painter.setPen(self.text_color)
+            for entry in positions:
+                if entry['index'] >= len(preview_text) or entry['char'] == '\n':
                     continue
-                painter.setPen(QColor(255, 255, 255))
                 painter.drawText(
-                    QPointF(item['x'], item['cursor_y'] + char_h - main_fm.descent()),
-                    item['char']
+                    QPointF(entry['x'],
+                            entry['cursor_y'] + char_h - main_fm.descent()),
+                    entry['char']
                 )
 
-            # 绘制光标（白色横线）
+            # ── 第三层：I-Beam 光标，颜色跟随 self.text_color ─────────────
             if cursor_char_pos >= 0 and self.inline_editor:
-                show_cursor = True
-                if hasattr(self, '_cursor_visible'):
-                    show_cursor = self._cursor_visible
+                show_cursor = getattr(self, '_cursor_visible', True)
                 if show_cursor and cursor_char_pos < len(positions):
-                    cursor_item = positions[cursor_char_pos]
-                    cy = cursor_item['cursor_y']
-                    cidx = cursor_item['col_idx']
-                    col_x_left = right_edge - (cidx + 1) * col_step
+                    entry = positions[cursor_char_pos]
+                    cy   = entry['cursor_y']
+                    cidx = entry['col_idx']
+                    col_x_left  = right_edge - (cidx + 1) * col_step
                     col_x_right = col_x_left + col_step
-                    cursor_pen = QPen(QColor(255, 255, 255), 2)
-                    cursor_pen.setCosmetic(True)
-                    painter.setPen(cursor_pen)
-                    painter.drawLine(QPointF(col_x_left + 2, cy), QPointF(col_x_right - 2, cy))
+                    lx0 = col_x_left  + 2
+                    lx1 = col_x_right - 2
+
+                    beam_color = QColor(self.text_color)   # 与文字颜色一致
+                    pen_main = QPen(beam_color, 2)
+                    pen_main.setCosmetic(True)
+                    painter.setPen(pen_main)
+                    painter.drawLine(QPointF(lx0, cy), QPointF(lx1, cy))
+
+                    serif_h = 4
+                    pen_serif = QPen(beam_color, 1.5)
+                    pen_serif.setCosmetic(True)
+                    painter.setPen(pen_serif)
+                    painter.drawLine(QPointF(lx0, cy - serif_h * 0.5),
+                                     QPointF(lx0, cy + serif_h * 0.5))
+                    painter.drawLine(QPointF(lx1, cy - serif_h * 0.5),
+                                     QPointF(lx1, cy + serif_h * 0.5))
         else:
             for child in self.childItems():
                 if isinstance(child, QGraphicsSimpleTextItem):
@@ -4282,6 +4402,209 @@ class VImageItem(BaseElement):
 
     def boundingRect(self):
         return self._rect
+
+
+class CorelSvgExporter:
+    """Write editable SVG from scene objects instead of rendering a flat snapshot."""
+
+    @staticmethod
+    def export(scene, filepath):
+        content_rect = CorelSvgExporter._content_rect(scene)
+        if content_rect.isEmpty():
+            raise ValueError("No visible content to export.")
+
+        scene_rect = scene.sceneRect()
+        if scene_rect.isValid() and not scene_rect.isEmpty():
+            view = scene_rect.united(content_rect)
+        else:
+            margin = 10
+            view = content_rect.adjusted(-margin, -margin, margin, margin)
+        lines = [
+            '<?xml version="1.0" encoding="UTF-8"?>',
+            (
+                '<svg xmlns="http://www.w3.org/2000/svg" '
+                'xmlns:xlink="http://www.w3.org/1999/xlink" version="1.1" '
+                f'width="{CorelSvgExporter._num(CorelSvgExporter._px_to_mm(view.width()))}mm" '
+                f'height="{CorelSvgExporter._num(CorelSvgExporter._px_to_mm(view.height()))}mm" '
+                f'viewBox="0 0 {CorelSvgExporter._num(view.width())} {CorelSvgExporter._num(view.height())}">'
+            ),
+            '<rect x="0" y="0" width="100%" height="100%" fill="#ffffff"/>',
+        ]
+
+        items = [i for i in scene.items() if CorelSvgExporter._is_export_item(i)]
+        items.sort(key=lambda i: i.zValue())
+        exported_connectors = set()
+
+        export_dir = os.path.splitext(filepath)[0] + "_assets"
+
+        for item in items:
+            if isinstance(item, VImageItem):
+                lines.extend(CorelSvgExporter._image_to_svg(item, view.topLeft(), export_dir, filepath))
+            elif isinstance(item, VTextItem):
+                lines.extend(CorelSvgExporter._text_to_svg(item, view.topLeft()))
+            elif isinstance(item, (VConnector, VImageTextConnector, VGenericConnector)):
+                if id(item) not in exported_connectors:
+                    path_line = CorelSvgExporter._connector_to_svg(item, view.topLeft())
+                    if path_line:
+                        lines.append(path_line)
+                    exported_connectors.add(id(item))
+
+        lines.append('</svg>')
+
+        with open(filepath, 'w', encoding='utf-8') as f:
+            f.write('\n'.join(lines))
+
+    @staticmethod
+    def _is_export_item(item):
+        if isinstance(item, (VTextItem, VImageItem)):
+            return item.isVisible()
+        if isinstance(item, (VConnector, VImageTextConnector, VGenericConnector)):
+            return item.isVisible() and not item.path().isEmpty()
+        return False
+
+    @staticmethod
+    def _content_rect(scene):
+        rect = QRectF()
+        for item in scene.items():
+            if not CorelSvgExporter._is_export_item(item):
+                continue
+            item_rect = item.mapRectToScene(item.boundingRect())
+            rect = item_rect if rect.isNull() else rect.united(item_rect)
+        return rect
+
+    @staticmethod
+    def _image_to_svg(item, offset, export_dir, svg_path):
+        path = item.file_path
+        if not os.path.isabs(path):
+            path = os.path.abspath(path)
+
+        href = path.replace('\\', '/')
+        try:
+            if not os.path.exists(export_dir):
+                os.makedirs(export_dir)
+            pix = QPixmap(path)
+            if not pix.isNull():
+                safe_name = f"image_{abs(hash((path, item.scenePos().x(), item.scenePos().y())))}.png"
+                out_path = os.path.join(export_dir, safe_name)
+                pix.save(out_path, "PNG")
+                href = os.path.relpath(out_path, os.path.dirname(svg_path)).replace('\\', '/')
+        except Exception:
+            href = path.replace('\\', '/')
+
+        rect = item.mapRectToScene(item.boundingRect())
+        x = rect.left() - offset.x()
+        y = rect.top() - offset.y()
+        opacity = getattr(item, 'image_opacity', 1.0)
+        attrs = [
+            f'x="{CorelSvgExporter._num(x)}"',
+            f'y="{CorelSvgExporter._num(y)}"',
+            f'width="{CorelSvgExporter._num(rect.width())}"',
+            f'height="{CorelSvgExporter._num(rect.height())}"',
+            'preserveAspectRatio="none"',
+            f'href="{CorelSvgExporter._attr(href)}"',
+            f'xlink:href="{CorelSvgExporter._attr(href)}"',
+        ]
+        if opacity < 1.0:
+            attrs.append(f'opacity="{CorelSvgExporter._num(opacity)}"')
+        return [f'<image {" ".join(attrs)}/>']
+
+    @staticmethod
+    def _text_to_svg(item, offset):
+        lines = []
+        children = [
+            child for child in item.childItems()
+            if isinstance(child, QGraphicsSimpleTextItem) and child.isVisible()
+        ]
+        children.sort(key=lambda c: (c.pos().x(), c.pos().y()))
+
+        lines.append('<g id="editable-text">')
+        for child in children:
+            text = child.text()
+            if not text:
+                continue
+            glyph_path = QPainterPath()
+            glyph_path.addText(QPointF(0, 0), child.font(), text)
+            transform = child.sceneTransform()
+            transform.translate(-offset.x(), -offset.y())
+            glyph_path = transform.map(glyph_path)
+            d = CorelSvgExporter._path_data(glyph_path, QPointF(0, 0))
+            if not d:
+                continue
+            fill = child.brush().color().name()
+            lines.append(
+                f'<path d="{CorelSvgExporter._attr(d)}" '
+                f'fill="{CorelSvgExporter._attr(fill)}" stroke="none"/>'
+            )
+        lines.append('</g>')
+        return lines
+
+    @staticmethod
+    def _connector_to_svg(item, offset):
+        path = item.path()
+        d = CorelSvgExporter._path_data(path, offset)
+        if not d:
+            return ''
+        pen = item.pen()
+        color = pen.color()
+        opacity = color.alphaF()
+        attrs = [
+            f'd="{CorelSvgExporter._attr(d)}"',
+            'fill="none"',
+            f'stroke="{CorelSvgExporter._attr(color.name())}"',
+            f'stroke-width="{CorelSvgExporter._num(pen.widthF() or pen.width() or 1)}"',
+            'stroke-linecap="round"',
+            'stroke-linejoin="round"',
+        ]
+        if opacity < 1.0:
+            attrs.append(f'stroke-opacity="{CorelSvgExporter._num(opacity)}"')
+        if pen.style() == Qt.PenStyle.DashLine:
+            attrs.append('stroke-dasharray="8 5"')
+        return f'<path {" ".join(attrs)}/>'
+
+    @staticmethod
+    def _path_data(path, offset):
+        data = []
+        i = 0
+        while i < path.elementCount():
+            e = path.elementAt(i)
+            x = e.x - offset.x()
+            y = e.y - offset.y()
+            if e.type == QPainterPath.ElementType.MoveToElement:
+                data.append(f'M {CorelSvgExporter._num(x)} {CorelSvgExporter._num(y)}')
+            elif e.type == QPainterPath.ElementType.LineToElement:
+                data.append(f'L {CorelSvgExporter._num(x)} {CorelSvgExporter._num(y)}')
+            elif e.type == QPainterPath.ElementType.CurveToElement and i + 2 < path.elementCount():
+                c1 = e
+                c2 = path.elementAt(i + 1)
+                end = path.elementAt(i + 2)
+                data.append(
+                    'C '
+                    f'{CorelSvgExporter._num(c1.x - offset.x())} {CorelSvgExporter._num(c1.y - offset.y())} '
+                    f'{CorelSvgExporter._num(c2.x - offset.x())} {CorelSvgExporter._num(c2.y - offset.y())} '
+                    f'{CorelSvgExporter._num(end.x - offset.x())} {CorelSvgExporter._num(end.y - offset.y())}'
+                )
+                i += 2
+            i += 1
+        return ' '.join(data)
+
+    @staticmethod
+    def _num(value):
+        value = float(value)
+        if abs(value) < 0.0001:
+            value = 0.0
+        return f'{value:.3f}'.rstrip('0').rstrip('.')
+
+    @staticmethod
+    def _px_to_mm(value):
+        return float(value) * 25.4 / CORELDRAW_EXPORT_DPI
+
+    @staticmethod
+    def _attr(value):
+        return xml_escape(str(value), {'"': '&quot;'})
+
+    @staticmethod
+    def _text(value):
+        return xml_escape(str(value))
 
 # --- Canvas & Scene ---
 
@@ -7130,7 +7453,7 @@ class MainWindow(QMainWindow):
         self.font_size_spin.setRange(8, 200)
         default_font_size = self.scene.config_manager.get('default_font_size', DEFAULT_FONT_SIZE)
         self.font_size_spin.setValue(default_font_size)
-        self.font_size_spin.setSuffix("px")
+        self.font_size_spin.setSuffix("pt")
         self.font_size_spin.valueChanged.connect(self.change_selected_font_size)
         text_layout.addRow("字号", self.font_size_spin)
 
@@ -7296,7 +7619,7 @@ class MainWindow(QMainWindow):
         # 从配置加载默认字体大小
         default_font_size = self.scene.config_manager.get('default_font_size', DEFAULT_FONT_SIZE)
         self.font_size_spin.setValue(default_font_size)
-        self.font_size_spin.setSuffix("px")
+        self.font_size_spin.setSuffix("pt")
         self.font_size_spin.valueChanged.connect(self.change_selected_font_size)
         main_toolbar.addWidget(self.font_size_spin)
         
@@ -7503,6 +7826,11 @@ class MainWindow(QMainWindow):
         save_as_action.setShortcut('Ctrl+Shift+S')
         save_as_action.triggered.connect(self.save_proj)
         file_menu.addAction(save_as_action)
+
+        save_and_pdf_action = QAction('保存项目并导出PDF', self)
+        save_and_pdf_action.setShortcut('Ctrl+Shift+P')
+        save_and_pdf_action.triggered.connect(self.save_proj_and_pdf)
+        file_menu.addAction(save_and_pdf_action)
         
         file_menu.addSeparator()
         
@@ -7510,6 +7838,19 @@ class MainWindow(QMainWindow):
         export_action.setShortcut('Ctrl+E')
         export_action.triggered.connect(self.export_image)
         file_menu.addAction(export_action)
+
+        export_svg_action = QAction('导出CorelDRAW SVG...', self)
+        export_svg_action.triggered.connect(self.export_coreldraw_svg)
+        file_menu.addAction(export_svg_action)
+
+        export_excel_action = QAction('导出 Excel 数据表...', self)
+        export_excel_action.triggered.connect(self.export_excel)
+        file_menu.addAction(export_excel_action)
+
+        export_pdf_action = QAction('导出 PDF...', self)
+        export_pdf_action.setShortcut('Ctrl+P')
+        export_pdf_action.triggered.connect(self.export_pdf)
+        file_menu.addAction(export_pdf_action)
         
         file_menu.addSeparator()
         
@@ -8026,7 +8367,8 @@ class MainWindow(QMainWindow):
     
     def _open_font_dialog(self):
         """弹出字体选择对话框"""
-        current = QFont(self.font_combo.currentText(), self.font_size_spin.value())
+        current = QFont(self.font_combo.currentText())
+        current.setPointSize(self.font_size_spin.value())
         font, ok = FontPickerDialog.get_font(current, self.scene.config_manager, self, "选择字体")
         if ok:
             self.font_combo.setCurrentText(font.family())
@@ -8109,7 +8451,7 @@ class MainWindow(QMainWindow):
             # 检查场景是否还存在
             if not self.scene:
                 return
-                
+
             if hasattr(self, 'font_combo'):
                 self.update_font_controls()
             # 状态栏提示
@@ -8120,14 +8462,31 @@ class MainWindow(QMainWindow):
             if images:
                 self._last_selected_images = list(images)
             self.update_property_summary(selected, texts, images)
-            if images and not texts:
+
+            # ── 单选时在状态栏显示右上角 CDR 坐标 ──────────────────────
+            single = None
+            if len(images) + len(texts) == 1:
+                single = images[0] if images else texts[0]
+
+            if single is not None:
+                canvas_h = self.scene.sceneRect().height()
+                DPI = CORELDRAW_EXPORT_DPI
+                pos = single.scenePos()
+                w   = single.boundingRect().width()
+                # 右上角 Qt 坐标 → CDR 坐标（mm，Y轴向上）
+                cdr_x = round((pos.x() + w) * 25.4 / DPI, 2)
+                cdr_y = round((canvas_h - pos.y()) * 25.4 / DPI, 2)
+                kind  = "图片" if isinstance(single, VImageItem) else "文字"
+                self.status_bar.showMessage(
+                    f"{kind} 右上角  X: {cdr_x} mm  Y: {cdr_y} mm（CDR坐标）"
+                )
+            elif images and not texts:
                 self.status_bar.showMessage("拖拽蓝色控制点可缩放图片  角点=等比缩放  边中点=单向拉伸  右键=更多选项")
             elif texts and not images:
                 self.status_bar.showMessage("双击文字可编辑  右键=字体/颜色/列间距等设置")
             elif images and texts:
                 self.status_bar.showMessage("右键=批量连接/对齐  Ctrl+G=保存组合")
             else:
-                # 检查是否选中了连线，且当前是仅图片模式
                 connectors = [i for i in selected if isinstance(i, (VImageTextConnector, VGenericConnector))]
                 mode = self.scene.config_manager.get('marquee_mode', 'all')
                 if connectors and mode == 'images':
@@ -8138,7 +8497,6 @@ class MainWindow(QMainWindow):
                     self.status_bar.showMessage("")
             self._sync_tree_selection_to_scene()
         except (RuntimeError, AttributeError):
-            # 处理 C++ 对象已被删除的情况
             pass
     
     def set_line_width(self):
@@ -8451,6 +8809,237 @@ class MainWindow(QMainWindow):
                 self.scene.set_connection_points_visible(original_show_connection_points)
                 self.scene.set_guides_visible(original_show_guides)
 
+    def export_excel(self):
+        """导出场景数据到 Excel：坐标已转换为 CorelDRAW 坐标系（Y轴翻转，px→mm）"""
+        try:
+            import openpyxl
+        except ImportError:
+            QMessageBox.critical(
+                self, "缺少依赖",
+                "需要安装 openpyxl 库。\n请在命令行执行：pip install openpyxl"
+            )
+            return
+
+        default_dir = self.scene.config_manager.get('default_save_dir', '') or \
+                      (os.path.dirname(self._current_project_path) if self._current_project_path else '')
+        path, _ = QFileDialog.getSaveFileName(
+            self, "导出 Excel 数据表", default_dir, "Excel (*.xlsx)"
+        )
+        if not path:
+            return
+        if not path.lower().endswith('.xlsx'):
+            path += '.xlsx'
+
+        # ── 坐标转换工具 ──────────────────────────────────────────────
+        # 画布高度（场景坐标，px）
+        canvas_h = self.scene.sceneRect().height()
+        # CorelDRAW 导出 DPI（与 SVG 导出保持一致）
+        DPI = CORELDRAW_EXPORT_DPI  # 600
+
+        def px_to_mm(px):
+            """像素 → 毫米"""
+            return round(px * 25.4 / DPI, 4)
+
+        def to_cdr(x_px, y_px):
+            """Qt 坐标（左上角原点，Y向下）→ CDR 坐标（左下角原点，Y向上），单位 mm"""
+            cdr_x = px_to_mm(x_px)
+            cdr_y = px_to_mm(canvas_h - y_px)
+            return cdr_x, cdr_y
+
+        wb = openpyxl.Workbook()
+
+        # ── 表1：图片 ──────────────────────────────────────────────────
+        ws_img = wb.active
+        ws_img.title = "图片"
+        ws_img.append(["图片名称", "图片路径", "X(mm)", "Y(mm)", "宽(mm)", "高(mm)"])
+        for item in self.scene.items():
+            if isinstance(item, VImageItem):
+                name = os.path.basename(item.file_path)
+                pos  = item.scenePos()
+                w    = item.boundingRect().width()
+                h    = item.boundingRect().height()
+                # 右上角：Qt右上角 = (pos.x+w, pos.y)
+                # CDR X = 距页面左边距离，CDR Y = 距页面底边距离（Y轴翻转，右上角不加h）
+                cdr_x, cdr_y = to_cdr(pos.x() + w, pos.y())
+                ws_img.append([name, os.path.abspath(item.file_path),
+                                cdr_x, cdr_y,
+                                px_to_mm(w), px_to_mm(h)])
+
+        # ── 表2：文字 ──────────────────────────────────────────────────
+        ws_txt = wb.create_sheet("文字")
+        ws_txt.append(["文字内容", "字体", "字号", "颜色", "X(mm)", "Y(mm)"])
+        for item in self.scene.items():
+            if isinstance(item, VTextItem):
+                pos = item.scenePos()
+                w   = item.boundingRect().width()
+                h   = item.boundingRect().height()
+                # 右上角：Qt右上角 = (pos.x+w, pos.y)
+                cdr_x, cdr_y = to_cdr(pos.x() + w, pos.y())
+                ws_txt.append([
+                    item.full_text,
+                    item.font_family,
+                    item.font_size,
+                    item.text_color.name(),
+                    cdr_x,
+                    cdr_y,
+                ])
+
+        # ── 表3：连线 ──────────────────────────────────────────────────
+        ws_conn = wb.create_sheet("连线")
+        ws_conn.append(["线编号", "端点类型", "X(mm)", "Y(mm)", "粗细(px)", "颜色"])
+
+        def _endpoints(conn):
+            p = conn.path()
+            if p.elementCount() == 0:
+                return None
+            e0  = p.elementAt(0)
+            elt = p.elementAt(p.elementCount() - 1)
+            # 与图片/文字保持一致：距页面左边 X，距页面底边 Y
+            sx, sy = to_cdr(e0.x, e0.y)
+            ex, ey = to_cdr(elt.x, elt.y)
+            return sx, sy, ex, ey
+
+        all_conns = [
+            c for c in self.scene.image_text_connectors
+            if isinstance(c, VImageTextConnector)
+            or (isinstance(c, VGenericConnector) and c.connection_type == "image-image")
+        ]
+        for line_no, conn in enumerate(all_conns, start=1):
+            pts = _endpoints(conn)
+            if pts is None:
+                continue
+            lw    = getattr(conn, 'line_width', 3)
+            color = conn.pen().color().name()
+            # 起点行
+            ws_conn.append([line_no, "起点", pts[0], pts[1], lw, color])
+            # 终点行
+            ws_conn.append([line_no, "终点", pts[2], pts[3], lw, color])
+
+        # 统一列宽
+        for ws in (ws_img, ws_txt, ws_conn):
+            for col in ws.columns:
+                max_len = max((len(str(cell.value or '')) for cell in col), default=8)
+                ws.column_dimensions[col[0].column_letter].width = min(max_len + 4, 60)
+
+        try:
+            wb.save(path)
+            self.scene.config_manager.set('default_save_dir', os.path.dirname(path))
+            self.status_bar.showMessage(f"Excel 已导出: {path}", 4000)
+            QMessageBox.information(self, "导出完成",
+                f"已导出到：\n{path}\n\n"
+                f"图片：{ws_img.max_row - 1} 条  "
+                f"文字：{ws_txt.max_row - 1} 条  "
+                f"连线：{ws_conn.max_row - 1} 条\n\n"
+                f"坐标已转换为 CorelDRAW 坐标系（单位：mm，Y轴向上，DPI={DPI}）")
+        except Exception as e:
+            QMessageBox.critical(self, "导出失败", f"写入 Excel 失败：\n{e}")
+
+    def export_coreldraw_svg(self):
+        default_dir = self.scene.config_manager.get('default_save_dir', '') or \
+                      (os.path.dirname(self._current_project_path) if self._current_project_path else '')
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "导出CorelDRAW SVG",
+            default_dir,
+            "SVG (*.svg)"
+        )
+        if not path:
+            return
+        if not path.lower().endswith('.svg'):
+            path += '.svg'
+
+        try:
+            CorelSvgExporter.export(self.scene, path)
+            self.scene.config_manager.set('default_save_dir', os.path.dirname(path))
+            self.status_bar.showMessage(f"SVG已导出: {path}", 3000)
+            QMessageBox.information(
+                self,
+                "导出完成",
+                "SVG已导出。文字、线条和图片会以可选对象保存，适合在CorelDRAW中继续编辑。"
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "导出失败", f"导出SVG失败:\n{e}")
+
+    def export_pdf(self):
+        """导出为PDF文件 - 保留文字、图片、连线和背景图片"""
+        default_dir = self.scene.config_manager.get('default_save_dir', '') or \
+                      (os.path.dirname(self._current_project_path) if self._current_project_path else '')
+        path, _ = QFileDialog.getSaveFileName(
+            self, "导出PDF", default_dir, "PDF (*.pdf)"
+        )
+        if not path:
+            return
+        if not path.lower().endswith('.pdf'):
+            path += '.pdf'
+        self._do_export_pdf(path, show_dialog=True)
+
+    def _do_export_pdf(self, path, show_dialog=False):
+        """实际执行PDF导出 - 用scene.render保证文字位置正确，图片/连线独立对象"""
+        original_show_grid = self.scene.show_grid
+        original_show_connectors = self.scene.show_connectors
+        original_show_image_text_connectors = self.scene.show_image_text_connectors
+        original_show_connection_points = self.scene.show_connection_points
+        original_show_guides = self.scene.show_guides
+        selected_items = self.scene.selectedItems()
+
+        try:
+            # 隐藏所有辅助元素，只保留图文连线
+            self.scene.show_grid = False
+            self.scene.set_connectors_visible(False)
+            self.scene.set_image_text_connectors_visible(True)
+            self.scene.set_connection_points_visible(False)
+            self.scene.set_guides_visible(False)
+            self.scene.clearSelection()
+
+            printer = QPrinter(QPrinter.PrinterMode.HighResolution)
+            printer.setOutputFormat(QPrinter.OutputFormat.PdfFormat)
+            printer.setOutputFileName(path)
+
+            rect = self.scene.sceneRect()
+            width_mm = rect.width() / 96.0 * 25.4
+            height_mm = rect.height() / 96.0 * 25.4
+
+            page_size = QPageSize(QSizeF(width_mm, height_mm), QPageSize.Unit.Millimeter)
+            printer.setPageSize(page_size)
+            printer.setPageOrientation(QPageLayout.Orientation.Portrait)
+            printer.setPageMargins(QMarginsF(0, 0, 0, 0), QPageLayout.Unit.Millimeter)
+
+            painter = QPainter()
+            painter.begin(printer)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+
+            target_rect = printer.pageRect(QPrinter.Unit.DevicePixel)
+            scale = min(target_rect.width() / rect.width(), target_rect.height() / rect.height())
+            painter.scale(scale, scale)
+
+            # scene.render 负责正确渲染背景图片、文字、图片、连线
+            # 这样文字坐标和大小完全一致，不会出现错位
+            self.scene.render(painter, QRectF(0, 0, rect.width(), rect.height()), rect)
+
+            painter.end()
+
+        finally:
+            self.scene.show_grid = original_show_grid
+            self.scene.set_connectors_visible(original_show_connectors)
+            self.scene.set_image_text_connectors_visible(original_show_image_text_connectors)
+            self.scene.set_connection_points_visible(original_show_connection_points)
+            self.scene.set_guides_visible(original_show_guides)
+            for item in selected_items:
+                item.setSelected(True)
+            self.scene.update()
+
+        self.scene.config_manager.set('default_save_dir', os.path.dirname(path))
+        print(f"PDF已导出: {path}")
+        if show_dialog:
+            QMessageBox.information(
+                self, "导出完成",
+                f"PDF已成功导出到：\n{path}\n\n"
+                f"画布尺寸：{int(width_mm)} × {int(height_mm)} mm\n\n"
+                "已包含：背景图片、文字、图片、图文连线"
+            )
+
     def new_project(self):
         """新建工程，提示保存当前工程"""
         if self.scene.items():
@@ -8487,6 +9076,27 @@ class MainWindow(QMainWindow):
             self.status_bar.showMessage(f"已保存: {self._current_project_path}", 3000)
         else:
             self.save_proj()
+
+    def save_proj_and_pdf(self):
+        """一键保存项目并导出同名PDF"""
+        # 第一步：确保项目已有保存路径
+        if not self._current_project_path:
+            self.save_proj()
+            # 用户取消了另存为，直接返回
+            if not self._current_project_path:
+                return
+
+        # 第二步：保存项目
+        ProjectData.save(self.scene, self._current_project_path)
+        self.status_bar.showMessage(f"项目已保存: {self._current_project_path}", 2000)
+
+        # 第三步：导出同名PDF（把 .vlayout 替换为 .pdf）
+        pdf_path = os.path.splitext(self._current_project_path)[0] + '.pdf'
+        self._do_export_pdf(pdf_path)
+
+        self.status_bar.showMessage(
+            f"已保存项目并导出PDF: {os.path.basename(pdf_path)}", 4000
+        )
 
     def load_proj(self):
         default_dir = self.scene.config_manager.get('default_save_dir', '') or \
@@ -8582,7 +9192,8 @@ class MainWindow(QMainWindow):
         # 获取当前默认字体
         current_font_family = self.scene.config_manager.get('default_font_family', DEFAULT_FONT)
         current_font_size = self.scene.config_manager.get('default_font_size', DEFAULT_FONT_SIZE)
-        current_font = QFont(current_font_family, current_font_size)
+        current_font = QFont(current_font_family)
+        current_font.setPointSize(current_font_size)
         
         # 打开字体选择对话框
         font, ok = FontPickerDialog.get_font(current_font, self.scene.config_manager, self, "设置默认字体")
@@ -8598,9 +9209,9 @@ class MainWindow(QMainWindow):
             QMessageBox.information(
                 self,
                 "设置成功",
-                f"默认字体已设置为:\n字体: {font.family()}\n大小: {font.pointSize()}px\n\n新添加的文字将使用此字体。"
+                f"默认字体已设置为:\n字体: {font.family()}\n大小: {font.pointSize()}pt\n\n新添加的文字将使用此字体。"
             )
-            print(f"默认字体已设置: {font.family()}, {font.pointSize()}px")
+            print(f"默认字体已设置: {font.family()}, {font.pointSize()}pt")
 
     def set_default_save_dir(self):
         """设置默认保存目录"""
