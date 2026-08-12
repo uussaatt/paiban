@@ -5057,17 +5057,56 @@ class LayoutScene(QGraphicsScene):
                 painter.drawText(scene_rect, Qt.AlignmentFlag.AlignCenter, f'点击显示\n{name}')
 
     def drawBackground(self, painter, rect):
+        # PDF导出时：直接填白色，跳过灰色外框和网格
+        if getattr(self, '_rendering_pdf', False):
+            painter.fillRect(rect, QColor(255, 255, 255))
+            # 仍然绘制背景图片
+            if self.background_pixmap and not self.background_pixmap.isNull():
+                opacity = self.config_manager.get('background_opacity', 1.0)
+                scale_mode = self.config_manager.get('background_scale_mode', 'fit')
+                canvas_rect = self.sceneRect()
+                old_opacity = painter.opacity()
+                painter.setOpacity(opacity)
+                if scale_mode == 'fit':
+                    scaled = self.background_pixmap.scaled(
+                        canvas_rect.size().toSize(),
+                        Qt.AspectRatioMode.KeepAspectRatio,
+                        Qt.TransformationMode.SmoothTransformation)
+                    x = canvas_rect.x() + (canvas_rect.width() - scaled.width()) / 2
+                    y = canvas_rect.y() + (canvas_rect.height() - scaled.height()) / 2
+                    painter.drawPixmap(int(x), int(y), scaled)
+                elif scale_mode == 'fill':
+                    scaled = self.background_pixmap.scaled(
+                        canvas_rect.size().toSize(),
+                        Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                        Qt.TransformationMode.SmoothTransformation)
+                    x = canvas_rect.x() + (canvas_rect.width() - scaled.width()) / 2
+                    y = canvas_rect.y() + (canvas_rect.height() - scaled.height()) / 2
+                    painter.drawPixmap(int(x), int(y), scaled)
+                elif scale_mode == 'stretch':
+                    scaled = self.background_pixmap.scaled(
+                        canvas_rect.size().toSize(),
+                        Qt.AspectRatioMode.IgnoreAspectRatio,
+                        Qt.TransformationMode.SmoothTransformation)
+                    painter.drawPixmap(canvas_rect.toRect(), scaled)
+                elif scale_mode == 'tile':
+                    painter.drawTiledPixmap(canvas_rect.toRect(), self.background_pixmap)
+                painter.setOpacity(old_opacity)
+            return
+
         # 绘制外部背景
         painter.fillRect(rect, QColor(60, 60, 60))
         
         canvas_rect = self.sceneRect()
         
-        # 绘制阴影
-        shadow_rect = canvas_rect.translated(5, 5)
-        painter.fillRect(shadow_rect, QColor(30, 30, 30, 150))
-        
-        # 绘制画布背景色
-        painter.fillRect(canvas_rect, QColor(250, 250, 245))
+        # PDF导出时跳过灰色编辑器背景、阴影、画布底色（由PDF导出代码自己填白色）
+        is_pdf_export = getattr(self, '_rendering_pdf', False)
+        if not is_pdf_export:
+            # 绘制阴影
+            shadow_rect = canvas_rect.translated(5, 5)
+            painter.fillRect(shadow_rect, QColor(30, 30, 30, 150))
+            # 绘制画布背景色
+            painter.fillRect(canvas_rect, QColor(250, 250, 245))
         
         # 缩略图渲染时跳过网格和辅助线
         is_thumb = getattr(self, '_rendering_thumb', False)
@@ -9014,13 +9053,16 @@ class MainWindow(QMainWindow):
             scale = min(target_rect.width() / rect.width(), target_rect.height() / rect.height())
             painter.scale(scale, scale)
 
-            # scene.render 负责正确渲染背景图片、文字、图片、连线
-            # 这样文字坐标和大小完全一致，不会出现错位
+            # 设置PDF导出标志：跳过灰色背景/阴影，保留背景图片
+            self.scene._rendering_pdf = True
+            painter.fillRect(QRectF(0, 0, rect.width(), rect.height()), QColor(255, 255, 255))
             self.scene.render(painter, QRectF(0, 0, rect.width(), rect.height()), rect)
+            self.scene._rendering_pdf = False
 
             painter.end()
 
         finally:
+            self.scene._rendering_pdf = False
             self.scene.show_grid = original_show_grid
             self.scene.set_connectors_visible(original_show_connectors)
             self.scene.set_image_text_connectors_visible(original_show_image_text_connectors)
