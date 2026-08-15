@@ -16,9 +16,10 @@ DEFAULT_FONT_SIZE = 24
 COLUMN_SPACING = 10
 LINE_HEIGHT_RATIO = 1.2
 CORELDRAW_EXPORT_DPI = 600  # Scene pixels to millimeters for CorelDRAW SVG export.
-ASSETS_DIR = "assets"  # 素材库目录
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
+ASSETS_DIR = os.path.join(APP_DIR, "assets")  # 素材库目录
 DEFAULT_LINE_WIDTH = 3  # 默认连接线粗细（像素）
-CONFIG_FILE = "config.json"  # 配置文件
+CONFIG_FILE = os.path.join(APP_DIR, "config.json")  # 配置文件
 
 # Vertically sensitive characters (Simple Heuristic for demo)
 ROTATE_CHARS = {'—', '…', '(', ')', '[', ']', '{', '}', '《', '》', '-', '_'}
@@ -66,6 +67,8 @@ class ConfigManager:
             'insert_image_default_width': 0,  # 插入图片默认宽度（px），0表示按比例自动
             'insert_image_default_height': 0,  # 插入图片默认高度（px），0表示按宽度比例自动
             'insert_image_use_custom_size': False,  # 是否使用自定义插入尺寸
+            'hide_connection_points_when_image_selected': False,
+            'show_text_hover_tooltip': False,
             'favorite_fonts': ['SimSun', 'Microsoft YaHei', '黑体', '楷体', 'Arial'],
             'favorite_sizes': [10, 12, 14, 16, 18, 20, 24, 30, 36, 48, 72],
         }
@@ -1180,6 +1183,7 @@ class AssetLibraryDockWidget(QDockWidget):
         min_x = min(d['scene_pos'][0] for d in asset['items'])
         min_y = min(d['scene_pos'][1] for d in asset['items'])
         new_items = []
+        new_items_by_asset_index = [None] * len(asset['items'])
         scene = self.main_window.scene
         sub_commands = []
         for idx, item_data in enumerate(asset['items']):
@@ -1193,8 +1197,11 @@ class AssetLibraryDockWidget(QDockWidget):
                         setattr(new_item, k, item_data[k])
                 new_item.rebuild()
             elif item_data['type'] == 'VImageItem':
-                if os.path.exists(item_data['path']):
-                    new_item = VImageItem(item_data['path'], item_data['width'])
+                image_path = item_data.get('path', '')
+                if image_path and not os.path.isabs(image_path):
+                    image_path = os.path.join(APP_DIR, image_path)
+                if image_path and os.path.exists(image_path):
+                    new_item = VImageItem(image_path, item_data['width'])
             if new_item:
                 off_x = item_data['scene_pos'][0] - min_x
                 off_y = item_data['scene_pos'][1] - min_y
@@ -1206,16 +1213,25 @@ class AssetLibraryDockWidget(QDockWidget):
                 if 'connection_point_visible' in item_data and new_item.connection_point:
                     new_item.connection_point.setVisible(item_data['connection_point_visible'])
                 new_items.append(new_item)
+                new_items_by_asset_index[idx] = new_item
         for idx, item_data in enumerate(asset['items']):
-            if item_data['parent_index'] != -1 and item_data['parent_index'] < len(new_items):
-                child, parent = new_items[idx], new_items[item_data['parent_index']]
+            parent_index = item_data.get('parent_index', -1)
+            if parent_index != -1 and parent_index < len(new_items_by_asset_index):
+                child = new_items_by_asset_index[idx]
+                parent = new_items_by_asset_index[parent_index]
+                if not child or not parent:
+                    continue
                 sp = child.scenePos()
                 child.setParentItem(parent)
                 child.setPos(parent.mapFromScene(sp))
                 scene.add_connector(parent, child)
         for img_idx, text_idx in asset['image_text_connections']:
-            if img_idx < len(new_items) and text_idx < len(new_items):
-                conn_cmd = scene._make_connector_command(new_items[img_idx], new_items[text_idx])
+            if img_idx < len(new_items_by_asset_index) and text_idx < len(new_items_by_asset_index):
+                item1 = new_items_by_asset_index[img_idx]
+                item2 = new_items_by_asset_index[text_idx]
+                if not item1 or not item2:
+                    continue
+                conn_cmd = scene._make_connector_command(item1, item2)
                 if conn_cmd:
                     conn_cmd.execute()
                     sub_commands.append(conn_cmd)
@@ -1813,6 +1829,8 @@ class AddItemCommand(UndoCommand):
             
         if isinstance(self.item, (VTextItem, VImageItem)):
             self.item.set_connection_points_visible(self.scene.show_connection_points)
+        if isinstance(self.item, VTextItem):
+            self.item.update_hover_tooltip()
 
     def undo(self):
         """撤销添加操作：增加场景归属判断，防止重复删除报错"""
@@ -2164,7 +2182,7 @@ class AnchorHandle(QGraphicsRectItem):
 
 class ConnectionPoint(QGraphicsEllipseItem):
     """可视化连接点：增强版（解决层级遮挡和多线连接问题）"""
-    HIT_RADIUS = 3
+    HIT_RADIUS = 2
     BOUNDS_RADIUS = 7
     BASE_RADIUS = 2
     HOVER_RADIUS = 5
@@ -2181,7 +2199,7 @@ class ConnectionPoint(QGraphicsEllipseItem):
         self.hover_pen = QPen(QColor(0, 200, 80), 3)
 
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, False)
-        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, True)
+        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, False)
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemSendsGeometryChanges, True)
 
         # --- 核心修改：将 ZValue 设为极高，确保点永远在连线之上 ---
@@ -2288,6 +2306,7 @@ class ConnectionPoint(QGraphicsEllipseItem):
     def mousePressEvent(self, event):
         """鼠标按下开始连接"""
         if event.button() == Qt.MouseButton.LeftButton:
+            self.setSelected(False)
             if self.scene():
                 self.scene().start_connection_from_point(self)
             event.accept()
@@ -3355,6 +3374,25 @@ class VTextItem(BaseElement):
             self.connection_point.update_position()
             if self.scene():
                 self.scene().update_image_text_connectors(self)
+        self.update_hover_tooltip()
+
+    def update_hover_tooltip(self):
+        scene = self.scene()
+        enabled = False
+        if scene and hasattr(scene, 'config_manager'):
+            enabled = scene.config_manager.get('show_text_hover_tooltip', False)
+        if enabled and self.full_text:
+            lines = [xml_escape(line) for line in self.full_text.splitlines()]
+            text = '<br>'.join(lines)
+            self.setToolTip(
+                '<html><body>'
+                '<div style="width:520px; font-size:14px; line-height:1.45; '
+                'white-space:pre-wrap;">'
+                f'{text}'
+                '</div></body></html>'
+            )
+        else:
+            self.setToolTip('')
     
     def create_connection_point(self):
         """创建文字的连接点(底部中点)"""
@@ -6807,6 +6845,7 @@ class LayoutView(QGraphicsView):
         font = QFont("Arial", 7)
         painter.setFont(font)
         painter.setPen(text_color)
+        painter.drawText(3, R - 5, "mm")
 
         # 水平刻度
         scene_left = self.mapToScene(QPoint(R, 0)).x()
@@ -6819,7 +6858,7 @@ class LayoutView(QGraphicsView):
             painter.drawLine(vx, R - 6, vx, R)
             if vx > R + 2:
                 painter.setPen(text_color)
-                painter.drawText(vx + 2, R - 2, str(int(x)))
+                painter.drawText(vx + 2, R - 2, self._format_ruler_label(x))
             x += step
 
         # 垂直刻度
@@ -6832,7 +6871,7 @@ class LayoutView(QGraphicsView):
             painter.drawLine(R - 6, vy, R, vy)
             if vy > R + 2:
                 painter.setPen(text_color)
-                painter.drawText(2, vy - 1, str(int(y)))
+                painter.drawText(2, vy - 1, self._format_ruler_label(y))
             y += step
 
         # 鼠标位置十字线（在标尺上）
@@ -6843,12 +6882,20 @@ class LayoutView(QGraphicsView):
             painter.drawLine(0, cursor_vp.y(), R, cursor_vp.y())
 
     def _ruler_step(self):
-        """根据当前缩放计算合适的标尺刻度间距"""
+        """根据当前缩放计算合适的标尺刻度间距（内部仍返回 px）"""
         scale = self.transform().m11()
-        for step in [5, 10, 25, 50, 100, 200, 500, 1000]:
-            if step * scale >= 40:
-                return step
-        return 1000
+        px_per_mm = CORELDRAW_EXPORT_DPI / 25.4
+        for step_mm in [1, 2, 5, 10, 20, 50, 100, 200, 500]:
+            step_px = step_mm * px_per_mm
+            if step_px * scale >= 40:
+                return step_px
+        return 500 * px_per_mm
+
+    def _format_ruler_label(self, scene_value):
+        value_mm = scene_value * 25.4 / CORELDRAW_EXPORT_DPI
+        if abs(value_mm) >= 100 or abs(value_mm - round(value_mm)) < 0.01:
+            return str(int(round(value_mm)))
+        return f"{value_mm:.1f}".rstrip('0').rstrip('.')
 
     def contextMenuEvent(self, event):
         """右键：点到元素交给元素处理，空白处弹画布菜单"""
@@ -7305,6 +7352,390 @@ class LayoutView(QGraphicsView):
         
 
 # --- Main Window ---
+
+class FamilyTreeImportDialog(QDialog):
+    """从 Excel 批量导入族谱成员对话框"""
+
+    def __init__(self, scene, parent=None):
+        super().__init__(parent)
+        self.scene = scene
+        self.setWindowTitle("批量导入族谱成员")
+        self.setMinimumWidth(520)
+        self._build_ui()
+        self._load_settings()
+
+    def _build_ui(self):
+        root = QVBoxLayout(self)
+        root.setSpacing(10)
+
+        # Excel 文件路径
+        file_group = QGroupBox("Excel 文件")
+        fl = QHBoxLayout(file_group)
+        self.txt_excel = QLineEdit()
+        self.txt_excel.setPlaceholderText("请选择 Excel 文件...")
+        fl.addWidget(self.txt_excel)
+        btn_browse = QPushButton("浏览...")
+        btn_browse.setFixedWidth(70)
+        btn_browse.clicked.connect(self._browse_excel)
+        fl.addWidget(btn_browse)
+        root.addWidget(file_group)
+
+        # Excel 列映射说明
+        hint = QLabel(
+            "Excel 默认格式：A列=辈分  B列=主文字  C列=副文字1  D列=副文字2  E列=图片路径\n"
+            "使用组合模板时，模板中文字内容需与下方占位符一致"
+        )
+        hint.setStyleSheet("color: #666; font-size: 11px;")
+        hint.setWordWrap(True)
+        root.addWidget(hint)
+
+        # 模板素材选择
+        tmpl_group = QGroupBox("组合素材模板（可选）")
+        tl = QHBoxLayout(tmpl_group)
+        tl.addWidget(QLabel("输入/选择模板名称："))
+        self.combo_template = QComboBox()
+        self.combo_template.setEditable(True)
+        self.combo_template.addItem("— 不使用模板，纯文字 —", None)
+        for asset in self.scene.asset_manager.get_group_assets():
+            self.combo_template.addItem(asset['name'], asset)
+        tl.addWidget(self.combo_template, 1)
+        root.addWidget(tmpl_group)
+
+        template_map_group = QGroupBox("模板文字对象指定")
+        tm = QFormLayout(template_map_group)
+        self.combo_template_t1 = QComboBox()
+        self.combo_template_t2 = QComboBox()
+        self.combo_template_t3 = QComboBox()
+        tm.addRow("主文字填入:", self.combo_template_t1)
+        tm.addRow("副文字1填入:", self.combo_template_t2)
+        tm.addRow("副文字2填入:", self.combo_template_t3)
+        self.btn_save_template_map = QPushButton("保存此模板指定")
+        self.btn_save_template_map.clicked.connect(self._save_template_map_clicked)
+        tm.addRow("", self.btn_save_template_map)
+        root.addWidget(template_map_group)
+        self._template_map_loading = False
+        self._current_template_key = None
+        self.combo_template.currentIndexChanged.connect(self._on_template_changed)
+        if self.combo_template.lineEdit():
+            self.combo_template.lineEdit().editingFinished.connect(self._on_template_name_edited)
+        for combo in (self.combo_template_t1, self.combo_template_t2, self.combo_template_t3):
+            combo.currentIndexChanged.connect(self._save_current_template_text_map)
+
+        # 布局参数
+        layout_group = QGroupBox("布局参数")
+        lg = QFormLayout(layout_group)
+        lg.setHorizontalSpacing(12)
+
+        self.combo_unit = QComboBox()
+        self.combo_unit.addItem("像素 px", "px")
+        self.combo_unit.addItem("毫米 mm", "mm")
+        self._current_unit = "px"
+        self._loading_unit = False
+        self.combo_unit.currentIndexChanged.connect(self._on_unit_changed)
+        lg.addRow("尺寸单位:", self.combo_unit)
+
+        self.spin_start_x = QDoubleSpinBox()
+        self.spin_start_x.setRange(-99999, 99999)
+        self.spin_start_x.setValue(500)
+        self.spin_start_x.setSuffix(" px")
+        lg.addRow("起始 X（第1人右侧）:", self.spin_start_x)
+
+        self.spin_spacing = QDoubleSpinBox()
+        self.spin_spacing.setRange(1, 9999)
+        self.spin_spacing.setValue(200)
+        self.spin_spacing.setSuffix(" px")
+        lg.addRow("节点间距（X方向）:", self.spin_spacing)
+
+        root.addWidget(layout_group)
+
+        # 各辈分 Y 坐标
+        y_group = QGroupBox("各辈分 Y 坐标")
+        yg = QFormLayout(y_group)
+        yg.setHorizontalSpacing(12)
+        self.y_spins = []
+        defaults = [500, 1000, 1500, 2000, 2500]
+        for i in range(5):
+            sp = QDoubleSpinBox()
+            sp.setRange(-99999, 99999)
+            sp.setValue(defaults[i])
+            sp.setSuffix(" px")
+            yg.addRow(f"第 {i+1} 代 / {'一二三四五'[i]}代:", sp)
+            self.y_spins.append(sp)
+        root.addWidget(y_group)
+
+        # 文字样式
+        style_group = QGroupBox("文字样式")
+        sg = QFormLayout(style_group)
+        self.spin_font_size = QSpinBox()
+        self.spin_font_size.setRange(8, 200)
+        self.spin_font_size.setValue(
+            self.scene.config_manager.get('default_font_size', DEFAULT_FONT_SIZE)
+        )
+        sg.addRow("字号:", self.spin_font_size)
+
+        self.combo_font = QComboBox()
+        self.combo_font.setEditable(True)
+        default_font = self.scene.config_manager.get('default_font_family', DEFAULT_FONT)
+        for f in QFontDatabase.families():
+            self.combo_font.addItem(f)
+        idx = self.combo_font.findText(default_font)
+        if idx >= 0:
+            self.combo_font.setCurrentIndex(idx)
+        sg.addRow("字体:", self.combo_font)
+
+        self.spin_img_width = QDoubleSpinBox()
+        self.spin_img_width.setRange(1, 9999)
+        self.spin_img_width.setDecimals(2)
+        self.spin_img_width.setValue(150)
+        self.spin_img_width.setSuffix(" px")
+        sg.addRow("图片宽度:", self.spin_img_width)
+
+        self.chk_auto_connect = QCheckBox("自动连接同辈相邻节点")
+        self.chk_auto_connect.setChecked(True)
+        sg.addRow("", self.chk_auto_connect)
+
+        root.addWidget(style_group)
+
+        # 按钮
+        btns = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        btns.button(QDialogButtonBox.StandardButton.Ok).setText("导入")
+        btns.accepted.connect(self.accept)
+        btns.rejected.connect(self.reject)
+        root.addWidget(btns)
+        self._refresh_template_text_map()
+        self._update_unit_suffix()
+
+    def _template_asset_key(self, asset):
+        if not asset:
+            return ''
+        return str(asset.get('name', '')).strip()
+
+    def _find_template_asset_by_name(self, name):
+        name = str(name).strip()
+        if not name:
+            return None
+        for asset in self.scene.asset_manager.get_group_assets():
+            if str(asset.get('name', '')).strip() == name:
+                return asset
+        return None
+
+    def _current_template_asset(self):
+        text_asset = self._find_template_asset_by_name(self.combo_template.currentText())
+        if text_asset:
+            return text_asset
+        return self.combo_template.currentData()
+
+    def _on_template_name_edited(self):
+        asset = self._find_template_asset_by_name(self.combo_template.currentText())
+        if not asset:
+            self._refresh_template_text_map()
+            return
+        idx = self.combo_template.findText(asset['name'])
+        if idx >= 0:
+            self.combo_template.setCurrentIndex(idx)
+        else:
+            self._refresh_template_text_map()
+
+    def _on_template_changed(self):
+        self._refresh_template_text_map()
+
+    def _saved_template_maps(self):
+        maps = self.scene.config_manager.get('ftimport_template_text_maps', {})
+        return maps if isinstance(maps, dict) else {}
+
+    def _save_current_template_text_map(self):
+        if getattr(self, '_template_map_loading', False):
+            return
+        key = self._current_template_key
+        if not key:
+            return
+        maps = self._saved_template_maps()
+        maps[key] = {
+            't1': self.combo_template_t1.currentData(),
+            't2': self.combo_template_t2.currentData(),
+            't3': self.combo_template_t3.currentData(),
+        }
+        self.scene.config_manager.set('ftimport_template_text_maps', maps)
+
+    def _save_template_map_clicked(self):
+        self._on_template_name_edited()
+        self._save_current_template_text_map()
+
+    def _restore_combo_data(self, combo, value):
+        for idx in range(combo.count()):
+            if combo.itemData(idx) == value:
+                combo.setCurrentIndex(idx)
+                return
+
+    def _update_unit_suffix(self):
+        unit = self.combo_unit.currentData() or "px"
+        suffix = f" {unit}"
+        for spin in (self.spin_start_x, self.spin_spacing, *self.y_spins, self.spin_img_width):
+            spin.setSuffix(suffix)
+
+    def _on_unit_changed(self):
+        new_unit = self.combo_unit.currentData() or "px"
+        old_unit = getattr(self, '_current_unit', 'px')
+        if getattr(self, '_loading_unit', False) or new_unit == old_unit:
+            self._current_unit = new_unit
+            self._update_unit_suffix()
+            return
+
+        px_per_mm = CORELDRAW_EXPORT_DPI / 25.4
+        if old_unit == 'px' and new_unit == 'mm':
+            factor = 1 / px_per_mm
+        elif old_unit == 'mm' and new_unit == 'px':
+            factor = px_per_mm
+        else:
+            factor = 1
+
+        for spin in (self.spin_start_x, self.spin_spacing, *self.y_spins, self.spin_img_width):
+            spin.setValue(spin.value() * factor)
+
+        self._current_unit = new_unit
+        self._update_unit_suffix()
+
+    def _refresh_template_text_map(self):
+        self._save_current_template_text_map()
+        asset = self._current_template_asset()
+        self._current_template_key = self._template_asset_key(asset)
+        combos = (self.combo_template_t1, self.combo_template_t2, self.combo_template_t3)
+        self._template_map_loading = True
+        for combo in combos:
+            combo.blockSignals(True)
+            combo.clear()
+            combo.addItem("按占位符自动识别", None)
+
+        if asset:
+            text_count = 0
+            for idx, item_data in enumerate(asset.get('items', [])):
+                if item_data.get('type') != 'VTextItem':
+                    continue
+                text_count += 1
+                text = item_data.get('text', '').replace('\n', '↵')
+                if len(text) > 24:
+                    text = text[:24] + '...'
+                label = f"[{idx}] {text or '空文字'}"
+                for combo in combos:
+                    combo.addItem(label, idx)
+            if text_count == 0:
+                for combo in combos:
+                    combo.setItemText(0, "当前模板没有文字对象")
+
+        for combo in combos:
+            combo.blockSignals(False)
+        saved_map = self._saved_template_maps().get(self._current_template_key, {})
+        if isinstance(saved_map, dict):
+            self._restore_combo_data(self.combo_template_t1, saved_map.get('t1'))
+            self._restore_combo_data(self.combo_template_t2, saved_map.get('t2'))
+            self._restore_combo_data(self.combo_template_t3, saved_map.get('t3'))
+        self._template_map_loading = False
+
+    def _browse_excel(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "选择 Excel 文件", "", "Excel 文件 (*.xlsx *.xls)"
+        )
+        if path:
+            self.txt_excel.setText(path)
+            self._save_settings()
+
+    def _load_settings(self):
+        cfg = self.scene.config_manager
+        self.txt_excel.setText(cfg.get('ftimport_excel_path', ''))
+        unit = cfg.get('ftimport_unit', 'px')
+        idx = self.combo_unit.findData(unit)
+        self._loading_unit = True
+        if idx >= 0:
+            self.combo_unit.setCurrentIndex(idx)
+        self._current_unit = unit
+        self._loading_unit = False
+        self.spin_start_x.setValue(cfg.get('ftimport_start_x', 500))
+        self.spin_spacing.setValue(cfg.get('ftimport_spacing', 200))
+        defaults = [500, 1000, 1500, 2000, 2500]
+        for i, sp in enumerate(self.y_spins):
+            sp.setValue(cfg.get(f'ftimport_y{i+1}', defaults[i]))
+        self.spin_font_size.setValue(
+            cfg.get('ftimport_font_size',
+                    cfg.get('default_font_size', DEFAULT_FONT_SIZE))
+        )
+        saved_font = cfg.get('ftimport_font_family',
+                              cfg.get('default_font_family', DEFAULT_FONT))
+        idx = self.combo_font.findText(saved_font)
+        if idx >= 0:
+            self.combo_font.setCurrentIndex(idx)
+        self.spin_img_width.setValue(cfg.get('ftimport_img_width', 150))
+        template_name = cfg.get('ftimport_template_name', '')
+        if template_name:
+            idx = self.combo_template.findText(template_name)
+            if idx >= 0:
+                self.combo_template.setCurrentIndex(idx)
+            else:
+                self.combo_template.setCurrentText(template_name)
+        self._refresh_template_text_map()
+        self._update_unit_suffix()
+
+    def _save_settings(self):
+        cfg = self.scene.config_manager
+        cfg.set('ftimport_excel_path', self.txt_excel.text())
+        cfg.set('ftimport_template_name', self.combo_template.currentText().strip())
+        self._save_current_template_text_map()
+        cfg.set('ftimport_unit', self.combo_unit.currentData() or 'px')
+        cfg.set('ftimport_start_x', self.spin_start_x.value())
+        cfg.set('ftimport_spacing', self.spin_spacing.value())
+        for i, sp in enumerate(self.y_spins):
+            cfg.set(f'ftimport_y{i+1}', sp.value())
+        cfg.set('ftimport_font_size', self.spin_font_size.value())
+        cfg.set('ftimport_font_family', self.combo_font.currentText())
+        cfg.set('ftimport_img_width', self.spin_img_width.value())
+
+    def get_params(self):
+        self._save_settings()
+        unit = self.combo_unit.currentData() or 'px'
+        scale = CORELDRAW_EXPORT_DPI / 25.4 if unit == 'mm' else 1.0
+        def to_px(value):
+            return value * scale
+        return {
+            'excel_path': self.txt_excel.text().strip(),
+            'unit': unit,
+            'start_x': to_px(self.spin_start_x.value()),
+            'spacing': to_px(self.spin_spacing.value()),
+            'y_coords': [to_px(sp.value()) for sp in self.y_spins],
+            'font_size': self.spin_font_size.value(),
+            'font_family': self.combo_font.currentText(),
+            'img_width': to_px(self.spin_img_width.value()),
+            'auto_connect': self.chk_auto_connect.isChecked(),
+            'template_name': self.combo_template.currentText().strip(),
+            'template_asset': self._current_template_asset(),
+            'placeholders': {
+                't1': 't1',
+                't2': 't2',
+                't3': 't3',
+            },
+            'columns': {
+                'generation': 'A',
+                't1': 'B',
+                't2': 'C',
+                't3': 'D',
+                'image': 'E',
+                'name': '内容',
+                'group': '组',
+            },
+            'group_match': {
+                'enabled': True,
+                't1': 'a',
+                't2': 'c',
+                't3': 'b',
+                'extra_text': 'd',
+            },
+            'template_text_map': {
+                't1': self.combo_template_t1.currentData(),
+                't2': self.combo_template_t2.currentData(),
+                't3': self.combo_template_t3.currentData(),
+            },
+        }
+
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -7928,6 +8359,12 @@ class MainWindow(QMainWindow):
         open_library_action.setShortcut('F9')
         open_library_action.triggered.connect(self.open_asset_library)
         asset_menu.addAction(open_library_action)
+
+        asset_menu.addSeparator()
+        import_excel_action = QAction('从 Excel 批量导入族谱...', self)
+        import_excel_action.setShortcut('Ctrl+I')
+        import_excel_action.triggered.connect(self.open_family_tree_import_dialog)
+        asset_menu.addAction(import_excel_action)
         
         # 添加视图菜单
         view_menu = menubar.addMenu('视图')
@@ -8023,6 +8460,22 @@ class MainWindow(QMainWindow):
         clear_guides_action = QAction('清除所有辅助线', self)
         clear_guides_action.triggered.connect(self.clear_guides)
         view_menu.addAction(clear_guides_action)
+
+        self.hide_points_on_image_select_action = QAction('选中图片时隐藏连接点', self)
+        self.hide_points_on_image_select_action.setCheckable(True)
+        self.hide_points_on_image_select_action.setChecked(
+            self.scene.config_manager.get('hide_connection_points_when_image_selected', False)
+        )
+        self.hide_points_on_image_select_action.toggled.connect(self.toggle_hide_points_on_image_select)
+        view_menu.addAction(self.hide_points_on_image_select_action)
+
+        self.text_hover_tooltip_action = QAction('鼠标悬停显示文字内容', self)
+        self.text_hover_tooltip_action.setCheckable(True)
+        self.text_hover_tooltip_action.setChecked(
+            self.scene.config_manager.get('show_text_hover_tooltip', False)
+        )
+        self.text_hover_tooltip_action.toggled.connect(self.toggle_text_hover_tooltip)
+        view_menu.addAction(self.text_hover_tooltip_action)
 
         snap_threshold_action = QAction('设置吸附距离...', self)
         snap_threshold_action.triggered.connect(self.set_snap_threshold)
@@ -8376,6 +8829,9 @@ class MainWindow(QMainWindow):
     
     def toggle_connection_points(self):
         self.scene.toggle_connection_points()
+        selected = self.scene.selectedItems() if self.scene else []
+        has_images = any(isinstance(item, VImageItem) for item in selected)
+        self._apply_connection_point_selection_visibility(has_images)
     
     def open_asset_library(self):
         """切换素材库面板的显示/隐藏"""
@@ -8403,6 +8859,501 @@ class MainWindow(QMainWindow):
         dlg.dspin_v_offset.setValue(600)
         if dlg.exec() == QDialog.DialogCode.Accepted:
             self.scene.batch_copy(dlg.get_params())
+
+    def open_family_tree_import_dialog(self):
+        """从 Excel 批量导入族谱成员"""
+        try:
+            import openpyxl
+        except ImportError:
+            QMessageBox.critical(
+                self, "缺少依赖",
+                "需要安装 openpyxl 库。\n请在命令行执行：pip install openpyxl"
+            )
+            return
+
+        dlg = FamilyTreeImportDialog(self.scene, self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        params = dlg.get_params()
+        excel_path = params['excel_path']
+        if not excel_path:
+            QMessageBox.warning(self, "导入失败", "请先选择 Excel 文件")
+            return
+        if not os.path.exists(excel_path):
+            QMessageBox.warning(self, "导入失败", f"Excel 文件不存在：\n{excel_path}")
+            return
+
+        generation_map = {
+            '1': 0, '一': 0, '一代': 0, '第1代': 0, '第一代': 0,
+            '2': 1, '二': 1, '二代': 1, '第2代': 1, '第二代': 1,
+            '3': 2, '三': 2, '三代': 2, '第3代': 2, '第三代': 2,
+            '4': 3, '四': 3, '四代': 3, '第4代': 3, '第四代': 3,
+            '5': 4, '五': 4, '五代': 4, '第5代': 4, '第五代': 4,
+        }
+        header_map = {}
+
+        def cell_text(value):
+            if value is None:
+                return ''
+            return str(value).strip()
+
+        def column_index(column_name):
+            column_name = str(column_name).strip()
+            if not column_name:
+                return None
+            header_index = header_map.get(column_name.lower())
+            if header_index is not None:
+                return header_index
+            if column_name.isdigit():
+                return max(0, int(column_name) - 1)
+            index = 0
+            for char in column_name.upper():
+                if not ('A' <= char <= 'Z'):
+                    return None
+                index = index * 26 + ord(char) - ord('A') + 1
+            return index - 1
+
+        def row_value(row, column_name):
+            index = column_index(column_name)
+            if index is None or index >= len(row):
+                return ''
+            return cell_text(row[index])
+
+        def row_first_value(row, column_names):
+            for column_name in column_names:
+                value = row_value(row, column_name)
+                if value:
+                    return value
+            return ''
+
+        def normalize_key(value):
+            return cell_text(value).lower()
+
+        def make_full_text(main_text, sub_text1, sub_text2):
+            parts = [text for text in (main_text, sub_text1, sub_text2) if text]
+            return '\n'.join(parts)
+
+        def item_scene_rect(item):
+            return item.mapRectToScene(item.boundingRect())
+
+        def rebuild_template_text(text_item, keep_template_anchor=False):
+            anchor_pos = None
+            if keep_template_anchor:
+                anchor_pos = text_item.mapRectToScene(text_item.boundingRect()).topRight()
+            text_item.rebuild()
+            if anchor_pos is not None:
+                new_anchor_pos = text_item.mapRectToScene(text_item.boundingRect()).topRight()
+                target_scene_pos = text_item.scenePos() + (anchor_pos - new_anchor_pos)
+                if text_item.parentItem():
+                    text_item.setPos(text_item.parentItem().mapFromScene(target_scene_pos))
+                else:
+                    text_item.setPos(target_scene_pos)
+
+        def add_extra_text_items(extra_texts, base_pos, anchor_items=None):
+            created_items = []
+            if not extra_texts:
+                return created_items
+            anchor_rect = QRectF(base_pos, QSizeF(0, 0))
+            for item in anchor_items or []:
+                anchor_rect = anchor_rect.united(item_scene_rect(item))
+            x = anchor_rect.left() - params['font_size'] * 2 - 20
+            y = anchor_rect.top()
+            for idx, text in enumerate(extra_texts):
+                if not text:
+                    continue
+                text_item = VTextItem(text, params['font_size'], 400)
+                text_item.font_family = params['font_family']
+                text_item.rebuild()
+                text_item.setPos(x - idx * (params['font_size'] * 2 + 20), y)
+                text_cmd = AddItemCommand(self.scene, text_item)
+                text_cmd.execute()
+                commands.append(text_cmd)
+                imported_items.append(text_item)
+                created_items.append(text_item)
+            return created_items
+
+        def apply_template_text(new_items, cloned_by_asset_index, main_text, sub_text1, sub_text2):
+            placeholders = params['placeholders']
+            slot_values = {
+                't1': main_text,
+                't2': sub_text1,
+                't3': sub_text2,
+            }
+            template_text_map = params['template_text_map']
+
+            mapped_any = False
+            for slot, value in slot_values.items():
+                asset_index = template_text_map.get(slot)
+                if asset_index is None or asset_index >= len(cloned_by_asset_index):
+                    continue
+                text_item = cloned_by_asset_index[asset_index]
+                if isinstance(text_item, VTextItem):
+                    text_item.full_text = value
+                    rebuild_template_text(text_item, keep_template_anchor=True)
+                    mapped_any = True
+
+            if mapped_any:
+                return
+
+            values = {
+                placeholders['t1'].strip().lower(): slot_values['t1'],
+                placeholders['t2'].strip().lower(): slot_values['t2'],
+                placeholders['t3'].strip().lower(): slot_values['t3'],
+            }
+            text_items = [item for item in new_items if isinstance(item, VTextItem)]
+            matched = set()
+
+            for text_item in text_items:
+                key = text_item.full_text.strip().lower()
+                if key in values:
+                    text_item.full_text = values[key]
+                    rebuild_template_text(text_item, keep_template_anchor=True)
+                    matched.add(key)
+
+            if matched:
+                return
+
+            ordered_text_items = sorted(
+                text_items,
+                key=lambda item: (item.scenePos().x(), item.scenePos().y()),
+                reverse=True
+            )
+            for text_item, value in zip(ordered_text_items, (main_text, sub_text1, sub_text2)):
+                text_item.full_text = value
+                rebuild_template_text(text_item, keep_template_anchor=True)
+
+        def clone_group_asset(asset, base_pos):
+            min_x = min(d['scene_pos'][0] for d in asset['items'])
+            min_y = min(d['scene_pos'][1] for d in asset['items'])
+            new_items = []
+            cloned_by_asset_index = [None] * len(asset['items'])
+            commands = []
+            for item_index, item_data in enumerate(asset['items']):
+                new_item = None
+                if item_data['type'] == 'VTextItem':
+                    new_item = VTextItem(item_data['text'], item_data['font_size'], item_data['box_height'])
+                    new_item.font_family = item_data['font_family']
+                    new_item.text_color = QColor(item_data['text_color'])
+                    for key in ('chars_per_column', 'column_spacing', 'auto_height', 'manual_line_break', 'layer_eye_color'):
+                        if key in item_data:
+                            setattr(new_item, key, item_data[key])
+                    new_item.rebuild()
+                elif item_data['type'] == 'VImageItem' and os.path.exists(item_data['path']):
+                    new_item = VImageItem(item_data['path'], item_data['width'])
+                elif item_data['type'] == 'VImageItem':
+                    image_path = item_data.get('path', '')
+                    if image_path and not os.path.isabs(image_path):
+                        image_path = os.path.join(APP_DIR, image_path)
+                    if image_path and os.path.exists(image_path):
+                        new_item = VImageItem(image_path, item_data['width'])
+
+                if new_item:
+                    off_x = item_data['scene_pos'][0] - min_x
+                    off_y = item_data['scene_pos'][1] - min_y
+                    new_item.setPos(base_pos.x() + off_x, base_pos.y() + off_y)
+                    command = AddItemCommand(self.scene, new_item)
+                    command.execute()
+                    commands.append(command)
+                    if 'connection_point_visible' in item_data and new_item.connection_point:
+                        new_item.connection_point.setVisible(item_data['connection_point_visible'])
+                    new_items.append(new_item)
+                    cloned_by_asset_index[item_index] = new_item
+
+            for idx, item_data in enumerate(asset['items']):
+                if item_data['parent_index'] != -1 and item_data['parent_index'] < len(cloned_by_asset_index):
+                    child = cloned_by_asset_index[idx]
+                    parent = cloned_by_asset_index[item_data['parent_index']]
+                    if not child or not parent:
+                        continue
+                    scene_pos = child.scenePos()
+                    child.setParentItem(parent)
+                    child.setPos(parent.mapFromScene(scene_pos))
+                    self.scene.add_connector(parent, child)
+
+            for item1_idx, item2_idx in asset['image_text_connections']:
+                if item1_idx < len(cloned_by_asset_index) and item2_idx < len(cloned_by_asset_index):
+                    item1 = cloned_by_asset_index[item1_idx]
+                    item2 = cloned_by_asset_index[item2_idx]
+                    if not item1 or not item2:
+                        continue
+                    conn_cmd = self.scene._make_connector_command(item1, item2)
+                    if conn_cmd:
+                        conn_cmd.execute()
+                        commands.append(conn_cmd)
+
+            return new_items, cloned_by_asset_index, commands
+
+        try:
+            wb = openpyxl.load_workbook(excel_path, data_only=True)
+            ws = wb.active
+            rows = list(ws.iter_rows(min_row=1, values_only=True))
+        except Exception as e:
+            QMessageBox.critical(self, "导入失败", f"读取 Excel 失败：\n{e}")
+            return
+
+        if rows:
+            header_map.update({
+                cell_text(value).lower(): idx
+                for idx, value in enumerate(rows[0])
+                if cell_text(value)
+            })
+
+        generation_next_x = [params['start_x']] * len(params['y_coords'])
+        generation_layout_spacing = [params['spacing']] * len(params['y_coords'])
+        imported_items = []
+        commands = []
+        skipped = 0
+        template_asset = params['template_asset']
+        base_dir = os.path.dirname(excel_path)
+        columns = params['columns']
+        group_match = params['group_match']
+        requested_template_name = str(params.get('template_name', '')).strip()
+        if requested_template_name and requested_template_name != "— 不使用模板，纯文字 —" and template_asset is None:
+            QMessageBox.warning(self, "导入失败", f"没有找到组合素材模板：\n{requested_template_name}")
+            return
+        canvas_rect = self.scene.sceneRect()
+        import_records = []
+
+        def clamp_to_canvas(point):
+            return QPointF(
+                min(max(point.x(), canvas_rect.left()), canvas_rect.right()),
+                min(max(point.y(), canvas_rect.top()), canvas_rect.bottom())
+            )
+
+        def keep_items_inside_canvas(items):
+            if not items:
+                return
+            rect = QRectF()
+            for item in items:
+                rect = rect.united(item_scene_rect(item))
+            if rect.isEmpty():
+                return
+            dx = 0
+            dy = 0
+            if rect.left() < canvas_rect.left():
+                dx = canvas_rect.left() - rect.left()
+            elif rect.right() > canvas_rect.right():
+                dx = canvas_rect.right() - rect.right()
+            if rect.top() < canvas_rect.top():
+                dy = canvas_rect.top() - rect.top()
+            elif rect.bottom() > canvas_rect.bottom():
+                dy = canvas_rect.bottom() - rect.bottom()
+            if abs(dx) > 0.1 or abs(dy) > 0.1:
+                for item in items:
+                    if item.parentItem():
+                        continue
+                    item.moveBy(dx, dy)
+
+        def collect_import_record(record):
+            nonlocal skipped
+            generation = record['generation']
+            main_text = record['main_text']
+            sub_text1 = record['sub_text1']
+            sub_text2 = record['sub_text2']
+            image_path = record['image_path']
+            extra_texts = record.get('extra_texts', [])
+
+            if generation in ('', '辈分', '代数', 'generation'):
+                skipped += 1
+                return
+
+            generation_idx = generation_map.get(generation)
+            if generation_idx is None or generation_idx >= len(params['y_coords']):
+                skipped += 1
+                return
+            if not any((main_text, sub_text1, sub_text2, image_path, extra_texts)):
+                skipped += 1
+                return
+            record['generation_idx'] = generation_idx
+            record['source_order'] = len(import_records)
+            import_records.append(record)
+
+        def add_import_record(record):
+            nonlocal skipped
+            generation_idx = record['generation_idx']
+            main_text = record['main_text']
+            sub_text1 = record['sub_text1']
+            sub_text2 = record['sub_text2']
+            image_path = record['image_path']
+            extra_texts = record.get('extra_texts', [])
+
+            x = generation_next_x[generation_idx]
+            y = params['y_coords'][generation_idx]
+            base_pos = clamp_to_canvas(QPointF(x, y))
+            full_text = make_full_text(main_text, sub_text1, sub_text2)
+
+            if template_asset:
+                new_items, cloned_by_asset_index, new_commands = clone_group_asset(template_asset, base_pos)
+                apply_template_text(new_items, cloned_by_asset_index, main_text, sub_text1, sub_text2)
+                imported_items.extend(new_items)
+                commands.extend(new_commands)
+                extra_items = add_extra_text_items(extra_texts, base_pos, new_items)
+                placed_items = new_items + extra_items
+                keep_items_inside_canvas(placed_items)
+                placed_rect = QRectF()
+                for item in placed_items:
+                    placed_rect = placed_rect.united(item_scene_rect(item))
+                if not placed_rect.isEmpty():
+                    generation_next_x[generation_idx] = placed_rect.left() - generation_layout_spacing[generation_idx]
+                return
+
+            row_items = []
+            if image_path:
+                if not os.path.isabs(image_path):
+                    image_path = os.path.join(base_dir, image_path)
+                if os.path.exists(image_path):
+                    image_item = VImageItem(image_path, params['img_width'])
+                    image_item.setPos(base_pos)
+                    image_cmd = AddItemCommand(self.scene, image_item)
+                    image_cmd.execute()
+                    commands.append(image_cmd)
+                    imported_items.append(image_item)
+                    row_items.append(image_item)
+                else:
+                    skipped += 1
+
+            if full_text:
+                text_item = VTextItem(full_text, params['font_size'], 400)
+                text_item.font_family = params['font_family']
+                text_item.rebuild()
+                if row_items:
+                    text_item.setPos(base_pos.x() - params['img_width'] - 20, base_pos.y())
+                else:
+                    text_item.setPos(base_pos)
+                text_cmd = AddItemCommand(self.scene, text_item)
+                text_cmd.execute()
+                commands.append(text_cmd)
+                imported_items.append(text_item)
+                row_items.append(text_item)
+
+            extra_items = add_extra_text_items(extra_texts, base_pos, row_items)
+            placed_items = row_items + extra_items
+            keep_items_inside_canvas(placed_items)
+            placed_rect = QRectF()
+            for item in placed_items:
+                placed_rect = placed_rect.united(item_scene_rect(item))
+            if not placed_rect.isEmpty():
+                generation_next_x[generation_idx] = placed_rect.left() - generation_layout_spacing[generation_idx]
+
+            if params['auto_connect'] and len(row_items) >= 2:
+                conn_cmd = self.scene._make_connector_command(row_items[0], row_items[1])
+                if conn_cmd:
+                    conn_cmd.execute()
+                    commands.append(conn_cmd)
+
+        if group_match['enabled']:
+            group_to_field = {
+                normalize_key(group_match['t1']): 'main_text',
+                normalize_key(group_match['t2']): 'sub_text1',
+                normalize_key(group_match['t3']): 'sub_text2',
+                normalize_key(group_match['extra_text']): 'extra_texts',
+            }
+            current_record = None
+            current_fields = set()
+
+            def flush_current_record():
+                nonlocal current_record, current_fields
+                if current_record and any((
+                        current_record['main_text'],
+                        current_record['sub_text1'],
+                        current_record['sub_text2'],
+                        current_record['image_path'],
+                        current_record.get('extra_texts'))):
+                    collect_import_record(current_record)
+                current_record = None
+                current_fields = set()
+
+            for row in rows:
+                generation = row_value(row, columns['generation'])
+                group_value = normalize_key(row_value(row, columns['group']))
+                name_text = row_first_value(row, (columns['name'], '名称', '内容'))
+                image_path = row_value(row, columns['image'])
+
+                if group_value in ('', normalize_key(columns['group'])):
+                    continue
+
+                field = group_to_field.get(group_value)
+                if not field or not name_text:
+                    skipped += 1
+                    continue
+
+                if current_record and (
+                        (field in current_fields and field != 'extra_texts') or
+                        (generation and current_record['generation'] and generation != current_record['generation'])):
+                    flush_current_record()
+
+                if current_record is None:
+                    current_record = {
+                        'generation': generation,
+                        'main_text': '',
+                        'sub_text1': '',
+                        'sub_text2': '',
+                        'image_path': '',
+                        'extra_texts': [],
+                    }
+                elif generation and not current_record['generation']:
+                    current_record['generation'] = generation
+
+                if field == 'extra_texts':
+                    current_record[field].append(name_text)
+                else:
+                    current_record[field] = name_text
+                current_fields.add(field)
+                if image_path and not current_record['image_path']:
+                    current_record['image_path'] = image_path
+
+            flush_current_record()
+        else:
+            for row in rows:
+                record = {
+                    'generation': row_value(row, columns['generation']),
+                    'main_text': row_value(row, columns['t1']),
+                    'sub_text1': row_value(row, columns['t2']),
+                    'sub_text2': row_value(row, columns['t3']),
+                    'image_path': row_value(row, columns['image']),
+                    'extra_texts': [],
+                }
+                if record['generation'] in ('', '辈分', '代数', 'generation'):
+                    continue
+                collect_import_record(record)
+
+        records_by_generation = {}
+        for record in import_records:
+            records_by_generation.setdefault(record['generation_idx'], []).append(record)
+        for generation_idx, records in records_by_generation.items():
+            count = len(records)
+            if count <= 1:
+                continue
+            available_width = max(0, params['start_x'] - canvas_rect.left())
+            if available_width <= 0:
+                continue
+            max_spacing = available_width / (count - 1)
+            generation_layout_spacing[generation_idx] = max(10, min(params['spacing'], max_spacing))
+
+        for record in sorted(import_records, key=lambda r: (r['generation_idx'], r['source_order'])):
+            add_import_record(record)
+
+        if not imported_items:
+            QMessageBox.information(self, "导入结果", "没有导入任何数据，请检查 Excel 内容")
+            return
+
+        self.scene.undo_stack.push(MacroCommand(self.scene, commands))
+        self.scene.clearSelection()
+        for item in imported_items:
+            item.setSelected(True)
+        imported_rect = QRectF()
+        for item in imported_items:
+            imported_rect = imported_rect.united(item_scene_rect(item))
+        if not imported_rect.isEmpty():
+            self.view.fitInView(imported_rect.adjusted(-100, -100, 100, 100), Qt.AspectRatioMode.KeepAspectRatio)
+            self.view.transformChanged.emit()
+        self.scene.update()
+        self.status_bar.showMessage(f"已导入 {len(imported_items)} 个元素", 4000)
+        QMessageBox.information(
+            self, "导入完成",
+            f"已导入 {len(imported_items)} 个元素。\n跳过 {skipped} 行/项。"
+        )
     
     def _open_font_dialog(self):
         """弹出字体选择对话框"""
@@ -8500,6 +9451,7 @@ class MainWindow(QMainWindow):
             # 缓存选中的图片列表，供层级面板批量操作使用
             if images:
                 self._last_selected_images = list(images)
+            self._apply_connection_point_selection_visibility(bool(images))
             self.update_property_summary(selected, texts, images)
 
             # ── 单选时在状态栏显示右上角 CDR 坐标 ──────────────────────
@@ -8537,6 +9489,29 @@ class MainWindow(QMainWindow):
             self._sync_tree_selection_to_scene()
         except (RuntimeError, AttributeError):
             pass
+
+    def toggle_hide_points_on_image_select(self, enabled):
+        self.scene.config_manager.set('hide_connection_points_when_image_selected', enabled)
+        selected = self.scene.selectedItems() if self.scene else []
+        has_images = any(isinstance(item, VImageItem) for item in selected)
+        self._apply_connection_point_selection_visibility(has_images)
+
+    def _apply_connection_point_selection_visibility(self, has_selected_images):
+        if not self.scene:
+            return
+        hide_when_image_selected = self.scene.config_manager.get(
+            'hide_connection_points_when_image_selected', False
+        )
+        visible = self.scene.show_connection_points and not (hide_when_image_selected and has_selected_images)
+        for item in self.scene.items():
+            if isinstance(item, (VTextItem, VImageItem)):
+                item.set_connection_points_visible(visible)
+
+    def toggle_text_hover_tooltip(self, enabled):
+        self.scene.config_manager.set('show_text_hover_tooltip', enabled)
+        for item in self.scene.items():
+            if isinstance(item, VTextItem):
+                item.update_hover_tooltip()
     
     def set_line_width(self):
         """设置连线粗细，同时更新默认值和所有现有连线"""
