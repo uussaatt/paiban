@@ -7534,23 +7534,6 @@ class FamilyTreeImportDialog(QDialog):
             self.y_spins.append(sp)
         root.addWidget(y_group)
 
-        # 图片与连接设置（原"文字样式"中的非字体选项保留）
-        misc_group = QGroupBox("其他设置")
-        mg = QFormLayout(misc_group)
-
-        self.spin_img_width = QDoubleSpinBox()
-        self.spin_img_width.setRange(1, 9999)
-        self.spin_img_width.setDecimals(2)
-        self.spin_img_width.setValue(150)
-        self.spin_img_width.setSuffix(" px")
-        mg.addRow("图片宽度:", self.spin_img_width)
-
-        self.chk_auto_connect = QCheckBox("自动连接同辈相邻节点")
-        self.chk_auto_connect.setChecked(True)
-        mg.addRow("", self.chk_auto_connect)
-
-        root.addWidget(misc_group)
-
         # 按钮
         btns = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
@@ -7627,7 +7610,7 @@ class FamilyTreeImportDialog(QDialog):
     def _update_unit_suffix(self):
         unit = self.combo_unit.currentData() or "px"
         suffix = f" {unit}"
-        for spin in (self.spin_start_x, self.spin_spacing, *self.y_spins, self.spin_img_width):
+        for spin in (self.spin_start_x, self.spin_spacing, *self.y_spins):
             spin.setSuffix(suffix)
 
     def _on_unit_changed(self):
@@ -7646,7 +7629,7 @@ class FamilyTreeImportDialog(QDialog):
         else:
             factor = 1
 
-        for spin in (self.spin_start_x, self.spin_spacing, *self.y_spins, self.spin_img_width):
+        for spin in (self.spin_start_x, self.spin_spacing, *self.y_spins):
             spin.setValue(spin.value() * factor)
 
         self._current_unit = new_unit
@@ -7711,7 +7694,6 @@ class FamilyTreeImportDialog(QDialog):
         defaults = [500, 1000, 1500, 2000, 2500]
         for i, sp in enumerate(self.y_spins):
             sp.setValue(cfg.get(f'ftimport_y{i+1}', defaults[i]))
-        self.spin_img_width.setValue(cfg.get('ftimport_img_width', 150))
         template_name = cfg.get('ftimport_template_name', '')
         if template_name:
             idx = self.combo_template.findText(template_name)
@@ -7732,7 +7714,6 @@ class FamilyTreeImportDialog(QDialog):
         cfg.set('ftimport_spacing', self.spin_spacing.value())
         for i, sp in enumerate(self.y_spins):
             cfg.set(f'ftimport_y{i+1}', sp.value())
-        cfg.set('ftimport_img_width', self.spin_img_width.value())
 
     def _get_t1_font(self):
         """从模板的B组（t1）文字对象取字号和字体，找不到时用系统默认"""
@@ -7770,8 +7751,8 @@ class FamilyTreeImportDialog(QDialog):
             'y_coords': [to_px(sp.value()) for sp in self.y_spins],
             'font_size': font_size,
             'font_family': font_family,
-            'img_width': to_px(self.spin_img_width.value()),
-            'auto_connect': self.chk_auto_connect.isChecked(),
+            'img_width': 150,
+            'auto_connect': True,
             'template_name': self.combo_template.currentText().strip(),
             'template_asset': self._current_template_asset(),
             'placeholders': {
@@ -7806,6 +7787,7 @@ class FamilyTreeImportDialog(QDialog):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
+        self._startup_fit_done = False
         self.setWindowTitle("VertiLayout Pro - 竖排排版引擎")
         self.setGeometry(100, 100, 1400, 900)
         # 应用Fluent Design样式
@@ -7893,10 +7875,43 @@ class MainWindow(QMainWindow):
         self.timer.timeout.connect(self.refresh_ui)
         self.timer.start(2000)
         
-        QTimer.singleShot(100, self.fit_view)
         print("Vertical Layout Engine Started...")
         # 恢复上次窗口大小和停靠面板布局
         self._restore_window_state()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if not self._startup_fit_done:
+            self._startup_fit_done = True
+            self._fit_window_to_available_screen()
+            QTimer.singleShot(0, self.fit_in_view)
+
+    def _fit_window_to_available_screen(self):
+        """启动时确保窗口落在当前屏幕可用区域内。"""
+        if self.isMaximized() or self.isFullScreen():
+            return
+        screen = self.screen() or QApplication.primaryScreen()
+        if not screen:
+            return
+        available = screen.availableGeometry()
+        max_w = max(800, int(available.width() * 0.94))
+        max_h = max(600, int(available.height() * 0.94))
+        new_w = min(self.width(), max_w)
+        new_h = min(self.height(), max_h)
+        if new_w != self.width() or new_h != self.height():
+            self.resize(new_w, new_h)
+        frame = self.frameGeometry()
+        if not available.contains(frame):
+            frame.moveCenter(available.center())
+            if frame.left() < available.left():
+                frame.moveLeft(available.left())
+            if frame.top() < available.top():
+                frame.moveTop(available.top())
+            if frame.right() > available.right():
+                frame.moveRight(available.right())
+            if frame.bottom() > available.bottom():
+                frame.moveBottom(available.bottom())
+            self.move(frame.topLeft())
 
     def _save_window_state(self):
         s = QSettings("VertiLayout", "VertiLayoutPro")
@@ -8745,6 +8760,7 @@ class MainWindow(QMainWindow):
         self.view.fit_in_view()
         # 稍微缩小一点，留出边距
         self.view.scale(0.95, 0.95)
+        self.view.transformChanged.emit()
 
     def add_text(self):
         # 从配置获取默认字体和大小
