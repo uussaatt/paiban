@@ -67,6 +67,7 @@ class ConfigManager:
             'insert_image_default_width': 0,  # 插入图片默认宽度（px），0表示按比例自动
             'insert_image_default_height': 0,  # 插入图片默认高度（px），0表示按宽度比例自动
             'insert_image_use_custom_size': False,  # 是否使用自定义插入尺寸
+            'insert_image_fit_canvas': False,  # 插入图片时自动适应画布大小
             'hide_connection_points_when_image_selected': False,
             'show_text_hover_tooltip': False,
             'favorite_fonts': ['SimSun', 'Microsoft YaHei', '黑体', '楷体', 'Arial'],
@@ -7372,12 +7373,14 @@ class LayoutView(QGraphicsView):
             for url in event.mimeData().urls():
                 path = url.toLocalFile()
                 if path.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp')):
-                    pos = self.mapToScene(event.position().toPoint())
                     pix = QPixmap(path)
                     mw = self.window()
                     w, h = mw._calc_insert_size(pix, self.scene()) if not pix.isNull() else (DEFAULT_FONT_SIZE * 4, 0)
                     img = VImageItem(path, target_width=w, target_height=h)
-                    img.setPos(pos)
+                    if self.scene().config_manager.get('insert_image_fit_canvas', False):
+                        img.setPos(self.scene().sceneRect().topLeft())
+                    else:
+                        img.setPos(self.mapToScene(event.position().toPoint()))
                     if self.scene().config_manager.get('insert_image_to_bottom', False):
                         img.setZValue(-1)
                     self.scene().add_item_with_undo(img)
@@ -7411,7 +7414,10 @@ class LayoutView(QGraphicsView):
             mw = self.window()
             target_w = mw._calc_insert_width(pix, self.scene()) if not pix.isNull() else DEFAULT_FONT_SIZE * 4
             img = VImageItem(tmp_path, target_width=target_w)
-            img.setPos(pos)
+            if self.scene().config_manager.get('insert_image_fit_canvas', False):
+                img.setPos(self.scene().sceneRect().topLeft())
+            else:
+                img.setPos(pos)
             if self.scene().config_manager.get('insert_image_to_bottom', False):
                 img.setZValue(-1)
             self.scene().add_item_with_undo(img)
@@ -8624,6 +8630,12 @@ class MainWindow(QMainWindow):
         self.insert_image_to_bottom_action.toggled.connect(self.toggle_insert_image_to_bottom)
         edit_menu.addAction(self.insert_image_to_bottom_action)
 
+        self.insert_image_fit_canvas_action = QAction('插入图片时自动适应画布大小', self)
+        self.insert_image_fit_canvas_action.setCheckable(True)
+        self.insert_image_fit_canvas_action.setChecked(self.scene.config_manager.get('insert_image_fit_canvas', False))
+        self.insert_image_fit_canvas_action.toggled.connect(self.toggle_insert_image_fit_canvas)
+        edit_menu.addAction(self.insert_image_fit_canvas_action)
+
         eye_role_from_selection_menu = edit_menu.addMenu('设置选中文字眼睛颜色')
         for color_key, color_label in [
             ('yellow', '设为黄色眼睛'),
@@ -8720,6 +8732,14 @@ class MainWindow(QMainWindow):
         else:
             self.status_bar.showMessage('已关闭：插入图片时保持默认层级', 3000)
 
+    def toggle_insert_image_fit_canvas(self, enabled):
+        """切换插入图片时是否自动适应画布大小"""
+        self.scene.config_manager.set('insert_image_fit_canvas', enabled)
+        if enabled:
+            self.status_bar.showMessage('已开启：插入图片时自动拉伸为画布大小', 3000)
+        else:
+            self.status_bar.showMessage('已关闭：插入图片时使用原始大小', 3000)
+
     def set_nudge_large_step(self):
         """设置Shift+方向键大步长"""
         current = self.scene.config_manager.get('nudge_large_step', 10)
@@ -8776,6 +8796,10 @@ class MainWindow(QMainWindow):
         
     def _calc_insert_size(self, pix, scene):
         """计算插入图片的目标宽高，返回 (width, height)，height=0 表示按比例自动"""
+        # 优先：适应画布模式（强制拉伸填满画布）
+        if scene.config_manager.get('insert_image_fit_canvas', False):
+            canvas = scene.sceneRect()
+            return int(canvas.width()), int(canvas.height())
         use_custom = scene.config_manager.get('insert_image_use_custom_size', False)
         if not use_custom:
             # 关闭自定义：按原图大小插入
@@ -8806,8 +8830,11 @@ class MainWindow(QMainWindow):
             pix = QPixmap(path)
             w, h = self._calc_insert_size(pix, self.scene) if not pix.isNull() else (DEFAULT_FONT_SIZE * 4, 0)
             img = VImageItem(path, target_width=w, target_height=h)
-            center = self.view.mapToScene(self.view.viewport().rect().center())
-            img.setPos(center)
+            if self.scene.config_manager.get('insert_image_fit_canvas', False):
+                img.setPos(self.scene.sceneRect().topLeft())
+            else:
+                center = self.view.mapToScene(self.view.viewport().rect().center())
+                img.setPos(center)
             if self.scene.config_manager.get('insert_image_to_bottom', False):
                 img.setZValue(-1)
             self.scene.add_item_with_undo(img)
@@ -9215,6 +9242,8 @@ class MainWindow(QMainWindow):
         imported_items = []
         commands = []
         skipped = 0
+        count_a = 0  # A组（主记录）数量
+        count_d = 0  # D组（extra_texts）文字数量
         template_asset = params['template_asset']
         base_dir = os.path.dirname(excel_path)
         columns = params['columns']
@@ -9281,7 +9310,7 @@ class MainWindow(QMainWindow):
             import_records.append(record)
 
         def add_import_record(record):
-            nonlocal skipped
+            nonlocal skipped, count_a, count_d
             generation_idx = record['generation_idx']
             main_text = record['main_text']
             sub_text1 = record['sub_text1']
@@ -9293,6 +9322,8 @@ class MainWindow(QMainWindow):
             y = params['y_coords'][generation_idx]
             base_pos = clamp_to_canvas(QPointF(x, y))
             full_text = make_full_text(main_text, sub_text1, sub_text2)
+            count_a += 1
+            count_d += len([t for t in extra_texts if t])
 
             if template_asset:
                 new_items, cloned_by_asset_index, new_commands = clone_group_asset(template_asset, base_pos)
@@ -9468,7 +9499,10 @@ class MainWindow(QMainWindow):
         self.status_bar.showMessage(f"已导入 {len(imported_items)} 个元素", 4000)
         QMessageBox.information(
             self, "导入完成",
-            f"已导入 {len(imported_items)} 个元素。\n跳过 {skipped} 行/项。"
+            f"已导入 {len(imported_items)} 个元素。\n"
+            f"A组（主记录）：{count_a} 条\n"
+            f"D组（附加文字）：{count_d} 条\n"
+            f"跳过 {skipped} 行/项。"
         )
     
     def _open_font_dialog(self):
