@@ -7534,38 +7534,22 @@ class FamilyTreeImportDialog(QDialog):
             self.y_spins.append(sp)
         root.addWidget(y_group)
 
-        # 文字样式
-        style_group = QGroupBox("文字样式")
-        sg = QFormLayout(style_group)
-        self.spin_font_size = QSpinBox()
-        self.spin_font_size.setRange(8, 200)
-        self.spin_font_size.setValue(
-            self.scene.config_manager.get('default_font_size', DEFAULT_FONT_SIZE)
-        )
-        sg.addRow("字号:", self.spin_font_size)
-
-        self.combo_font = QComboBox()
-        self.combo_font.setEditable(True)
-        default_font = self.scene.config_manager.get('default_font_family', DEFAULT_FONT)
-        for f in QFontDatabase.families():
-            self.combo_font.addItem(f)
-        idx = self.combo_font.findText(default_font)
-        if idx >= 0:
-            self.combo_font.setCurrentIndex(idx)
-        sg.addRow("字体:", self.combo_font)
+        # 图片与连接设置（原"文字样式"中的非字体选项保留）
+        misc_group = QGroupBox("其他设置")
+        mg = QFormLayout(misc_group)
 
         self.spin_img_width = QDoubleSpinBox()
         self.spin_img_width.setRange(1, 9999)
         self.spin_img_width.setDecimals(2)
         self.spin_img_width.setValue(150)
         self.spin_img_width.setSuffix(" px")
-        sg.addRow("图片宽度:", self.spin_img_width)
+        mg.addRow("图片宽度:", self.spin_img_width)
 
         self.chk_auto_connect = QCheckBox("自动连接同辈相邻节点")
         self.chk_auto_connect.setChecked(True)
-        sg.addRow("", self.chk_auto_connect)
+        mg.addRow("", self.chk_auto_connect)
 
-        root.addWidget(style_group)
+        root.addWidget(misc_group)
 
         # 按钮
         btns = QDialogButtonBox(
@@ -7727,15 +7711,6 @@ class FamilyTreeImportDialog(QDialog):
         defaults = [500, 1000, 1500, 2000, 2500]
         for i, sp in enumerate(self.y_spins):
             sp.setValue(cfg.get(f'ftimport_y{i+1}', defaults[i]))
-        self.spin_font_size.setValue(
-            cfg.get('ftimport_font_size',
-                    cfg.get('default_font_size', DEFAULT_FONT_SIZE))
-        )
-        saved_font = cfg.get('ftimport_font_family',
-                              cfg.get('default_font_family', DEFAULT_FONT))
-        idx = self.combo_font.findText(saved_font)
-        if idx >= 0:
-            self.combo_font.setCurrentIndex(idx)
         self.spin_img_width.setValue(cfg.get('ftimport_img_width', 150))
         template_name = cfg.get('ftimport_template_name', '')
         if template_name:
@@ -7757,9 +7732,28 @@ class FamilyTreeImportDialog(QDialog):
         cfg.set('ftimport_spacing', self.spin_spacing.value())
         for i, sp in enumerate(self.y_spins):
             cfg.set(f'ftimport_y{i+1}', sp.value())
-        cfg.set('ftimport_font_size', self.spin_font_size.value())
-        cfg.set('ftimport_font_family', self.combo_font.currentText())
         cfg.set('ftimport_img_width', self.spin_img_width.value())
+
+    def _get_t1_font(self):
+        """从模板的B组（t1）文字对象取字号和字体，找不到时用系统默认"""
+        cfg = self.scene.config_manager
+        default_size = cfg.get('default_font_size', DEFAULT_FONT_SIZE)
+        default_family = cfg.get('default_font_family', DEFAULT_FONT)
+        asset = self._current_template_asset()
+        if not asset:
+            return default_size, default_family
+        t1_index = self.combo_template_t1.currentData()
+        if t1_index is None:
+            # 没有手动指定时，取第一个文字对象
+            for item_data in asset.get('items', []):
+                if item_data.get('type') == 'VTextItem':
+                    return item_data.get('font_size', default_size), item_data.get('font_family', default_family)
+            return default_size, default_family
+        items = asset.get('items', [])
+        if t1_index < len(items) and items[t1_index].get('type') == 'VTextItem':
+            d = items[t1_index]
+            return d.get('font_size', default_size), d.get('font_family', default_family)
+        return default_size, default_family
 
     def get_params(self):
         self._save_settings()
@@ -7767,14 +7761,15 @@ class FamilyTreeImportDialog(QDialog):
         scale = CORELDRAW_EXPORT_DPI / 25.4 if unit == 'mm' else 1.0
         def to_px(value):
             return value * scale
+        font_size, font_family = self._get_t1_font()
         return {
             'excel_path': self.txt_excel.text().strip(),
             'unit': unit,
             'start_x': to_px(self.spin_start_x.value()),
             'spacing': to_px(self.spin_spacing.value()),
             'y_coords': [to_px(sp.value()) for sp in self.y_spins],
-            'font_size': self.spin_font_size.value(),
-            'font_family': self.combo_font.currentText(),
+            'font_size': font_size,
+            'font_family': font_family,
             'img_width': to_px(self.spin_img_width.value()),
             'auto_connect': self.chk_auto_connect.isChecked(),
             'template_name': self.combo_template.currentText().strip(),
@@ -9021,22 +9016,29 @@ class MainWindow(QMainWindow):
                 else:
                     text_item.setPos(target_scene_pos)
 
-        def add_extra_text_items(extra_texts, base_pos, anchor_items=None):
+        def add_extra_text_items(extra_texts, base_pos, anchor_items=None, ref_text_item=None):
             created_items = []
             if not extra_texts:
                 return created_items
+            # 字号字体优先从参考文字对象（B组）取，取不到再用params默认值
+            if ref_text_item and isinstance(ref_text_item, VTextItem):
+                font_size = ref_text_item.font_size
+                font_family = ref_text_item.font_family
+            else:
+                font_size = params['font_size']
+                font_family = params['font_family']
             anchor_rect = QRectF(base_pos, QSizeF(0, 0))
             for item in anchor_items or []:
                 anchor_rect = anchor_rect.united(item_scene_rect(item))
-            x = anchor_rect.left() - params['font_size'] * 2 - 20
+            x = anchor_rect.left() - font_size * 2 - 20
             y = anchor_rect.top()
             for idx, text in enumerate(extra_texts):
                 if not text:
                     continue
-                text_item = VTextItem(text, params['font_size'], 400)
-                text_item.font_family = params['font_family']
+                text_item = VTextItem(text, font_size, 400)
+                text_item.font_family = font_family
                 text_item.rebuild()
-                text_item.setPos(x - idx * (params['font_size'] * 2 + 20), y)
+                text_item.setPos(x - idx * (font_size * 2 + 20), y)
                 text_cmd = AddItemCommand(self.scene, text_item)
                 text_cmd.execute()
                 commands.append(text_cmd)
@@ -9052,25 +9054,32 @@ class MainWindow(QMainWindow):
                 't3': sub_text2,
             }
             template_text_map = params['template_text_map']
+            slot_items = {}
 
             mapped_any = False
             for slot, value in slot_values.items():
                 asset_index = template_text_map.get(slot)
-                if asset_index is None or asset_index >= len(cloned_by_asset_index):
+                if asset_index is None or asset_index < 0 or asset_index >= len(cloned_by_asset_index):
                     continue
                 text_item = cloned_by_asset_index[asset_index]
                 if isinstance(text_item, VTextItem):
                     text_item.full_text = value
                     rebuild_template_text(text_item, keep_template_anchor=True)
+                    slot_items[slot] = text_item
                     mapped_any = True
 
             if mapped_any:
-                return
+                return slot_items
 
             values = {
                 placeholders['t1'].strip().lower(): slot_values['t1'],
                 placeholders['t2'].strip().lower(): slot_values['t2'],
                 placeholders['t3'].strip().lower(): slot_values['t3'],
+            }
+            placeholder_to_slot = {
+                placeholders['t1'].strip().lower(): 't1',
+                placeholders['t2'].strip().lower(): 't2',
+                placeholders['t3'].strip().lower(): 't3',
             }
             text_items = [item for item in new_items if isinstance(item, VTextItem)]
             matched = set()
@@ -9080,19 +9089,23 @@ class MainWindow(QMainWindow):
                 if key in values:
                     text_item.full_text = values[key]
                     rebuild_template_text(text_item, keep_template_anchor=True)
+                    slot_items[placeholder_to_slot[key]] = text_item
                     matched.add(key)
 
             if matched:
-                return
+                return slot_items
 
             ordered_text_items = sorted(
                 text_items,
                 key=lambda item: (item.scenePos().x(), item.scenePos().y()),
                 reverse=True
             )
-            for text_item, value in zip(ordered_text_items, (main_text, sub_text1, sub_text2)):
+            for slot, text_item in zip(('t1', 't2', 't3'), ordered_text_items):
+                value = slot_values[slot]
                 text_item.full_text = value
                 rebuild_template_text(text_item, keep_template_anchor=True)
+                slot_items[slot] = text_item
+            return slot_items
 
         def clone_group_asset(asset, base_pos):
             min_x = min(d['scene_pos'][0] for d in asset['items'])
@@ -9267,10 +9280,13 @@ class MainWindow(QMainWindow):
 
             if template_asset:
                 new_items, cloned_by_asset_index, new_commands = clone_group_asset(template_asset, base_pos)
-                apply_template_text(new_items, cloned_by_asset_index, main_text, sub_text1, sub_text2)
+                slot_items = apply_template_text(new_items, cloned_by_asset_index, main_text, sub_text1, sub_text2)
                 imported_items.extend(new_items)
                 commands.extend(new_commands)
-                extra_items = add_extra_text_items(extra_texts, base_pos, new_items)
+                # 取B组对应的t3文字对象作为D组的字号字体参考
+                t3_index = params['template_text_map'].get('t3')
+                ref_item = slot_items.get('t3') or (cloned_by_asset_index[t3_index] if t3_index is not None and 0 <= t3_index < len(cloned_by_asset_index) else None) or next((i for i in new_items if isinstance(i, VTextItem)), None)
+                extra_items = add_extra_text_items(extra_texts, base_pos, new_items, ref_text_item=ref_item)
                 placed_items = new_items + extra_items
                 keep_items_inside_canvas(placed_items)
                 placed_rect = QRectF()
@@ -9281,6 +9297,7 @@ class MainWindow(QMainWindow):
                 return
 
             row_items = []
+            ref_item = None
             if image_path:
                 if not os.path.isabs(image_path):
                     image_path = os.path.join(base_dir, image_path)
@@ -9308,8 +9325,9 @@ class MainWindow(QMainWindow):
                 commands.append(text_cmd)
                 imported_items.append(text_item)
                 row_items.append(text_item)
+                ref_item = text_item
 
-            extra_items = add_extra_text_items(extra_texts, base_pos, row_items)
+            extra_items = add_extra_text_items(extra_texts, base_pos, row_items, ref_text_item=ref_item)
             placed_items = row_items + extra_items
             keep_items_inside_canvas(placed_items)
             placed_rect = QRectF()
