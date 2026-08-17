@@ -332,15 +332,13 @@ class AssetManager:
     
     def remove_group_asset(self, asset_id):
         """删除组合素材"""
-        # 找到要删除的素材
         asset_to_remove = None
         for asset in self.assets['groups']:
             if asset['id'] == asset_id:
                 asset_to_remove = asset
                 break
-        
+
         if asset_to_remove:
-            # 删除相关的图片文件和缩略图
             for item_data in asset_to_remove['items']:
                 if item_data['type'] == 'VImageItem':
                     try:
@@ -348,17 +346,69 @@ class AssetManager:
                             os.remove(item_data['path'])
                     except:
                         pass
-            # 删除缩略图
             thumb = asset_to_remove.get('thumb_path', '')
             if thumb and os.path.exists(thumb):
                 try:
                     os.remove(thumb)
                 except:
                     pass
-
-            # 从列表中删除
             self.assets['groups'] = [a for a in self.assets['groups'] if a['id'] != asset_id]
             self.save_assets()
+
+    def _delete_group_asset_files(self, asset, keep_paths=None):
+        """删除组合素材关联文件，可指定保留路径避免误删新素材。"""
+        keep_paths = {os.path.abspath(p) for p in (keep_paths or []) if p}
+
+        def safe_remove(path):
+            if not path:
+                return
+            abs_path = os.path.abspath(path)
+            if abs_path in keep_paths:
+                return
+            try:
+                if os.path.exists(abs_path):
+                    os.remove(abs_path)
+            except Exception as e:
+                print(f"删除素材文件失败 {abs_path}: {e}")
+
+        for item_data in asset.get('items', []):
+            if item_data.get('type') == 'VImageItem':
+                safe_remove(item_data.get('path', ''))
+        safe_remove(asset.get('thumb_path', ''))
+
+    def update_group_asset(self, asset_id, items, scene):
+        """用当前画布上的元素更新已有组合素材"""
+        # 找到原素材位置
+        idx = next((i for i, a in enumerate(self.assets['groups']) if a['id'] == asset_id), None)
+        if idx is None:
+            return None
+        old_asset = self.assets['groups'][idx]
+        old_name = old_asset.get('name', '')
+
+        # 先重建新素材，确认成功后再替换旧素材；避免先删旧图片导致复制源文件丢失
+        try:
+            new_asset = self.add_group_asset(items, scene)
+        except Exception as e:
+            print(f"更新组合素材失败: {e}")
+            return None
+
+        if new_asset:
+            # 恢复原有 id 和 name
+            new_asset['id'] = asset_id
+            new_asset['name'] = old_name
+            # 替换回原位置
+            if new_asset in self.assets['groups']:
+                self.assets['groups'].remove(new_asset)
+            self.assets['groups'][idx] = new_asset
+            self.save_assets()
+            keep_paths = [
+                item_data.get('path', '')
+                for item_data in new_asset.get('items', [])
+                if item_data.get('type') == 'VImageItem'
+            ]
+            keep_paths.append(new_asset.get('thumb_path', ''))
+            self._delete_group_asset_files(old_asset, keep_paths)
+        return new_asset
     
     def remove_text_asset(self, asset_id):
         """删除文字素材"""
@@ -1026,6 +1076,8 @@ class AssetLibraryDockWidget(QDockWidget):
         self.group_list.setMouseTracking(True)
         self.group_list.mouseMoveEvent = self._on_group_list_mouse_move
         self.group_list.leaveEvent = self._on_group_list_leave
+        self.group_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.group_list.customContextMenuRequested.connect(self._on_group_list_context_menu)
         self._preview_popup = GroupAssetPreviewPopup()
         self._preview_timer = QTimer()
         self._preview_timer.setSingleShot(True)
@@ -1036,6 +1088,8 @@ class AssetLibraryDockWidget(QDockWidget):
         gb = QHBoxLayout()
         btn_use = QPushButton("使用"); btn_use.setMaximumHeight(30); btn_use.setProperty("class", "primary")
         btn_use.clicked.connect(self.use_group_asset_selected); gb.addWidget(btn_use)
+        btn_edit = QPushButton("编辑"); btn_edit.setMaximumHeight(30)
+        btn_edit.clicked.connect(self.edit_group_asset_selected); gb.addWidget(btn_edit)
         btn_ren = QPushButton("重命名"); btn_ren.setMaximumHeight(30)
         btn_ren.clicked.connect(self.rename_group_asset_selected); gb.addWidget(btn_ren)
         btn_del = QPushButton("删除"); btn_del.setMaximumHeight(30)
@@ -1260,6 +1314,7 @@ class AssetLibraryDockWidget(QDockWidget):
         for i in new_items:
             i.setSelected(True)
         scene.update()
+        return new_items
 
     def delete_group_asset(self):
         current_item = self.group_list.currentItem()
@@ -1293,6 +1348,54 @@ class AssetLibraryDockWidget(QDockWidget):
         current_item = self.group_list.currentItem()
         if current_item:
             self.rename_group_asset(current_item)
+
+    def _on_group_list_context_menu(self, pos):
+        item = self.group_list.itemAt(pos)
+        if not item:
+            return
+        asset = item.data(Qt.ItemDataRole.UserRole)
+        menu = QMenu(self)
+        menu.addAction("使用").triggered.connect(lambda: self.use_group_asset(item))
+        menu.addAction("编辑组合").triggered.connect(lambda: self._edit_group_asset(asset))
+        menu.addAction("重命名").triggered.connect(lambda: self.rename_group_asset(item))
+        menu.addSeparator()
+        menu.addAction("删除").triggered.connect(self.delete_group_asset)
+        menu.exec(self.group_list.mapToGlobal(pos))
+
+    def edit_group_asset_selected(self):
+        current_item = self.group_list.currentItem()
+        if current_item:
+            asset = current_item.data(Qt.ItemDataRole.UserRole)
+            self._edit_group_asset(asset)
+
+    def _edit_group_asset(self, asset):
+        """把组合放到画布上进入编辑模式"""
+        if not asset:
+            return
+        scene = self.main_window.scene
+        view = self.main_window.view
+        # 放置到视图中心
+        center = view.mapToScene(view.viewport().rect().center())
+        # 计算偏移使组合居中
+        if asset['items']:
+            min_x = min(d['scene_pos'][0] for d in asset['items'])
+            min_y = min(d['scene_pos'][1] for d in asset['items'])
+            max_x = max(d['scene_pos'][0] for d in asset['items'])
+            max_y = max(d['scene_pos'][1] for d in asset['items'])
+            grp_w = max_x - min_x
+            grp_h = max_y - min_y
+            base_pos = QPointF(center.x() - grp_w / 2, center.y() - grp_h / 2)
+        else:
+            base_pos = center
+
+        placed = self._place_group_at(asset, base_pos)
+
+        scene._editing_group_asset_id = asset['id']
+        scene._editing_group_items = [i for i in (placed or []) if isinstance(i, (VImageItem, VTextItem))]
+
+        self.main_window.status_bar.showMessage(
+            f"正在编辑组合「{asset['name']}」— 编辑完成后右键画布选择「更新到素材库」", 0
+        )
 
 class AssetLibraryWidget(QWidget):
     """素材库窗口"""
@@ -3498,6 +3601,17 @@ class VTextItem(BaseElement):
         delete_action = menu.addAction("删除 (Delete)")
         save_as_asset_action = menu.addAction("保存组合")
         menu.addSeparator()
+
+        main_window = None
+        if self.scene() and self.scene().views():
+            view = self.scene().views()[0]
+            main_window = getattr(view, '_main_window', None)
+        update_group_asset_action = None
+        cancel_group_edit_action = None
+        if main_window and getattr(self.scene(), '_editing_group_asset_id', None) is not None:
+            update_group_asset_action = menu.addAction("✅ 更新到素材库（完成编辑）")
+            cancel_group_edit_action = menu.addAction("❌ 取消编辑组合")
+            menu.addSeparator()
         
         selected_items = [item for item in self.scene().selectedItems() if isinstance(item, BaseElement)]
         if len(selected_items) >= 2:
@@ -3525,6 +3639,13 @@ class VTextItem(BaseElement):
         
         action = menu.exec(global_pos)
         
+        if update_group_asset_action and action == update_group_asset_action:
+            main_window.finish_edit_group_asset()
+            return
+        if cancel_group_edit_action and action == cancel_group_edit_action:
+            main_window.cancel_edit_group_asset()
+            return
+
         if action == action_inline_edit:
             self.start_inline_editing()
         elif action == action_dialog_edit:
@@ -4446,6 +4567,15 @@ class VImageItem(BaseElement):
         menu.addAction("保存组合").triggered.connect(lambda: self.scene().save_group_as_asset() if self.scene() else None)
         menu.addSeparator()
 
+        main_window = None
+        if self.scene() and self.scene().views():
+            view = self.scene().views()[0]
+            main_window = getattr(view, '_main_window', None)
+        if main_window and getattr(self.scene(), '_editing_group_asset_id', None) is not None:
+            menu.addAction("✅ 更新到素材库（完成编辑）").triggered.connect(main_window.finish_edit_group_asset)
+            menu.addAction("❌ 取消编辑组合").triggered.connect(main_window.cancel_edit_group_asset)
+            menu.addSeparator()
+
         selected_items = [i for i in self.scene().selectedItems() if isinstance(i, BaseElement)] if self.scene() else []
         if len(selected_items) >= 2:
             align_menu = menu.addMenu("对齐")
@@ -4969,6 +5099,8 @@ class LayoutScene(QGraphicsScene):
         self.align_reference_mode = None  # 对齐基准点选模式
         self.align_reference_candidates = []
         self._pending_selection_click_item = None
+        self._editing_group_asset_id = None  # 正在编辑的组合素材ID
+        self._editing_group_items = []       # 正在编辑的组合元素列表
         
         # 连接选择改变信号
         self.selectionChanged.connect(self.on_selection_changed_track)
@@ -8767,12 +8899,100 @@ class MainWindow(QMainWindow):
         menu.addAction("添加文本", self.add_text)
         menu.addAction("插入图片", self.add_image)
         menu.addSeparator()
+        # 编辑组合模式下显示"更新到素材库"
+        editing_id = getattr(self.scene, '_editing_group_asset_id', None)
+        if editing_id is not None:
+            menu.addAction(f"✅ 更新到素材库（完成编辑）", self.finish_edit_group_asset)
+            menu.addAction("❌ 取消编辑组合", self.cancel_edit_group_asset)
+            menu.addSeparator()
         menu.addAction("显示所有隐藏图片", self.show_all_hidden_images)
         menu.addSeparator()
         menu.addAction("打开工程\tCtrl+O", self.load_proj)
         menu.addAction("保存工程\tCtrl+S", self.save_proj)
         menu.addAction("导出图片\tCtrl+E", self.export_image)
         menu.exec(self.view.mapToGlobal(pos))
+
+    def finish_edit_group_asset(self):
+        """完成编辑，把放置时记录的完整元素列表更新到素材库"""
+        asset_id = getattr(self.scene, '_editing_group_asset_id', None)
+        if asset_id is None:
+            return
+        items = getattr(self.scene, '_editing_group_items', [])
+        # 过滤掉已被删除的元素
+        items = [i for i in items if i.scene() == self.scene]
+        items = self._collect_complete_editing_group_items(items)
+        if not items:
+            QMessageBox.warning(self, "更新失败", "找不到编辑中的元素，请重新操作")
+            return
+        result = self.scene.asset_manager.update_group_asset(asset_id, items, self.scene)
+        if result:
+            self._remove_editing_group_items_from_canvas(items)
+            self.scene._editing_group_asset_id = None
+            self.scene._editing_group_items = []
+            self.asset_library_dock.refresh_assets()
+            self.status_bar.showMessage(f"组合「{result['name']}」已更新到素材库", 4000)
+            QMessageBox.information(self, "更新成功", f"组合「{result['name']}」已成功更新到素材库")
+        else:
+            QMessageBox.warning(self, "更新失败", "更新素材库失败，请重试")
+
+    def _collect_complete_editing_group_items(self, seed_items):
+        """沿父子关系和图文连接收集编辑组合里的新增元素。"""
+        collected = {
+            item for item in seed_items
+            if item.scene() == self.scene and isinstance(item, (VImageItem, VTextItem))
+        }
+        changed = True
+        while changed:
+            changed = False
+            for item in list(collected):
+                parent = item.parentItem()
+                if parent and parent.scene() == self.scene and isinstance(parent, (VImageItem, VTextItem)) and parent not in collected:
+                    collected.add(parent)
+                    changed = True
+                for child in item.childItems():
+                    if child.scene() == self.scene and isinstance(child, (VImageItem, VTextItem)) and child not in collected:
+                        collected.add(child)
+                        changed = True
+            for conn in list(self.scene.connectors) + list(self.scene.image_text_connectors):
+                endpoints = []
+                if hasattr(conn, 'parent_element') and hasattr(conn, 'child_element'):
+                    endpoints = [conn.parent_element, conn.child_element]
+                elif hasattr(conn, 'image_item') and hasattr(conn, 'text_item'):
+                    endpoints = [conn.image_item, conn.text_item]
+                elif hasattr(conn, 'item1') and hasattr(conn, 'item2'):
+                    endpoints = [conn.item1, conn.item2]
+                if any(item in collected for item in endpoints):
+                    for item in endpoints:
+                        if item and item.scene() == self.scene and isinstance(item, (VImageItem, VTextItem)) and item not in collected:
+                            collected.add(item)
+                            changed = True
+        return sorted(collected, key=lambda item: (item.scenePos().y(), item.scenePos().x()))
+
+    def _remove_editing_group_items_from_canvas(self, items):
+        """更新素材库成功后，移除画布上的临时编辑副本。"""
+        item_set = set(items)
+        root_items = [
+            item for item in items
+            if item.scene() == self.scene and item.parentItem() not in item_set
+        ]
+        for item in items:
+            if item.scene() == self.scene:
+                self.scene.remove_all_connectors_for_item(item)
+                self.scene.remove_image_text_connectors(item)
+            if item in self.scene.selection_order:
+                self.scene.selection_order = [i for i in self.scene.selection_order if i != item]
+        for item in root_items:
+            if item.scene() == self.scene:
+                self.scene.removeItem(item)
+        self.scene.clearSelection()
+        self.scene.update()
+        self.refresh_ui()
+
+    def cancel_edit_group_asset(self):
+        """取消编辑，清除编辑状态"""
+        self.scene._editing_group_asset_id = None
+        self.scene._editing_group_items = []
+        self.status_bar.showMessage("已取消编辑组合", 3000)
 
     def fit_view(self):
         """初始化时适应视图"""
