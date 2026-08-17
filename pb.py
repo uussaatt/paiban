@@ -61,6 +61,7 @@ class ConfigManager:
             'marquee_mode': 'all',  # 框选模式：all / images / connected
             'insert_image_to_bottom': False,  # 插入图片时置于底层
             'nudge_large_step': 10,  # Shift+方向键大步长（像素）
+            'horizontal_move_only': False,  # 拖动/方向键移动时只允许水平移动
             'smart_brush_radius': 18,  # 智能笔刷默认大小
             'default_save_dir': '',  # 默认保存目录
             'insert_image_max_width_ratio': 0.3,  # 插入图片最大宽度（画布宽度的比例）
@@ -2854,6 +2855,12 @@ class BaseElement(QGraphicsItem):
             # 吸附到辅助线
             if self.scene() and self.scene().guides:
                 value = self._snap_to_guides(value)
+            if self.scene() and self.scene().config_manager.get('horizontal_move_only', False):
+                old_scene_pos = self.scenePos()
+                parent = self.parentItem()
+                new_scene_pos = parent.mapToScene(value) if parent else value
+                locked_scene_pos = QPointF(new_scene_pos.x(), old_scene_pos.y())
+                value = parent.mapFromScene(locked_scene_pos) if parent else locked_scene_pos
 
         if change == QGraphicsItem.GraphicsItemChange.ItemPositionHasChanged:
             # 先更新连接点位置，再更新连线，确保连线使用最新的连接点坐标
@@ -3233,6 +3240,39 @@ class InlineTextEditor(QTextEdit):
         cursor.insertText(text)
         self.setFocus()
 
+    def _set_vertical_cursor_from_viewport_pos(self, pos, keep_anchor=False):
+        if not self.text_item or not self.text_item.scene():
+            return False
+        views = self.text_item.scene().views()
+        if not views:
+            return False
+        view = views[0]
+        scene_pos = view.mapToScene(self.mapToParent(pos))
+        item_pos = self.text_item.mapFromScene(scene_pos)
+        cursor_pos = self.text_item._cursor_position_from_point(item_pos)
+        cursor = self.textCursor()
+        if keep_anchor:
+            cursor.setPosition(cursor_pos, QTextCursor.MoveMode.KeepAnchor)
+        else:
+            cursor.setPosition(cursor_pos)
+        self.setTextCursor(cursor)
+        self.text_item.update()
+        return True
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton and self._set_vertical_cursor_from_viewport_pos(event.pos()):
+            self.setFocus()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if event.buttons() & Qt.MouseButton.LeftButton:
+            if self._set_vertical_cursor_from_viewport_pos(event.pos(), keep_anchor=True):
+                event.accept()
+                return
+        super().mouseMoveEvent(event)
+
     def start_editing(self, text_item, text, cursor_position=None, select_all=False):
         self.text_item = text_item
         self.original_text = text
@@ -3565,14 +3605,15 @@ class VTextItem(BaseElement):
         if self.connection_point:
             self.connection_point.setVisible(visible)
         
-    def _show_context_menu(self, global_pos):
-        self._build_text_context_menu(global_pos)
+    def _show_context_menu(self, global_pos, item_pos=None):
+        self._build_text_context_menu(global_pos, item_pos)
 
     def contextMenuEvent(self, event):
-        self._build_text_context_menu(event.screenPos())
+        self._build_text_context_menu(event.screenPos(), event.pos())
 
-    def _build_text_context_menu(self, global_pos):
+    def _build_text_context_menu(self, global_pos, item_pos=None):
         menu = QMenu()
+        clicked_cursor_position = self._cursor_position_from_point(item_pos) if item_pos is not None else None
         
         # 编辑选项
         action_inline_edit = menu.addAction("直接编辑 (Inline Edit)")
@@ -3647,7 +3688,7 @@ class VTextItem(BaseElement):
             return
 
         if action == action_inline_edit:
-            self.start_inline_editing()
+            self.start_inline_editing(cursor_position=clicked_cursor_position, select_all=False)
         elif action == action_dialog_edit:
             self.start_dialog_editing()
         elif action == action_reset_editing:
@@ -3763,13 +3804,17 @@ class VTextItem(BaseElement):
         """双击像 Photoshop 文字层一样原位编辑，并尽量把光标放到点击处"""
         print(f"双击文字，当前编辑状态: {self.is_editing}")
         cursor_position = self._cursor_position_from_point(event.pos())
+        select_all = bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
         if self.is_editing and self.inline_editor:
-            cursor = self.inline_editor.textCursor()
-            cursor.setPosition(cursor_position)
-            self.inline_editor.setTextCursor(cursor)
+            if select_all:
+                self.inline_editor.selectAll()
+            else:
+                cursor = self.inline_editor.textCursor()
+                cursor.setPosition(cursor_position)
+                self.inline_editor.setTextCursor(cursor)
             self.inline_editor.setFocus()
         else:
-            self.start_inline_editing(cursor_position=cursor_position, select_all=True)
+            self.start_inline_editing(cursor_position=cursor_position, select_all=select_all)
         event.accept()
 
     def mousePressEvent(self, event):
@@ -6614,6 +6659,8 @@ class LayoutScene(QGraphicsScene):
                 elif event.key() == Qt.Key.Key_Right: dx = step
                 elif event.key() == Qt.Key.Key_Up:   dy = -step
                 elif event.key() == Qt.Key.Key_Down:  dy = step
+                if self.config_manager.get('horizontal_move_only', False):
+                    dy = 0
 
                 move_commands = []
                 for item in items:
@@ -7125,7 +7172,10 @@ class LayoutView(QGraphicsView):
                     break
 
         if target is not None:
-            target._show_context_menu(event.globalPos())
+            if isinstance(target, VTextItem):
+                target._show_context_menu(event.globalPos(), target.mapFromScene(scene_pos))
+            else:
+                target._show_context_menu(event.globalPos())
             event.accept()
             return
 
@@ -8768,6 +8818,13 @@ class MainWindow(QMainWindow):
         self.insert_image_fit_canvas_action.toggled.connect(self.toggle_insert_image_fit_canvas)
         edit_menu.addAction(self.insert_image_fit_canvas_action)
 
+        self.horizontal_move_only_action = QAction('水平移动选中对象（锁定Y）', self)
+        self.horizontal_move_only_action.setCheckable(True)
+        self.horizontal_move_only_action.setShortcut('Ctrl+H')
+        self.horizontal_move_only_action.setChecked(self.scene.config_manager.get('horizontal_move_only', False))
+        self.horizontal_move_only_action.toggled.connect(self.toggle_horizontal_move_only)
+        edit_menu.addAction(self.horizontal_move_only_action)
+
         eye_role_from_selection_menu = edit_menu.addMenu('设置选中文字眼睛颜色')
         for color_key, color_label in [
             ('yellow', '设为黄色眼睛'),
@@ -8795,6 +8852,14 @@ class MainWindow(QMainWindow):
     def toggle_auto_exit_setting(self, enabled):
         """切换粘贴后自动退出编辑的开关"""
         self.scene.config_manager.set('auto_exit_after_paste', enabled)
+
+    def toggle_horizontal_move_only(self, enabled):
+        """切换水平移动模式：拖动/方向键移动时保持Y坐标不变。"""
+        self.scene.config_manager.set('horizontal_move_only', enabled)
+        if enabled:
+            self.status_bar.showMessage('已开启：水平移动模式，移动对象时Y坐标不变', 3000)
+        else:
+            self.status_bar.showMessage('已关闭：水平移动模式', 3000)
 
     def set_marquee_mode(self, mode):
         """设置框选模式：all / images / connected"""
