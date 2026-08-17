@@ -2855,11 +2855,11 @@ class BaseElement(QGraphicsItem):
             # 吸附到辅助线
             if self.scene() and self.scene().guides:
                 value = self._snap_to_guides(value)
-            if self.scene() and self.scene().config_manager.get('horizontal_move_only', False):
-                old_scene_pos = self.scenePos()
+            horizontal_lock = getattr(self.scene(), '_horizontal_move_lock_y', {}) if self.scene() else {}
+            if self in horizontal_lock:
                 parent = self.parentItem()
                 new_scene_pos = parent.mapToScene(value) if parent else value
-                locked_scene_pos = QPointF(new_scene_pos.x(), old_scene_pos.y())
+                locked_scene_pos = QPointF(new_scene_pos.x(), horizontal_lock[self])
                 value = parent.mapFromScene(locked_scene_pos) if parent else locked_scene_pos
 
         if change == QGraphicsItem.GraphicsItemChange.ItemPositionHasChanged:
@@ -2950,6 +2950,9 @@ class BaseElement(QGraphicsItem):
             if (current_pos_scene - self._drag_start_pos_scene).manhattanLength() > 2.0:
                 command = MoveItemCommand(scene, self, self._drag_start_pos_scene, current_pos_scene)
                 scene.undo_stack.push(command)
+            if getattr(scene, '_horizontal_move_lock_owner', None) is self:
+                scene._horizontal_move_lock_y = {}
+                scene._horizontal_move_lock_owner = None
 
         super().mouseReleaseEvent(event)
 
@@ -2957,6 +2960,19 @@ class BaseElement(QGraphicsItem):
         """记录拖动起始位置"""
         if event.button() == Qt.MouseButton.LeftButton:
             self._drag_start_pos_scene = self.scenePos()
+            scene = self.scene()
+            if scene and scene.config_manager.get('horizontal_move_only', False):
+                selected_items = [
+                    item for item in scene.selectedItems()
+                    if isinstance(item, BaseElement)
+                ]
+                if self not in selected_items:
+                    selected_items.append(self)
+                scene._horizontal_move_lock_y = {
+                    item: item.scenePos().y()
+                    for item in selected_items
+                }
+                scene._horizontal_move_lock_owner = self
         super().mousePressEvent(event)
 
     
@@ -5123,6 +5139,8 @@ class LayoutScene(QGraphicsScene):
         self.show_connectors = True  
         self.show_image_text_connectors = True  
         self.undo_stack = UndoStack()  
+        self._horizontal_move_lock_y = {}
+        self._horizontal_move_lock_owner = None
         self.clipboard_items = []  
         self.clipboard_image_text_connections = []  
         self.show_connection_points = True  
