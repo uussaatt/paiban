@@ -8,7 +8,7 @@ from xml.sax.saxutils import escape as xml_escape
 from PyQt6.QtWidgets import *
 from PyQt6.QtCore import *
 from PyQt6.QtGui import *
-from PyQt6.QtPrintSupport import QPrinter
+from PyQt6.QtPrintSupport import QPrinter, QPrintDialog, QPrintPreviewDialog
 
 # --- Configuration & Constants ---
 DEFAULT_FONT = "SimSun"
@@ -1714,12 +1714,18 @@ class AssetLibraryWidget(QWidget):
 class ProjectData:
     """Helper to serialize/deserialize project"""
     @staticmethod
-    def save(scene, filepath):
+    def scene_to_dict(scene):
         project_data = {
             'version': '2.0',
             'items': [],
             'connectors': [],
-            'image_text_connectors': []
+            'image_text_connectors': [],
+            'scene_rect': [
+                scene.sceneRect().x(),
+                scene.sceneRect().y(),
+                scene.sceneRect().width(),
+                scene.sceneRect().height()
+            ]
         }
         
         # Store items with IDs to reconstruct hierarchy
@@ -1812,17 +1818,78 @@ class ProjectData:
             if conn_data:
                 project_data['image_text_connectors'].append(conn_data)
         
+        print(f"工程已保存: {len(project_data['items'])} 个元素, {len(project_data['connectors'])} 个父子连接, {len(project_data['image_text_connectors'])} 个图文连接")
+        return project_data
+
+    @staticmethod
+    def save(scene, filepath):
+        """保存旧版单场景格式，供外部调用兼容。"""
+        project_data = ProjectData.scene_to_dict(scene)
         with open(filepath, 'w', encoding='utf-8') as f:
             json.dump(project_data, f, indent=2, ensure_ascii=False)
-        
-        print(f"工程已保存: {len(project_data['items'])} 个元素, {len(project_data['connectors'])} 个父子连接, {len(project_data['image_text_connectors'])} 个图文连接")
+
+    @staticmethod
+    def save_documents(documents, filepath):
+        """保存一个工程文件中的多个文档。"""
+        project_data = {
+            'version': '3.0',
+            'documents': [
+                {
+                    'name': document.name,
+                    'data': ProjectData.scene_to_dict(document.scene)
+                }
+                for document in documents
+            ]
+        }
+        with open(filepath, 'w', encoding='utf-8') as f:
+            json.dump(project_data, f, indent=2, ensure_ascii=False)
+        print(f"多文档工程已保存: {len(project_data['documents'])} 个文档")
+
+    @staticmethod
+    def read_documents(filepath):
+        """读取多文档工程；旧单文档格式会自动包装成一个文档。"""
+        with open(filepath, 'r', encoding='utf-8') as f:
+            project_data = json.load(f)
+
+        if isinstance(project_data, dict) and isinstance(project_data.get('documents'), list):
+            documents = []
+            for index, document in enumerate(project_data['documents']):
+                if not isinstance(document, dict):
+                    continue
+                data = document.get('data', {})
+                if not isinstance(data, dict):
+                    continue
+                documents.append({
+                    'name': document.get('name') or f'文档 {index + 1}',
+                    'data': data
+                })
+            return documents or [{'name': '文档 1', 'data': {}}]
+
+        name = os.path.splitext(os.path.basename(filepath))[0] or '文档 1'
+        return [{'name': name, 'data': project_data}]
 
     @staticmethod
     def load(scene, filepath):
+        """读取旧版单场景格式，或读取文件中的第一个文档。"""
+        documents = ProjectData.read_documents(filepath)
+        ProjectData.load_scene(scene, documents[0].get('data', {}))
+
+    @staticmethod
+    def load_scene(scene, project_data):
         scene.clear()
-        
-        with open(filepath, 'r', encoding='utf-8') as f:
-            project_data = json.load(f)
+        scene.connectors = []
+        scene.image_text_connectors = []
+        scene.selection_order = []
+        scene.undo_stack.clear()
+
+        scene_rect = project_data.get('scene_rect') if isinstance(project_data, dict) else None
+        if isinstance(scene_rect, (list, tuple)) and len(scene_rect) == 4:
+            scene.setSceneRect(
+                float(scene_rect[0]),
+                float(scene_rect[1]),
+                float(scene_rect[2]),
+                float(scene_rect[3])
+            )
         
         # 兼容旧版本格式
         if isinstance(project_data, list):
@@ -2188,7 +2255,7 @@ class EditTextCommand(UndoCommand):
     def execute(self):
         scene_pos = self.item.scenePos()
         self.item.full_text = self.new_text
-        self.item.rebuild()
+        self.item.rebuild(preserve_position=True)
         self._restore_scene_pos(scene_pos)
         if self.item.scene():
             self.item.scene().update_connectors(self.item)
@@ -2197,7 +2264,7 @@ class EditTextCommand(UndoCommand):
     def undo(self):
         scene_pos = self.item.scenePos()
         self.item.full_text = self.old_text
-        self.item.rebuild()
+        self.item.rebuild(preserve_position=True)
         self._restore_scene_pos(scene_pos)
         if self.item.scene():
             self.item.scene().update_connectors(self.item)
@@ -3445,9 +3512,10 @@ class VTextItem(BaseElement):
         self.rebuild()
         self.create_connection_point()
 
-    def rebuild(self):
+    def rebuild(self, preserve_position=False):
         # 记录旧宽度用于位置补偿
         old_width = self._rect.width()
+        old_right = self._rect.right()
         
         # 1. 清理旧的子项
         scene = self.scene()
@@ -3557,27 +3625,38 @@ class VTextItem(BaseElement):
 
         # 3. 重新对齐并计算方框 (Bounding Rect)
         if generated_items:
-            # 找到当前生成的最小 X（最左边那一列的 X）
-            min_x = min(item.pos().x() for item in generated_items)
-            # 将所有文字右移，使左边界从 0 开始
-            for item in generated_items:
-                item.setX(item.x() - min_x)
-            
-            # 自动计算一个能包裹所有文字的矩形作为方框
             combined_rect = QRectF()
             for item in generated_items:
-                # 获取每个字符在父级坐标系下的矩形并合并
                 combined_rect = combined_rect.united(item.mapRectToParent(item.boundingRect()))
-            
-            # 更新方框尺寸（留出2像素呼吸空间）
+
+            if preserve_position:
+                # 对话框编辑：对象 scenePos 不变，右侧文字锚点不动；
+                # 新增列向左扩展，删除列从左侧收回。
+                target_rect = combined_rect.adjusted(-2, -2, 2, 2)
+                offset_x = old_right - target_rect.right()
+                for item in generated_items:
+                    item.setX(item.x() + offset_x)
+                combined_rect.translate(offset_x, 0)
+            else:
+                # 普通重建：保持旧行为，将本地左边界归零，再用 moveBy 固定右边界。
+                min_x = min(item.pos().x() for item in generated_items)
+                for item in generated_items:
+                    item.setX(item.x() - min_x)
+                combined_rect = QRectF()
+                for item in generated_items:
+                    combined_rect = combined_rect.united(item.mapRectToParent(item.boundingRect()))
+
             self._rect = combined_rect.adjusted(-2, -2, 2, 2)
         else:
-            self._rect = QRectF(0, 0, col_step, char_h_main)
+            if preserve_position:
+                self._rect = QRectF(old_right - col_step, 0, col_step, char_h_main)
+            else:
+                self._rect = QRectF(0, 0, col_step, char_h_main)
 
         # 4. 锚点补偿：如果文字变宽/变窄，自动调整位置保持右对齐
         new_width = self._rect.width()
         dx = old_width - new_width
-        if abs(dx) > 0.1:
+        if not preserve_position and abs(dx) > 0.1:
             self.moveBy(dx, 0)
         
         # 5. 通知场景并更新连接点
@@ -3881,6 +3960,7 @@ class VTextItem(BaseElement):
         scene_rect = self.mapRectToScene(self._rect)
         self._editing_right = scene_rect.right()
         self._editing_scene_y = scene_rect.top()
+        self._editing_local_right = self._rect.right()
         self._editing_origin_scene_pos = self.scenePos()  # 记录进入编辑时的原始场景位置
         self._cursor_visible = True
         self._cursor_opacity = 1.0   # 任务三：用于平滑淡入淡出的透明度值
@@ -3921,15 +4001,15 @@ class VTextItem(BaseElement):
         return False
     
     def finish_inline_editing(self, new_text):
-        """完成内联编辑：恢复正常显示并保存，右边界固定不变"""
+        """完成内联编辑：恢复正常显示并保存，保持对象当前位置不变"""
         if hasattr(self, '_cursor_timer'):
             self._cursor_timer.stop()
-        # 记录进入编辑时的右边界（场景坐标），退出后用它重新定位
-        editing_right = getattr(self, '_editing_right', None)
+        origin_scene_pos = getattr(self, '_editing_origin_scene_pos', self.scenePos())
         self.is_editing = False
         self._editing_text = ""
         self._editing_right = None
         self._editing_scene_y = None
+        self._editing_local_right = None
         self._editing_origin_scene_pos = None
         # 恢复子字符可见性和颜色
         for child in self.childItems():
@@ -3944,40 +4024,32 @@ class VTextItem(BaseElement):
             cmd.execute()
             self.scene().undo_stack.push(cmd)
         else:
-            self.rebuild()
-
-        # 用固定的右边界重新定位，消除 rebuild 里 moveBy 的影响
-        if editing_right is not None:
-            new_scene_x = editing_right - self._rect.width()
-            new_scene_y = self.scenePos().y()
-            if self.parentItem():
-                self.setPos(self.parentItem().mapFromScene(QPointF(new_scene_x, new_scene_y)))
-            else:
-                self.setPos(new_scene_x, new_scene_y)
+            self.rebuild(preserve_position=True)
+        if self.parentItem():
+            self.setPos(self.parentItem().mapFromScene(origin_scene_pos))
+        else:
+            self.setPos(origin_scene_pos)
 
         if self.scene():
             self.scene().update_connectors(self)
             self.scene().update_image_text_connectors(self)
 
     def cancel_inline_editing(self):
-        """取消内联编辑：恢复原始文字和颜色，右边界不变"""
+        """取消内联编辑：恢复原始文字和颜色，保持对象当前位置不变"""
         if hasattr(self, '_cursor_timer'):
             self._cursor_timer.stop()
-        editing_right = getattr(self, '_editing_right', None)
+        origin_scene_pos = getattr(self, '_editing_origin_scene_pos', self.scenePos())
         self.is_editing = False
         self._editing_text = ""
         self._editing_right = None
         self._editing_scene_y = None
+        self._editing_local_right = None
         self._editing_origin_scene_pos = None
-        self.rebuild()
-        # 用固定的右边界重新定位
-        if editing_right is not None:
-            new_scene_x = editing_right - self._rect.width()
-            new_scene_y = self.scenePos().y()
-            if self.parentItem():
-                self.setPos(self.parentItem().mapFromScene(QPointF(new_scene_x, new_scene_y)))
-            else:
-                self.setPos(new_scene_x, new_scene_y)
+        self.rebuild(preserve_position=True)
+        if self.parentItem():
+            self.setPos(self.parentItem().mapFromScene(origin_scene_pos))
+        else:
+            self.setPos(origin_scene_pos)
         for child in self.childItems():
             if isinstance(child, QGraphicsSimpleTextItem):
                 child.setVisible(True)
@@ -4143,7 +4215,7 @@ class VTextItem(BaseElement):
         return max(0, min(best_index, len(text)))
 
     def _update_editing_rect(self):
-        """编辑状态下根据当前文字实时计算包围盒，右边界固定，向左扩展"""
+        """编辑状态下根据当前文字实时计算包围盒，位置固定，向左扩展/收回"""
         text = self._editing_text
         positions, _, _, char_h, col_step = self._editing_layout(text)
         max_col = max((item['col_idx'] for item in positions), default=0)
@@ -4151,25 +4223,15 @@ class VTextItem(BaseElement):
         new_w = (max_col + 1) * col_step
         new_h = max_y
 
-        # _rect 始终从 (0,0) 开始，通过移动元素场景位置保持右边界固定
-        right_edge = self._editing_right
-        scene_y = self._editing_scene_y
+        local_right = getattr(self, '_editing_local_right', self._rect.right())
 
         self.prepareGeometryChange()
-        self._rect = QRectF(0, 0, new_w, new_h)
-
-        # 移动元素使右边界保持在 _editing_right
-        new_scene_x = right_edge - new_w
-        if self.parentItem():
-            new_local = self.parentItem().mapFromScene(QPointF(new_scene_x, scene_y))
-            self.setPos(new_local)
-        else:
-            self.setPos(new_scene_x, scene_y)
+        self._rect = QRectF(local_right - new_w, 0, new_w, new_h)
 
         # 同步更新透明编辑器的位置和大小
         if self.inline_editor and self.inline_editor.isVisible() and self.scene() and self.scene().views():
             view = self.scene().views()[0]
-            scene_rect = QRectF(self.scenePos(), self._rect.size())
+            scene_rect = self.mapRectToScene(self._rect)
             view_rect = view.mapFromScene(scene_rect).boundingRect()
             self.inline_editor.setGeometry(view_rect)
 
@@ -4731,7 +4793,7 @@ class CorelSvgExporter:
                 lines.extend(CorelSvgExporter._image_to_svg(item, view.topLeft(), export_dir, filepath))
             elif isinstance(item, VTextItem):
                 lines.extend(CorelSvgExporter._text_to_svg(item, view.topLeft()))
-            elif isinstance(item, (VConnector, VImageTextConnector, VGenericConnector)):
+            elif isinstance(item, (VImageTextConnector, VGenericConnector)):
                 if id(item) not in exported_connectors:
                     path_line = CorelSvgExporter._connector_to_svg(item, view.topLeft())
                     if path_line:
@@ -4747,7 +4809,7 @@ class CorelSvgExporter:
     def _is_export_item(item):
         if isinstance(item, (VTextItem, VImageItem)):
             return item.isVisible()
-        if isinstance(item, (VConnector, VImageTextConnector, VGenericConnector)):
+        if isinstance(item, (VImageTextConnector, VGenericConnector)):
             return item.isVisible() and not item.path().isEmpty()
         return False
 
@@ -4757,9 +4819,22 @@ class CorelSvgExporter:
         for item in scene.items():
             if not CorelSvgExporter._is_export_item(item):
                 continue
-            item_rect = item.mapRectToScene(item.boundingRect())
+            item_rect = CorelSvgExporter._scene_rect(item)
             rect = item_rect if rect.isNull() else rect.united(item_rect)
         return rect
+
+    @staticmethod
+    def _scene_rect(item):
+        """Return bounds of the pixels that will actually be written to SVG."""
+        if isinstance(item, VTextItem):
+            rect = QRectF()
+            for child in item.childItems():
+                if not isinstance(child, QGraphicsSimpleTextItem) or not child.isVisible():
+                    continue
+                child_rect = child.sceneTransform().mapRect(child.boundingRect())
+                rect = child_rect if rect.isNull() else rect.united(child_rect)
+            return rect
+        return item.sceneTransform().mapRect(item.boundingRect())
 
     @staticmethod
     def _image_to_svg(item, offset, export_dir, svg_path):
@@ -4780,15 +4855,22 @@ class CorelSvgExporter:
         except Exception:
             href = path.replace('\\', '/')
 
-        rect = item.mapRectToScene(item.boundingRect())
-        x = rect.left() - offset.x()
-        y = rect.top() - offset.y()
+        rect = item.boundingRect()
+        transform = item.sceneTransform()
+        matrix = ' '.join(
+            CorelSvgExporter._num(value)
+            for value in (
+                transform.m11(), transform.m12(), transform.m21(), transform.m22(),
+                transform.dx() - offset.x(), transform.dy() - offset.y(),
+            )
+        )
         opacity = getattr(item, 'image_opacity', 1.0)
         attrs = [
-            f'x="{CorelSvgExporter._num(x)}"',
-            f'y="{CorelSvgExporter._num(y)}"',
+            f'x="{CorelSvgExporter._num(rect.left())}"',
+            f'y="{CorelSvgExporter._num(rect.top())}"',
             f'width="{CorelSvgExporter._num(rect.width())}"',
             f'height="{CorelSvgExporter._num(rect.height())}"',
+            f'transform="matrix({matrix})"',
             'preserveAspectRatio="none"',
             f'href="{CorelSvgExporter._attr(href)}"',
             f'xlink:href="{CorelSvgExporter._attr(href)}"',
@@ -4813,9 +4895,11 @@ class CorelSvgExporter:
                 continue
             glyph_path = QPainterPath()
             glyph_path.addText(QPointF(0, 0), child.font(), text)
-            transform = child.sceneTransform()
-            transform.translate(-offset.x(), -offset.y())
-            glyph_path = transform.map(glyph_path)
+            # 先将字形转换到场景坐标，再在场景坐标中减去 SVG 视图偏移。
+            # 不能把 offset 直接加入 sceneTransform，否则旋转字符会把
+            # 偏移量一起旋转，造成文字与图片的相对位置发生变化。
+            glyph_path = child.sceneTransform().map(glyph_path)
+            glyph_path.translate(-offset.x(), -offset.y())
             d = CorelSvgExporter._path_data(glyph_path, QPointF(0, 0))
             if not d:
                 continue
@@ -5028,6 +5112,28 @@ class NavigatorWidget(QWidget):
 
         self.setMouseTracking(True)
         self.setCursor(Qt.CursorShape.CrossCursor)
+
+    def set_document(self, view, scene):
+        """切换导航器所跟踪的文档。"""
+        if self.view is view and self.scene is scene:
+            return
+        try:
+            self.view.transformChanged.disconnect(self.update)
+            self.view.horizontalScrollBar().valueChanged.disconnect(self.update)
+            self.view.verticalScrollBar().valueChanged.disconnect(self.update)
+            self.scene.changed.disconnect(self._mark_dirty)
+        except (RuntimeError, TypeError):
+            pass
+        self.view = view
+        self.scene = scene
+        self._thumb = QPixmap()
+        self._scene_rect = QRectF()
+        self._dirty = True
+        self.view.transformChanged.connect(self.update)
+        self.view.horizontalScrollBar().valueChanged.connect(self.update)
+        self.view.verticalScrollBar().valueChanged.connect(self.update)
+        self.scene.changed.connect(self._mark_dirty)
+        self.update()
 
     def _mark_dirty(self):
         self._dirty = True
@@ -7990,6 +8096,15 @@ class FamilyTreeImportDialog(QDialog):
         }
 
 
+class DocumentState:
+    """窗口内一个独立文档的运行时状态。"""
+    def __init__(self, name, scene, view):
+        self.name = name
+        self.scene = scene
+        self.view = view
+        self.dirty = False
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -7999,14 +8114,21 @@ class MainWindow(QMainWindow):
         # 应用Fluent Design样式
         self.apply_fluent_design_style()
         
+        self._documents = []
+        self._asset_manager = None
+        self._loading_documents = False
+        self._current_project_path = None  # 当前工程文件路径
         self.scene = LayoutScene(self)
         self.scene.setSceneRect(0, 0, 7054, 5021)
         self.scene.selectionChanged.connect(self.on_selection_changed)
-        self._current_project_path = None  # 当前工程文件路径
+        self._asset_manager = self.scene.asset_manager
         self._toast = ToastNotification()
         self._last_selected_images = []  # 缓存最后一次选中的图片列表
         self.view = LayoutView(self.scene)
         self.view.set_main_window(self)
+        self.view.transformChanged.connect(self.update_zoom_display)
+        self.scene.changed.connect(lambda *_args, scene=self.scene: self._mark_scene_dirty(scene))
+        self._documents.append(DocumentState("文档 1", self.scene, self.view))
         
         # 创建停靠面板
         # 右侧：层级 & 属性面板
@@ -8043,7 +8165,17 @@ class MainWindow(QMainWindow):
         # 保持对旧版本素材库的引用（用于兼容性）
         self.asset_library = None
         
-        self.setCentralWidget(self.view)
+        self.document_tabs = QTabWidget()
+        self.document_tabs.setTabsClosable(True)
+        self.document_tabs.setMovable(False)
+        self.document_tabs.setDocumentMode(True)
+        self.document_tabs.tabCloseRequested.connect(self.close_document)
+        self.document_tabs.tabBarDoubleClicked.connect(self.rename_document)
+        self.document_tabs.addTab(self.view, "文档 1")
+        self._set_document_tab_close_text(0)
+        self.document_tabs.setCurrentIndex(0)
+        self.document_tabs.currentChanged.connect(self._on_document_changed)
+        self.setCentralWidget(self.document_tabs)
         self.create_menu_bar()
         self.create_toolbars()
         # 同步框选模式 UI 初始状态
@@ -8060,9 +8192,6 @@ class MainWindow(QMainWindow):
         hint.setText("  当前模式：编辑   选中对象：0")
         self.status_bar.addWidget(hint)
         
-        # 连接视图变换信号来更新缩放显示
-        self.view.transformChanged.connect(self.update_zoom_display)
-
         # 导航器停靠面板
         nav_dock = QDockWidget("导航器", self)
         nav_dock.setObjectName("dock_navigator")
@@ -8084,6 +8213,196 @@ class MainWindow(QMainWindow):
         print("Vertical Layout Engine Started...")
         # 恢复上次窗口大小和停靠面板布局
         self._restore_window_state()
+        self._update_document_tab_title(self._documents[0])
+
+    def _create_document(self, name):
+        """创建一个独立的场景和视图。"""
+        scene = LayoutScene(self)
+        scene.asset_manager = self._asset_manager
+        scene.setSceneRect(0, 0, 7054, 5021)
+        scene.selectionChanged.connect(self.on_selection_changed)
+        scene.changed.connect(lambda *_args, scene=scene: self._mark_scene_dirty(scene))
+        view = LayoutView(scene)
+        view.set_main_window(self)
+        view.transformChanged.connect(self.update_zoom_display)
+        return DocumentState(name, scene, view)
+
+    def _document_has_content(self, document):
+        return any(
+            isinstance(item, (VImageItem, VTextItem))
+            for item in document.scene.items()
+        )
+
+    def _update_document_tab_title(self, document):
+        if not hasattr(self, 'document_tabs'):
+            return
+        try:
+            index = self._documents.index(document)
+        except ValueError:
+            return
+        title = document.name + (" *" if document.dirty else "")
+        self.document_tabs.setTabText(index, title)
+        if index == self.document_tabs.currentIndex():
+            suffix = f" - {document.name}" if document.name else ""
+            if self._current_project_path:
+                suffix = f" - {os.path.basename(self._current_project_path)}{suffix}"
+            self.setWindowTitle(f"VertiLayout Pro{suffix}")
+
+    def _set_document_tab_close_text(self, index):
+        """将文档标签关闭按钮的提示改为中文。"""
+        if not hasattr(self, 'document_tabs'):
+            return
+        button = self.document_tabs.tabBar().tabButton(
+            index,
+            QTabBar.ButtonPosition.RightSide
+        )
+        if button:
+            button.setToolTip("关闭文档")
+            button.setAccessibleName("关闭文档")
+
+    def _mark_scene_dirty(self, scene):
+        if self._loading_documents:
+            return
+        for document in self._documents:
+            if document.scene is scene:
+                if not document.dirty:
+                    document.dirty = True
+                    self._update_document_tab_title(document)
+                return
+
+    def _on_document_changed(self, index):
+        if index < 0 or index >= len(self._documents):
+            return
+        document = self._documents[index]
+        self.scene = document.scene
+        self.view = document.view
+        if hasattr(self, 'navigator'):
+            self.navigator.set_document(self.view, self.scene)
+        self._last_selected_images = []
+        self._update_document_tab_title(document)
+        if hasattr(self, 'bg_above_connectors_action'):
+            self.bg_above_connectors_action.blockSignals(True)
+            self.bg_above_connectors_action.setChecked(
+                self.scene.config_manager.get('bg_above_connectors', False)
+            )
+            self.bg_above_connectors_action.blockSignals(False)
+        if hasattr(self, 'marquee_mode_combo'):
+            self._sync_marquee_mode_ui()
+        if hasattr(self, 'refresh_ui'):
+            self.refresh_ui()
+        if hasattr(self, 'fit_in_view'):
+            self.view.transformChanged.emit()
+
+    def new_document(self):
+        """新建一个文档标签页。"""
+        index = len(self._documents) + 1
+        document = self._create_document(f"文档 {index}")
+        self._documents.append(document)
+        self.document_tabs.addTab(document.view, document.name)
+        self._set_document_tab_close_text(self.document_tabs.indexOf(document.view))
+        self.document_tabs.setCurrentWidget(document.view)
+        self.view.fit_in_view()
+        self.status_bar.showMessage(f"已新建 {document.name}", 2000)
+
+    def rename_document(self, index=None):
+        """重命名指定文档，默认重命名当前文档。"""
+        if index is None:
+            index = self.document_tabs.currentIndex()
+        if index < 0 or index >= len(self._documents):
+            return
+
+        document = self._documents[index]
+        new_name, ok = QInputDialog.getText(
+            self,
+            "重命名文档",
+            "请输入文档名称：",
+            text=document.name
+        )
+        new_name = new_name.strip()
+        if ok and new_name and new_name != document.name:
+            document.name = new_name
+            document.dirty = True
+            self._update_document_tab_title(document)
+            self.status_bar.showMessage(f"文档已重命名为：{new_name}", 3000)
+
+    def _ask_save_before_action(self, title):
+        has_unsaved_content = any(
+            document.dirty and self._document_has_content(document)
+            for document in self._documents
+        )
+        if not has_unsaved_content:
+            return True
+        reply = QMessageBox.question(
+            self,
+            title,
+            "当前工程有未保存的修改，是否先保存？",
+            QMessageBox.StandardButton.Save |
+            QMessageBox.StandardButton.Discard |
+            QMessageBox.StandardButton.Cancel
+        )
+        if reply == QMessageBox.StandardButton.Cancel:
+            return False
+        if reply == QMessageBox.StandardButton.Save:
+            return self.quick_save_proj()
+        return True
+
+    def close_document(self, index=None):
+        """关闭一个文档标签页，至少保留一个空白文档。"""
+        if index is None:
+            index = self.document_tabs.currentIndex()
+        if index < 0 or index >= len(self._documents):
+            return
+        document = self._documents[index]
+        if document.dirty:
+            reply = QMessageBox.question(
+                self,
+                "关闭文档",
+                f"{document.name} 有未保存的修改，是否先保存整个工程？",
+                QMessageBox.StandardButton.Save |
+                QMessageBox.StandardButton.Discard |
+                QMessageBox.StandardButton.Cancel
+            )
+            if reply == QMessageBox.StandardButton.Cancel:
+                return
+            if reply == QMessageBox.StandardButton.Save and not self.quick_save_proj():
+                return
+
+        self.document_tabs.removeTab(index)
+        self._documents.pop(index)
+        document.view.deleteLater()
+        if not self._documents:
+            self.new_document()
+        else:
+            self.document_tabs.setCurrentIndex(min(index, len(self._documents) - 1))
+
+    def _replace_documents(self, document_data):
+        """用加载结果替换当前窗口内的全部文档。"""
+        old_documents = self._documents[:]
+        self.document_tabs.blockSignals(True)
+        while self.document_tabs.count():
+            self.document_tabs.removeTab(0)
+        self.document_tabs.blockSignals(False)
+        self._documents = []
+        for document in old_documents:
+            document.view.deleteLater()
+
+        self._loading_documents = True
+        try:
+            for index, data in enumerate(document_data):
+                document = self._create_document(data.get('name') or f"文档 {index + 1}")
+                ProjectData.load_scene(document.scene, data.get('data', {}))
+                document.dirty = False
+                self._documents.append(document)
+                self.document_tabs.addTab(document.view, document.name)
+                self._set_document_tab_close_text(self.document_tabs.indexOf(document.view))
+        finally:
+            self._loading_documents = False
+
+        if not self._documents:
+            self.new_document()
+            return
+        self.document_tabs.setCurrentIndex(0)
+        self._on_document_changed(0)
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -8146,15 +8465,10 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         """窗口关闭时提示保存，停止定时器，保存窗口状态"""
-        # 检查是否有元素（有内容才提示）
-        has_content = any(
-            isinstance(item, (VImageItem, VTextItem))
-            for item in self.scene.items()
-        )
-        if has_content:
+        if any(document.dirty for document in self._documents):
             msg_box = QMessageBox(self)
             msg_box.setWindowTitle("保存工程")
-            msg_box.setText("是否在关闭前保存当前工程？")
+            msg_box.setText("当前工程有未保存的修改，是否在关闭前保存？")
             btn_save = msg_box.addButton("保存", QMessageBox.ButtonRole.AcceptRole)
             btn_discard = msg_box.addButton("不保存退出", QMessageBox.ButtonRole.DestructiveRole)
             btn_cancel = msg_box.addButton("取消", QMessageBox.ButtonRole.RejectRole)
@@ -8162,7 +8476,9 @@ class MainWindow(QMainWindow):
             msg_box.exec()
             clicked = msg_box.clickedButton()
             if clicked == btn_save:
-                self.quick_save_proj()
+                if not self.quick_save_proj():
+                    event.ignore()
+                    return
             elif clicked == btn_cancel:
                 event.ignore()
                 return
@@ -8562,10 +8878,25 @@ class MainWindow(QMainWindow):
         menubar = self.menuBar()
         file_menu = menubar.addMenu('文件')
         
-        new_action = QAction('新建', self)
+        new_action = QAction('新建文档', self)
         new_action.setShortcut('Ctrl+N')
-        new_action.triggered.connect(self.new_project)
+        new_action.triggered.connect(self.new_document)
         file_menu.addAction(new_action)
+
+        new_project_action = QAction('新建工程', self)
+        new_project_action.setShortcut('Ctrl+Shift+N')
+        new_project_action.triggered.connect(self.new_project)
+        file_menu.addAction(new_project_action)
+
+        close_document_action = QAction('关闭当前文档', self)
+        close_document_action.setShortcut('Ctrl+W')
+        close_document_action.triggered.connect(self.close_document)
+        file_menu.addAction(close_document_action)
+
+        rename_document_action = QAction('重命名当前文档', self)
+        rename_document_action.setShortcut('F2')
+        rename_document_action.triggered.connect(self.rename_document)
+        file_menu.addAction(rename_document_action)
         
         file_menu.addSeparator()
         
@@ -8584,10 +8915,19 @@ class MainWindow(QMainWindow):
         save_as_action.triggered.connect(self.save_proj)
         file_menu.addAction(save_as_action)
 
-        save_and_pdf_action = QAction('保存项目并导出PDF', self)
+        save_and_pdf_action = QAction('保存项目并导出全部文档 PDF', self)
         save_and_pdf_action.setShortcut('Ctrl+Shift+P')
         save_and_pdf_action.triggered.connect(self.save_proj_and_pdf)
         file_menu.addAction(save_and_pdf_action)
+
+        print_action = QAction('打印...', self)
+        print_action.setShortcut('Ctrl+P')
+        print_action.triggered.connect(self.print_document)
+        file_menu.addAction(print_action)
+
+        print_preview_action = QAction('打印预览...', self)
+        print_preview_action.triggered.connect(self.print_preview)
+        file_menu.addAction(print_preview_action)
         
         file_menu.addSeparator()
         
@@ -8605,7 +8945,7 @@ class MainWindow(QMainWindow):
         file_menu.addAction(export_excel_action)
 
         export_pdf_action = QAction('导出 PDF...', self)
-        export_pdf_action.setShortcut('Ctrl+P')
+        export_pdf_action.setShortcut('Ctrl+Alt+P')
         export_pdf_action.triggered.connect(self.export_pdf)
         file_menu.addAction(export_pdf_action)
         
@@ -8687,6 +9027,12 @@ class MainWindow(QMainWindow):
         zoom_selection_action.setShortcut('Ctrl+2')
         zoom_selection_action.triggered.connect(self.zoom_to_selection)
         view_menu.addAction(zoom_selection_action)
+
+        canvas_size_action = QAction('设置画布大小...', self)
+        canvas_size_action.triggered.connect(self.set_canvas_size)
+        view_menu.addAction(canvas_size_action)
+
+        view_menu.addSeparator()
 
         self.bg_above_connectors_action = QAction('背景图片在连线之上', self)
         self.bg_above_connectors_action.setCheckable(True)
@@ -10298,8 +10644,9 @@ class MainWindow(QMainWindow):
             path += '.xlsx'
 
         # ── 坐标转换工具 ──────────────────────────────────────────────
-        # 画布高度（场景坐标，px）
-        canvas_h = self.scene.sceneRect().height()
+        canvas_rect = self.scene.sceneRect()
+        canvas_w = canvas_rect.width()
+        canvas_h = canvas_rect.height()
         # CorelDRAW 导出 DPI（与 SVG 导出保持一致）
         DPI = CORELDRAW_EXPORT_DPI  # 600
 
@@ -10309,39 +10656,50 @@ class MainWindow(QMainWindow):
 
         def to_cdr(x_px, y_px):
             """Qt 坐标（左上角原点，Y向下）→ CDR 坐标（左下角原点，Y向上），单位 mm"""
-            cdr_x = px_to_mm(x_px)
-            cdr_y = px_to_mm(canvas_h - y_px)
+            local_x = x_px - canvas_rect.left()
+            local_y = y_px - canvas_rect.top()
+            cdr_x = px_to_mm(local_x)
+            cdr_y = px_to_mm(canvas_h - local_y)
             return cdr_x, cdr_y
 
         wb = openpyxl.Workbook()
 
-        # ── 表1：图片 ──────────────────────────────────────────────────
-        ws_img = wb.active
-        ws_img.title = "图片"
+        # ── 表1：画布 ──────────────────────────────────────────────────
+        ws_canvas = wb.active
+        ws_canvas.title = "画布"
+        ws_canvas.append(["参数", "值", "单位", "说明"])
+        ws_canvas.append(["画布宽度", px_to_mm(canvas_w), "mm", "CorelDRAW 页面宽度"])
+        ws_canvas.append(["画布高度", px_to_mm(canvas_h), "mm", "CorelDRAW 页面高度"])
+        ws_canvas.append(["导出DPI", DPI, "DPI", "像素与毫米换算基准"])
+        ws_canvas.append(["坐标原点", "左下角", "", "X向右，Y向上"])
+
+        # ── 表2：图片 ──────────────────────────────────────────────────
+        ws_img = wb.create_sheet("图片")
         ws_img.append(["图片名称", "图片路径", "X(mm)", "Y(mm)", "宽(mm)", "高(mm)"])
         for item in self.scene.items():
             if isinstance(item, VImageItem):
                 name = os.path.basename(item.file_path)
-                pos  = item.scenePos()
-                w    = item.boundingRect().width()
-                h    = item.boundingRect().height()
-                # 右上角：Qt右上角 = (pos.x+w, pos.y)
-                # CDR X = 距页面左边距离，CDR Y = 距页面底边距离（Y轴翻转，右上角不加h）
-                cdr_x, cdr_y = to_cdr(pos.x() + w, pos.y())
+                scene_item_rect = item.mapRectToScene(item.boundingRect())
+                cdr_x, cdr_y = to_cdr(scene_item_rect.right(), scene_item_rect.top())
                 ws_img.append([name, os.path.abspath(item.file_path),
                                 cdr_x, cdr_y,
-                                px_to_mm(w), px_to_mm(h)])
+                                px_to_mm(scene_item_rect.width()),
+                                px_to_mm(scene_item_rect.height())])
 
-        # ── 表2：文字 ──────────────────────────────────────────────────
+        # ── 表3：文字 ──────────────────────────────────────────────────
         ws_txt = wb.create_sheet("文字")
-        ws_txt.append(["文字内容", "字体", "字号", "颜色", "X(mm)", "Y(mm)"])
-        for item in self.scene.items():
+        ws_txt.append([
+            "文字内容", "字体", "字号(pt)", "颜色", "X(mm)", "Y(mm)",
+            "宽(mm)", "高(mm)", "每列字数", "列间距(mm)", "自动高度", "手动换行"
+        ])
+        text_items = [
+            item for item in self.scene.items()
+            if isinstance(item, VTextItem)
+        ]
+        for item in text_items:
             if isinstance(item, VTextItem):
-                pos = item.scenePos()
-                w   = item.boundingRect().width()
-                h   = item.boundingRect().height()
-                # 右上角：Qt右上角 = (pos.x+w, pos.y)
-                cdr_x, cdr_y = to_cdr(pos.x() + w, pos.y())
+                scene_item_rect = item.mapRectToScene(item.boundingRect())
+                cdr_x, cdr_y = to_cdr(scene_item_rect.right(), scene_item_rect.top())
                 ws_txt.append([
                     item.full_text,
                     item.font_family,
@@ -10349,9 +10707,56 @@ class MainWindow(QMainWindow):
                     item.text_color.name(),
                     cdr_x,
                     cdr_y,
+                    px_to_mm(scene_item_rect.width()),
+                    px_to_mm(scene_item_rect.height()),
+                    item.chars_per_column,
+                    px_to_mm(item.column_spacing),
+                    "是" if item.auto_height else "否",
+                    "是" if item.manual_line_break else "否",
                 ])
 
-        # ── 表3：连线 ──────────────────────────────────────────────────
+        # ── 表4：文字字符 ──────────────────────────────────────────────
+        # 每个字符使用实际 QGraphicsSimpleTextItem 的场景包围盒，
+        # 供 VBA 逐字放置，避免 CorelDRAW 重新计算竖排间距。
+        ws_chars = wb.create_sheet("文字字符")
+        ws_chars.append([
+            "文字对象编号", "原文字内容", "字符序号", "字符",
+            "字体", "字号(pt)", "颜色", "旋转角度",
+            "X(mm)", "Y(mm)", "宽(mm)", "高(mm)",
+            "中心X(mm)", "中心Y(mm)"
+        ])
+        for text_id, item in enumerate(text_items, start=1):
+            char_index = 0
+            for child in item.childItems():
+                if not isinstance(child, QGraphicsSimpleTextItem):
+                    continue
+                char_text = child.text()
+                if not char_text:
+                    continue
+                char_rect = child.mapRectToScene(child.boundingRect())
+                char_x, char_y = to_cdr(char_rect.right(), char_rect.top())
+                center_x, center_y = to_cdr(char_rect.center().x(), char_rect.center().y())
+                child_font = child.font()
+                child_color = child.brush().color().name()
+                ws_chars.append([
+                    text_id,
+                    item.full_text,
+                    char_index,
+                    char_text,
+                    child_font.family(),
+                    child_font.pointSize(),
+                    child_color,
+                    round(child.rotation(), 4),
+                    char_x,
+                    char_y,
+                    px_to_mm(char_rect.width()),
+                    px_to_mm(char_rect.height()),
+                    center_x,
+                    center_y,
+                ])
+                char_index += 1
+
+        # ── 表5：连线 ──────────────────────────────────────────────────
         ws_conn = wb.create_sheet("连线")
         ws_conn.append(["线编号", "端点类型", "X(mm)", "Y(mm)", "粗细(px)", "颜色"])
 
@@ -10383,7 +10788,7 @@ class MainWindow(QMainWindow):
             ws_conn.append([line_no, "终点", pts[2], pts[3], lw, color])
 
         # 统一列宽
-        for ws in (ws_img, ws_txt, ws_conn):
+        for ws in (ws_canvas, ws_img, ws_txt, ws_chars, ws_conn):
             for col in ws.columns:
                 max_len = max((len(str(cell.value or '')) for cell in col), default=8)
                 ws.column_dimensions[col[0].column_letter].width = min(max_len + 4, 60)
@@ -10427,6 +10832,112 @@ class MainWindow(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "导出失败", f"导出SVG失败:\n{e}")
 
+    def _configure_print_page(self, printer, scene):
+        """按当前画布尺寸配置完整打印页，保持画布宽高比。"""
+        rect = scene.sceneRect()
+        width_mm = max(1.0, rect.width() / 96.0 * 25.4)
+        height_mm = max(1.0, rect.height() / 96.0 * 25.4)
+        page_size = QPageSize(
+            QSizeF(width_mm, height_mm),
+            QPageSize.Unit.Millimeter
+        )
+        # 使用完整页面，避免默认打印边距导致预览页面与画布比例不一致。
+        printer.setFullPage(True)
+        printer.setPageSize(page_size)
+        printer.setPageMargins(
+            QMarginsF(0, 0, 0, 0),
+            QPageLayout.Unit.Millimeter
+        )
+
+    def _render_scene_to_printer(self, printer, scene=None):
+        """将当前文档渲染到打印机或打印预览。"""
+        scene = scene or self.scene
+        original_show_grid = scene.show_grid
+        original_show_connectors = scene.show_connectors
+        original_show_image_text_connectors = scene.show_image_text_connectors
+        original_show_connection_points = scene.show_connection_points
+        original_show_guides = scene.show_guides
+        selected_items = scene.selectedItems()
+        painter = QPainter()
+
+        try:
+            scene.show_grid = False
+            scene.set_connectors_visible(False)
+            scene.set_image_text_connectors_visible(True)
+            scene.set_connection_points_visible(False)
+            scene.set_guides_visible(False)
+            scene.clearSelection()
+
+            rect = scene.sceneRect()
+            target_rect = printer.paperRect(QPrinter.Unit.DevicePixel)
+            if rect.isEmpty() or target_rect.isEmpty():
+                return
+
+            if not painter.begin(printer):
+                raise RuntimeError("无法启动打印绘制")
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+
+            scale = min(
+                target_rect.width() / rect.width(),
+                target_rect.height() / rect.height()
+            )
+            painter.translate(target_rect.left(), target_rect.top())
+            painter.scale(scale, scale)
+
+            # 复用 PDF 导出的白色页面和背景图片渲染规则。
+            scene._rendering_pdf = True
+            painter.fillRect(
+                QRectF(0, 0, rect.width(), rect.height()),
+                QColor(255, 255, 255)
+            )
+            scene.render(
+                painter,
+                QRectF(0, 0, rect.width(), rect.height()),
+                rect
+            )
+            scene._rendering_pdf = False
+        finally:
+            if painter.isActive():
+                painter.end()
+            scene._rendering_pdf = False
+            scene.show_grid = original_show_grid
+            scene.set_connectors_visible(original_show_connectors)
+            scene.set_image_text_connectors_visible(original_show_image_text_connectors)
+            scene.set_connection_points_visible(original_show_connection_points)
+            scene.set_guides_visible(original_show_guides)
+            for item in selected_items:
+                item.setSelected(True)
+            scene.update()
+
+    def print_document(self):
+        """打开打印设置并打印当前文档。"""
+        printer = QPrinter(QPrinter.PrinterMode.HighResolution)
+        self._configure_print_page(printer, self.scene)
+        dialog = QPrintDialog(printer, self)
+        dialog.setWindowTitle("打印")
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            try:
+                self._render_scene_to_printer(printer, self.scene)
+                self.status_bar.showMessage("打印任务已发送", 3000)
+            except Exception as e:
+                QMessageBox.critical(self, "打印失败", f"打印失败：\n{e}")
+
+    def print_preview(self):
+        """打开当前文档的打印预览。"""
+        printer = QPrinter(QPrinter.PrinterMode.HighResolution)
+        self._configure_print_page(printer, self.scene)
+        preview = QPrintPreviewDialog(printer, self)
+        preview.setWindowTitle("打印预览")
+        preview.paintRequested.connect(
+            lambda preview_printer: self._render_scene_to_printer(
+                preview_printer,
+                self.scene
+            )
+        )
+        preview.exec()
+
     def export_pdf(self):
         """导出为PDF文件 - 保留文字、图片、连线和背景图片"""
         default_dir = self.scene.config_manager.get('default_save_dir', '') or \
@@ -10440,29 +10951,30 @@ class MainWindow(QMainWindow):
             path += '.pdf'
         self._do_export_pdf(path, show_dialog=True)
 
-    def _do_export_pdf(self, path, show_dialog=False):
+    def _do_export_pdf(self, path, show_dialog=False, scene=None):
         """实际执行PDF导出 - 用scene.render保证文字位置正确，图片/连线独立对象"""
-        original_show_grid = self.scene.show_grid
-        original_show_connectors = self.scene.show_connectors
-        original_show_image_text_connectors = self.scene.show_image_text_connectors
-        original_show_connection_points = self.scene.show_connection_points
-        original_show_guides = self.scene.show_guides
-        selected_items = self.scene.selectedItems()
+        scene = scene or self.scene
+        original_show_grid = scene.show_grid
+        original_show_connectors = scene.show_connectors
+        original_show_image_text_connectors = scene.show_image_text_connectors
+        original_show_connection_points = scene.show_connection_points
+        original_show_guides = scene.show_guides
+        selected_items = scene.selectedItems()
 
         try:
             # 隐藏所有辅助元素，只保留图文连线
-            self.scene.show_grid = False
-            self.scene.set_connectors_visible(False)
-            self.scene.set_image_text_connectors_visible(True)
-            self.scene.set_connection_points_visible(False)
-            self.scene.set_guides_visible(False)
-            self.scene.clearSelection()
+            scene.show_grid = False
+            scene.set_connectors_visible(False)
+            scene.set_image_text_connectors_visible(True)
+            scene.set_connection_points_visible(False)
+            scene.set_guides_visible(False)
+            scene.clearSelection()
 
             printer = QPrinter(QPrinter.PrinterMode.HighResolution)
             printer.setOutputFormat(QPrinter.OutputFormat.PdfFormat)
             printer.setOutputFileName(path)
 
-            rect = self.scene.sceneRect()
+            rect = scene.sceneRect()
             width_mm = rect.width() / 96.0 * 25.4
             height_mm = rect.height() / 96.0 * 25.4
 
@@ -10482,25 +10994,25 @@ class MainWindow(QMainWindow):
             painter.scale(scale, scale)
 
             # 设置PDF导出标志：跳过灰色背景/阴影，保留背景图片
-            self.scene._rendering_pdf = True
+            scene._rendering_pdf = True
             painter.fillRect(QRectF(0, 0, rect.width(), rect.height()), QColor(255, 255, 255))
-            self.scene.render(painter, QRectF(0, 0, rect.width(), rect.height()), rect)
-            self.scene._rendering_pdf = False
+            scene.render(painter, QRectF(0, 0, rect.width(), rect.height()), rect)
+            scene._rendering_pdf = False
 
             painter.end()
 
         finally:
-            self.scene._rendering_pdf = False
-            self.scene.show_grid = original_show_grid
-            self.scene.set_connectors_visible(original_show_connectors)
-            self.scene.set_image_text_connectors_visible(original_show_image_text_connectors)
-            self.scene.set_connection_points_visible(original_show_connection_points)
-            self.scene.set_guides_visible(original_show_guides)
+            scene._rendering_pdf = False
+            scene.show_grid = original_show_grid
+            scene.set_connectors_visible(original_show_connectors)
+            scene.set_image_text_connectors_visible(original_show_image_text_connectors)
+            scene.set_connection_points_visible(original_show_connection_points)
+            scene.set_guides_visible(original_show_guides)
             for item in selected_items:
                 item.setSelected(True)
-            self.scene.update()
+            scene.update()
 
-        self.scene.config_manager.set('default_save_dir', os.path.dirname(path))
+        scene.config_manager.set('default_save_dir', os.path.dirname(path))
         print(f"PDF已导出: {path}")
         if show_dialog:
             QMessageBox.information(
@@ -10511,21 +11023,14 @@ class MainWindow(QMainWindow):
             )
 
     def new_project(self):
-        """新建工程，提示保存当前工程"""
-        if self.scene.items():
-            reply = QMessageBox.question(
-                self, "新建工程",
-                "当前工程尚未保存，是否先保存？",
-                QMessageBox.StandardButton.Save |
-                QMessageBox.StandardButton.Discard |
-                QMessageBox.StandardButton.Cancel
-            )
-            if reply == QMessageBox.StandardButton.Cancel:
-                return
-            if reply == QMessageBox.StandardButton.Save:
-                self.save_proj()
-        self.scene.clear()
-        self.scene.undo_stack.clear()
+        """新建工程，关闭当前工程中的全部文档。"""
+        if not self._ask_save_before_action("新建工程"):
+            return
+        self._current_project_path = None
+        self._replace_documents([{'name': '文档 1', 'data': {}}])
+        self._documents[0].dirty = False
+        self._update_document_tab_title(self._documents[0])
+        self.status_bar.showMessage("已新建工程", 2000)
 
     def save_proj(self):
         """另存为：弹出对话框选择路径"""
@@ -10533,39 +11038,73 @@ class MainWindow(QMainWindow):
                       (os.path.dirname(self._current_project_path) if self._current_project_path else '')
         path, _ = QFileDialog.getSaveFileName(self, "保存工程", default_dir, "VLayout (*.vlayout)")
         if path:
-            ProjectData.save(self.scene, path)
+            ProjectData.save_documents(self._documents, path)
             self._current_project_path = path
+            for document in self._documents:
+                document.dirty = False
+                self._update_document_tab_title(document)
             self.scene.config_manager.set('default_save_dir', os.path.dirname(path))
-            self.setWindowTitle(f"VertiLayout Pro - {os.path.basename(path)}")
             self.status_bar.showMessage(f"已保存: {path}", 3000)
+            return True
+        return False
 
     def quick_save_proj(self):
         """快速保存：直接覆盖当前文件，没有路径时弹对话框"""
         if self._current_project_path:
-            ProjectData.save(self.scene, self._current_project_path)
+            ProjectData.save_documents(self._documents, self._current_project_path)
+            for document in self._documents:
+                document.dirty = False
+                self._update_document_tab_title(document)
             self.status_bar.showMessage(f"已保存: {self._current_project_path}", 3000)
+            return True
         else:
-            self.save_proj()
+            return self.save_proj()
 
     def save_proj_and_pdf(self):
-        """一键保存项目并导出同名PDF"""
+        """一键保存多文档工程，并按页码为每个文档导出一个 PDF。"""
         # 第一步：确保项目已有保存路径
         if not self._current_project_path:
-            self.save_proj()
-            # 用户取消了另存为，直接返回
-            if not self._current_project_path:
+            if not self.save_proj():
                 return
 
         # 第二步：保存项目
-        ProjectData.save(self.scene, self._current_project_path)
+        ProjectData.save_documents(self._documents, self._current_project_path)
+        for document in self._documents:
+                document.dirty = False
+                self._update_document_tab_title(document)
         self.status_bar.showMessage(f"项目已保存: {self._current_project_path}", 2000)
 
-        # 第三步：导出同名PDF（把 .vlayout 替换为 .pdf）
-        pdf_path = os.path.splitext(self._current_project_path)[0] + '.pdf'
-        self._do_export_pdf(pdf_path)
+        # 第三步：指定第一个文档的页码，后续文档自动递增
+        first_page, ok = QInputDialog.getInt(
+            self,
+            "批量导出 PDF",
+            "请输入第一个文档的页码：",
+            1,
+            1,
+            999999,
+            1
+        )
+        if not ok:
+            self.status_bar.showMessage("已保存工程，已取消 PDF 导出", 3000)
+            return
+
+        pdf_dir = os.path.dirname(self._current_project_path)
+        pdf_paths = []
+        for index, document in enumerate(self._documents, start=1):
+            page_number = first_page + index - 1
+            filename = f"{page_number}.pdf"
+            pdf_path = os.path.join(pdf_dir, filename)
+            self._do_export_pdf(pdf_path, scene=document.scene)
+            pdf_paths.append(pdf_path)
 
         self.status_bar.showMessage(
-            f"已保存项目并导出PDF: {os.path.basename(pdf_path)}", 4000
+            f"已保存项目并导出 {len(pdf_paths)} 个文档 PDF", 4000
+        )
+        QMessageBox.information(
+            self,
+            "导出完成",
+            "工程和文档 PDF 已全部导出：\n\n" +
+            "\n".join(os.path.basename(path) for path in pdf_paths)
         )
 
     def load_proj(self):
@@ -10573,10 +11112,18 @@ class MainWindow(QMainWindow):
                       (os.path.dirname(self._current_project_path) if self._current_project_path else '')
         path, _ = QFileDialog.getOpenFileName(self, "打开工程", default_dir, "VLayout (*.vlayout)")
         if path:
-            ProjectData.load(self.scene, path)
+            if not self._ask_save_before_action("打开工程"):
+                return
+            document_data = ProjectData.read_documents(path)
+            self._replace_documents(document_data)
             self._current_project_path = path
+            for document in self._documents:
+                document.dirty = False
+                self._update_document_tab_title(document)
             self.scene.config_manager.set('default_save_dir', os.path.dirname(path))
-            self.setWindowTitle(f"VertiLayout Pro - {os.path.basename(path)}")
+            self.status_bar.showMessage(
+                f"已打开: {os.path.basename(path)}（{len(self._documents)} 个文档）", 3000
+            )
     
     def set_background_image(self):
         """设置默认背景图片"""
