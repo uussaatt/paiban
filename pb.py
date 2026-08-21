@@ -4,6 +4,7 @@ import json
 import math
 import copy
 import os
+import hashlib
 from xml.sax.saxutils import escape as xml_escape
 from PyQt6.QtWidgets import *
 from PyQt6.QtCore import *
@@ -20,6 +21,74 @@ APP_DIR = os.path.dirname(os.path.abspath(__file__))
 ASSETS_DIR = os.path.join(APP_DIR, "assets")  # 素材库目录
 DEFAULT_LINE_WIDTH = 3  # 默认连接线粗细（像素）
 CONFIG_FILE = os.path.join(APP_DIR, "config.json")  # 配置文件
+DEFAULT_LICENSE_PASSWORD = "12345678"
+
+
+def hash_license_password(password):
+    """生成授权密码哈希，避免在配置文件中直接保存明文密码。"""
+    return hashlib.sha256(password.encode("utf-8")).hexdigest()
+
+
+def license_is_valid(config):
+    """检查授权日期；未设置到期日时视为长期有效。"""
+    expiry_text = str(config.get("license_expiry_date", "") or "").strip()
+    if not expiry_text:
+        return True, ""
+
+    expiry_date = QDate.fromString(expiry_text, "yyyy-MM-dd")
+    if not expiry_date.isValid():
+        return False, f"授权到期日期无效：{expiry_text}"
+    if QDate.currentDate() > expiry_date:
+        return False, f"软件授权已于 {expiry_text} 到期"
+    return True, ""
+
+
+def recover_expired_license(config_manager):
+    """到期后允许管理员验证密码并延长授权日期。"""
+    password, ok = QInputDialog.getText(
+        None,
+        "软件已到期",
+        "请输入授权密码以修改到期日期：",
+        QLineEdit.EchoMode.Password
+    )
+    if not ok:
+        return False
+
+    stored_hash = config_manager.get(
+        "license_password_hash",
+        hash_license_password(DEFAULT_LICENSE_PASSWORD)
+    )
+    if hash_license_password(password) != stored_hash:
+        QMessageBox.critical(None, "授权验证失败", "密码不正确，软件无法使用。")
+        return False
+
+    dialog = QDialog()
+    dialog.setWindowTitle("延长软件授权")
+    layout = QFormLayout(dialog)
+    layout.addRow(QLabel("请输入新的到期日期，保存后软件才能继续使用。"))
+    expiry_edit = QDateEdit(QDate.currentDate(), dialog)
+    expiry_edit.setCalendarPopup(True)
+    expiry_edit.setDisplayFormat("yyyy-MM-dd")
+    expiry_edit.setMinimumDate(QDate.currentDate())
+    layout.addRow("新的到期日期：", expiry_edit)
+
+    buttons = QDialogButtonBox(
+        QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+    )
+    buttons.button(QDialogButtonBox.StandardButton.Ok).setText("保存并继续")
+    buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("退出")
+    buttons.accepted.connect(dialog.accept)
+    buttons.rejected.connect(dialog.reject)
+    layout.addRow(buttons)
+
+    if dialog.exec() != QDialog.DialogCode.Accepted:
+        return False
+
+    config_manager.set(
+        "license_expiry_date",
+        expiry_edit.date().toString("yyyy-MM-dd")
+    )
+    return True
 
 # Vertically sensitive characters (Simple Heuristic for demo)
 ROTATE_CHARS = {'—', '…', '(', ')', '[', ']', '{', '}', '《', '》', '-', '_'}
@@ -73,6 +142,8 @@ class ConfigManager:
             'show_text_hover_tooltip': False,
             'favorite_fonts': ['SimSun', 'Microsoft YaHei', '黑体', '楷体', 'Arial'],
             'favorite_sizes': [10, 12, 14, 16, 18, 20, 24, 30, 36, 48, 72],
+            'license_password_hash': hash_license_password(DEFAULT_LICENSE_PASSWORD),
+            'license_expiry_date': '',
         }
     
     def save_config(self):
@@ -2445,9 +2516,9 @@ class ConnectionPoint(QGraphicsEllipseItem):
         if not self.parent_element: return
         rect = self.parent_element.boundingRect()
         if self.point_type == "image_top":
-            self.setPos(rect.width() / 2, 0)
+            self.setPos(rect.center().x(), rect.top())
         elif self.point_type == "text_bottom":
-            self.setPos(rect.width() / 2, rect.height())
+            self.setPos(rect.center().x(), rect.bottom())
 
     def boundingRect(self):
         """扩大重绘范围，避免缩小时视觉被裁切"""
@@ -2481,13 +2552,11 @@ class ConnectionPoint(QGraphicsEllipseItem):
         """更新连接点位置（仅更新自身坐标，连线由父元素的 itemChange 统一更新）"""
         if not self.parent_element:
             return
-
         rect = self.parent_element.boundingRect()
-
         if self.point_type == "image_top":
-            self.setPos(rect.width() / 2, 0)
+            self.setPos(rect.center().x(), rect.top())
         elif self.point_type == "text_bottom":
-            self.setPos(rect.width() / 2, rect.height())
+            self.setPos(rect.center().x(), rect.bottom())
 
     def hoverEnterEvent(self, event):
         """鼠标悬停进入"""
@@ -3653,11 +3722,13 @@ class VTextItem(BaseElement):
             else:
                 self._rect = QRectF(0, 0, col_step, char_h_main)
 
-        # 4. 锚点补偿：如果文字变宽/变窄，自动调整位置保持右对齐
-        new_width = self._rect.width()
-        dx = old_width - new_width
-        if not preserve_position and abs(dx) > 0.1:
-            self.moveBy(dx, 0)
+        # 4. 锚点补偿：如果文字变宽/变窄，自动调整位置保持右边界不动
+        if not preserve_position:
+            new_right = self._rect.right()   # 本地坐标系下的右边界
+            old_right_local = old_right       # 上次的右边界（本地坐标）
+            dx = old_right_local - new_right
+            if abs(dx) > 0.1:
+                self.moveBy(dx, 0)
         
         # 5. 通知场景并更新连接点
         self.prepareGeometryChange()
@@ -4764,12 +4835,17 @@ class CorelSvgExporter:
         if content_rect.isEmpty():
             raise ValueError("No visible content to export.")
 
-        scene_rect = scene.sceneRect()
-        if scene_rect.isValid() and not scene_rect.isEmpty():
-            view = scene_rect.united(content_rect)
-        else:
-            margin = 10
-            view = content_rect.adjusted(-margin, -margin, margin, margin)
+        # 关键：SVG viewBox 强制从 (0, 0) 起，view 的尺寸 = content_rect 尺寸 + 2×margin。
+        # viewBox 中 content_rect 的左上角位于 (margin, margin)，所以一个 scene 坐标
+        # 里的元素 P，要写到 SVG view 局部坐标 = P_scene - content_rect.topLeft() + (margin, margin)
+        # = P_scene - offset，其中 offset = content_rect.topLeft() - (margin, margin)。
+        # 之前用 scene_rect.united(content_rect) 把 viewBox 起点撑成整个 scene 的
+        # 左上角（常常是负值或过大），导致 offset 与实际偏移不一致。
+        margin = 10
+        view = content_rect.adjusted(-margin, -margin, margin, margin)
+        view.moveTo(0, 0)
+        offset = QPointF(content_rect.topLeft().x() - margin,
+                         content_rect.topLeft().y() - margin)
         lines = [
             '<?xml version="1.0" encoding="UTF-8"?>',
             (
@@ -4785,20 +4861,38 @@ class CorelSvgExporter:
         items = [i for i in scene.items() if CorelSvgExporter._is_export_item(i)]
         items.sort(key=lambda i: i.zValue())
         exported_connectors = set()
+        exported_groups = set()
+        group_number = 0
 
         export_dir = os.path.splitext(filepath)[0] + "_assets"
 
         for item in items:
-            if isinstance(item, VImageItem):
-                lines.extend(CorelSvgExporter._image_to_svg(item, view.topLeft(), export_dir, filepath))
-            elif isinstance(item, VTextItem):
-                lines.extend(CorelSvgExporter._text_to_svg(item, view.topLeft()))
-            elif isinstance(item, (VImageTextConnector, VGenericConnector)):
-                if id(item) not in exported_connectors:
-                    path_line = CorelSvgExporter._connector_to_svg(item, view.topLeft())
-                    if path_line:
-                        lines.append(path_line)
-                    exported_connectors.add(id(item))
+            group_root = CorelSvgExporter._group_root(item)
+            if group_root is not None:
+                if group_root in exported_groups:
+                    continue
+                grouped_items = [
+                    candidate for candidate in items
+                    if CorelSvgExporter._group_root(candidate) is group_root
+                ]
+                if len(grouped_items) > 1:
+                    group_number += 1
+                    exported_groups.add(group_root)
+                    lines.append(f'<g id="layout-group-{group_number}">')
+                    for grouped_item in grouped_items:
+                        lines.extend(
+                            CorelSvgExporter._item_to_svg(
+                                grouped_item, offset, export_dir, filepath, exported_connectors
+                            )
+                        )
+                    lines.append('</g>')
+                    continue
+
+            lines.extend(
+                CorelSvgExporter._item_to_svg(
+                    item, offset, export_dir, filepath, exported_connectors
+                )
+            )
 
         lines.append('</svg>')
 
@@ -4812,6 +4906,31 @@ class CorelSvgExporter:
         if isinstance(item, (VImageTextConnector, VGenericConnector)):
             return item.isVisible() and not item.path().isEmpty()
         return False
+
+    @staticmethod
+    def _group_root(item):
+        """返回绑定组合的根元素；连线不参与 SVG 组合。"""
+        if not isinstance(item, BaseElement):
+            return None
+        root = item
+        while isinstance(root.parentItem(), BaseElement):
+            root = root.parentItem()
+        return root
+
+    @staticmethod
+    def _item_to_svg(item, offset, export_dir, filepath, exported_connectors):
+        """将单个场景元素转换为 SVG，并复用同一套绝对场景坐标。"""
+        if isinstance(item, VImageItem):
+            return CorelSvgExporter._image_to_svg(item, offset, export_dir, filepath)
+        if isinstance(item, VTextItem):
+            return CorelSvgExporter._text_to_svg(item, offset)
+        if isinstance(item, (VImageTextConnector, VGenericConnector)):
+            if id(item) in exported_connectors:
+                return []
+            path_line = CorelSvgExporter._connector_to_svg(item, offset)
+            exported_connectors.add(id(item))
+            return [path_line] if path_line else []
+        return []
 
     @staticmethod
     def _content_rect(scene):
@@ -4855,19 +4974,28 @@ class CorelSvgExporter:
         except Exception:
             href = path.replace('\\', '/')
 
+        # 关键：rect 是 item 局部坐标的 (0,0,w,h)，SVG <image> 在没有 x/y 时
+        # 默认以 (0,0) 为锚点绘制，再延伸到 width/height。
+        # sceneTransform 的 dx/dy 表示"局部 (0,0) 映射到的场景坐标"，
+        # SVG 的 matrix(a,b,c,d,e,f) 中 (e,f) 也是相对锚点的最终平移，
+        # 二者语义一致，所以直接把 sceneTransform 的 dx/dy 扣掉偏移即可。
+        # offset 这里传的是 content_rect.topLeft() - (margin, margin)，
+        # 让所有元素对齐到 viewBox 左上角。
+        # 不要再叠加 x/y，否则旋转/缩放会以 (0,0) 为锚点，导致图片跑到错位置。
         rect = item.boundingRect()
         transform = item.sceneTransform()
+        m11 = transform.m11()
+        m12 = transform.m12()
+        m21 = transform.m21()
+        m22 = transform.m22()
+        dx = transform.dx() - offset.x()
+        dy = transform.dy() - offset.y()
         matrix = ' '.join(
             CorelSvgExporter._num(value)
-            for value in (
-                transform.m11(), transform.m12(), transform.m21(), transform.m22(),
-                transform.dx() - offset.x(), transform.dy() - offset.y(),
-            )
+            for value in (m11, m12, m21, m22, dx, dy)
         )
         opacity = getattr(item, 'image_opacity', 1.0)
         attrs = [
-            f'x="{CorelSvgExporter._num(rect.left())}"',
-            f'y="{CorelSvgExporter._num(rect.top())}"',
             f'width="{CorelSvgExporter._num(rect.width())}"',
             f'height="{CorelSvgExporter._num(rect.height())}"',
             f'transform="matrix({matrix})"',
@@ -4888,7 +5016,7 @@ class CorelSvgExporter:
         ]
         children.sort(key=lambda c: (c.pos().x(), c.pos().y()))
 
-        lines.append('<g id="editable-text">')
+        lines.append('<g class="editable-text">')
         for child in children:
             text = child.text()
             if not text:
@@ -4913,7 +5041,9 @@ class CorelSvgExporter:
 
     @staticmethod
     def _connector_to_svg(item, offset):
-        path = item.path()
+        # item.path() 返回 item 局部坐标，必须先 mapToScene
+        # 再扣 offset，否则连线端点与它连接的图片/文字完全对不上。
+        path = item.mapToScene(item.path())
         d = CorelSvgExporter._path_data(path, offset)
         if not d:
             return ''
@@ -5000,6 +5130,7 @@ class GuideItem(QGraphicsItem):
         self.setZValue(1000)  # 始终在最上层
 
         self._hovered = False
+        self._selected_for_edit = False
         self._update_pos()
 
     def _update_pos(self):
@@ -5017,7 +5148,10 @@ class GuideItem(QGraphicsItem):
             return QRectF(-4, 0, 8, r.height())
 
     def paint(self, painter, option, widget):
-        color = QColor(0, 210, 255, 255) if self._hovered else QColor(0, 180, 255, 220)
+        if getattr(self, "_selected_for_edit", False):
+            color = QColor(255, 165, 0, 255)
+        else:
+            color = QColor(0, 210, 255, 255) if self._hovered else QColor(0, 180, 255, 220)
         pen = QPen(color, 2, Qt.PenStyle.SolidLine)
         painter.setPen(pen)
         r = self.scene_rect
@@ -5042,6 +5176,8 @@ class GuideItem(QGraphicsItem):
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
+            if self.scene():
+                self.scene().select_guide(self)
             self._dragging = True
             self._drag_start = event.scenePos()
             self._start_value = self.pos_value
@@ -5073,6 +5209,8 @@ class GuideItem(QGraphicsItem):
         event.accept()
 
     def contextMenuEvent(self, event):
+        if self.scene():
+            self.scene().select_guide(self)
         menu = QMenu()
         menu.addAction("删除此辅助线").triggered.connect(
             lambda: self.scene().remove_guide(self) if self.scene() else None
@@ -5260,6 +5398,7 @@ class LayoutScene(QGraphicsScene):
         self.last_selection_by_marquee = False  # 最后一次选中是否为框选
         self.background_pixmap = None  # 背景图片缓存
         self.guides = []          # 辅助线列表
+        self._selected_guide = None
         self.show_guides = True   # 辅助线显示开关
         self.snap_threshold = 20  # 辅助线吸附距离（场景像素）
         self.resize_mode = False  # 图片调整大小模式
@@ -5316,14 +5455,44 @@ class LayoutScene(QGraphicsScene):
         guide.setVisible(self.show_guides)
         return guide
 
+    def select_guide(self, guide):
+        """高亮当前操作的辅助线，并显示删除提示。"""
+        if guide not in self.guides:
+            return
+        if self._selected_guide is not guide:
+            if self._selected_guide:
+                self._selected_guide._selected_for_edit = False
+                self._selected_guide.update()
+            self._selected_guide = guide
+            guide._selected_for_edit = True
+            guide.update()
+
+        main_window = self.parent()
+        if main_window and hasattr(main_window, "status_bar"):
+            main_window.status_bar.showMessage("已选中辅助线，双击删除这条辅助线")
+
+    def clear_guide_selection(self):
+        """取消辅助线高亮和删除提示。"""
+        if not self._selected_guide:
+            return
+        self._selected_guide._selected_for_edit = False
+        self._selected_guide.update()
+        self._selected_guide = None
+        main_window = self.parent()
+        if main_window and hasattr(main_window, "status_bar"):
+            main_window.status_bar.clearMessage()
+
     def remove_guide(self, guide):
         """删除指定辅助线"""
         if guide in self.guides:
+            if guide is self._selected_guide:
+                self.clear_guide_selection()
             self.removeItem(guide)
             self.guides.remove(guide)
 
     def clear_guides(self):
         """清除所有辅助线"""
+        self.clear_guide_selection()
         for g in self.guides[:]:
             self.removeItem(g)
         self.guides.clear()
@@ -7356,6 +7525,7 @@ class LayoutView(QGraphicsView):
             if isinstance(raw_hit, GuideItem):
                 super(LayoutView, self).mousePressEvent(event)
                 return
+            self.scene().clear_guide_selection()
 
             hit_element = raw_hit
             # 向上追溯，直到找到 BaseElement（即我们的 VImageItem 或 VTextItem）
@@ -8963,6 +9133,16 @@ class MainWindow(QMainWindow):
         set_img_size_action = QAction('设置插入图片默认大小...', self)
         set_img_size_action.triggered.connect(self.set_insert_image_size)
         file_menu.addAction(set_img_size_action)
+
+        file_menu.addSeparator()
+
+        license_expiry_action = QAction('设置软件到期日期...', self)
+        license_expiry_action.triggered.connect(self.set_license_expiry_date)
+        file_menu.addAction(license_expiry_action)
+
+        license_password_action = QAction('修改授权密码...', self)
+        license_password_action.triggered.connect(self.change_license_password)
+        file_menu.addAction(license_password_action)
         
         # 添加素材菜单
         asset_menu = menubar.addMenu('素材')
@@ -9300,6 +9480,104 @@ class MainWindow(QMainWindow):
             self.status_bar.showMessage('已开启：插入图片时自动拉伸为画布大小', 3000)
         else:
             self.status_bar.showMessage('已关闭：插入图片时使用原始大小', 3000)
+
+    def _verify_license_password(self):
+        """验证管理员密码后再允许修改授权设置。"""
+        password, ok = QInputDialog.getText(
+            self,
+            "授权验证",
+            "请输入授权密码：",
+            QLineEdit.EchoMode.Password
+        )
+        if not ok:
+            return False
+
+        stored_hash = self.scene.config_manager.get(
+            "license_password_hash",
+            hash_license_password(DEFAULT_LICENSE_PASSWORD)
+        )
+        if hash_license_password(password) != stored_hash:
+            QMessageBox.warning(self, "授权验证", "密码不正确。")
+            return False
+        return True
+
+    def set_license_expiry_date(self):
+        """设置软件可使用的最后日期。"""
+        if not self._verify_license_password():
+            return
+
+        config = self.scene.config_manager
+        current_text = str(config.get("license_expiry_date", "") or "").strip()
+        current_date = QDate.fromString(current_text, "yyyy-MM-dd")
+        if not current_date.isValid():
+            current_date = QDate.currentDate()
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("设置软件到期日期")
+        layout = QFormLayout(dialog)
+        layout.addRow(
+            QLabel("软件在所选日期当天仍可使用，次日启动后将无法进入软件。")
+        )
+        expiry_edit = QDateEdit(current_date, dialog)
+        expiry_edit.setCalendarPopup(True)
+        expiry_edit.setDisplayFormat("yyyy-MM-dd")
+        expiry_edit.setMinimumDate(QDate.currentDate())
+        layout.addRow("到期日期：", expiry_edit)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("保存")
+        buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("取消")
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addRow(buttons)
+
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        expiry_text = expiry_edit.date().toString("yyyy-MM-dd")
+        config.set("license_expiry_date", expiry_text)
+        QMessageBox.information(
+            self,
+            "授权设置",
+            f"软件到期日期已设置为：{expiry_text}\n到期日当天仍可使用。"
+        )
+
+    def change_license_password(self):
+        """修改管理员授权密码。"""
+        if not self._verify_license_password():
+            return
+
+        new_password, ok = QInputDialog.getText(
+            self,
+            "修改授权密码",
+            "请输入新密码（至少 6 位）：",
+            QLineEdit.EchoMode.Password
+        )
+        if not ok:
+            return
+        if len(new_password) < 6:
+            QMessageBox.warning(self, "修改授权密码", "密码至少需要 6 位。")
+            return
+
+        confirm_password, ok = QInputDialog.getText(
+            self,
+            "确认授权密码",
+            "请再次输入新密码：",
+            QLineEdit.EchoMode.Password
+        )
+        if not ok:
+            return
+        if new_password != confirm_password:
+            QMessageBox.warning(self, "修改授权密码", "两次输入的密码不一致。")
+            return
+
+        self.scene.config_manager.set(
+            "license_password_hash",
+            hash_license_password(new_password)
+        )
+        QMessageBox.information(self, "修改授权密码", "授权密码已修改。")
 
     def set_nudge_large_step(self):
         """设置Shift+方向键大步长"""
@@ -11829,7 +12107,18 @@ if __name__ == "__main__":
     app.setApplicationName("VertiLayout Pro")
     app.setApplicationVersion("1.0")
     app.setOrganizationName("VertiLayout")
-    
+
+    license_config = ConfigManager()
+    license_valid, license_message = license_is_valid(license_config.config)
+    if not license_valid:
+        if not recover_expired_license(license_config):
+            QMessageBox.critical(
+                None,
+                "软件已到期",
+                f"{license_message}。\n授权验证失败，软件无法使用。"
+            )
+            sys.exit(0)
+
     w = MainWindow()
     w.show()
     sys.exit(app.exec())
