@@ -11253,8 +11253,9 @@ class MainWindow(QMainWindow):
             printer.setOutputFileName(path)
 
             rect = scene.sceneRect()
-            width_mm = rect.width() / 96.0 * 25.4
-            height_mm = rect.height() / 96.0 * 25.4
+            # 使用与 CorelDRAW SVG 导出相同的 DPI (600)，确保尺寸一致
+            width_mm = rect.width() * 25.4 / CORELDRAW_EXPORT_DPI
+            height_mm = rect.height() * 25.4 / CORELDRAW_EXPORT_DPI
 
             page_size = QPageSize(QSizeF(width_mm, height_mm), QPageSize.Unit.Millimeter)
             printer.setPageSize(page_size)
