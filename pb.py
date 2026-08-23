@@ -4075,13 +4075,16 @@ class VTextItem(BaseElement):
         """完成内联编辑：恢复正常显示并保存，保持对象当前位置不变"""
         if hasattr(self, '_cursor_timer'):
             self._cursor_timer.stop()
-        origin_scene_pos = getattr(self, '_editing_origin_scene_pos', self.scenePos())
+        # 先保存原始位置的副本
+        origin_scene_pos = getattr(self, '_editing_origin_scene_pos', None) or self.scenePos()
+        
         self.is_editing = False
         self._editing_text = ""
         self._editing_right = None
         self._editing_scene_y = None
         self._editing_local_right = None
         self._editing_origin_scene_pos = None
+        
         # 恢复子字符可见性和颜色
         for child in self.childItems():
             if isinstance(child, QGraphicsSimpleTextItem):
@@ -4096,6 +4099,8 @@ class VTextItem(BaseElement):
             self.scene().undo_stack.push(cmd)
         else:
             self.rebuild(preserve_position=True)
+        
+        # 使用之前保存的位置副本
         if self.parentItem():
             self.setPos(self.parentItem().mapFromScene(origin_scene_pos))
         else:
@@ -4109,18 +4114,24 @@ class VTextItem(BaseElement):
         """取消内联编辑：恢复原始文字和颜色，保持对象当前位置不变"""
         if hasattr(self, '_cursor_timer'):
             self._cursor_timer.stop()
-        origin_scene_pos = getattr(self, '_editing_origin_scene_pos', self.scenePos())
+        # 先保存原始位置的副本
+        origin_scene_pos = getattr(self, '_editing_origin_scene_pos', None) or self.scenePos()
+        
         self.is_editing = False
         self._editing_text = ""
         self._editing_right = None
         self._editing_scene_y = None
         self._editing_local_right = None
         self._editing_origin_scene_pos = None
+        
         self.rebuild(preserve_position=True)
+        
+        # 使用之前保存的位置副本
         if self.parentItem():
             self.setPos(self.parentItem().mapFromScene(origin_scene_pos))
         else:
             self.setPos(origin_scene_pos)
+            
         for child in self.childItems():
             if isinstance(child, QGraphicsSimpleTextItem):
                 child.setVisible(True)
@@ -8275,6 +8286,74 @@ class DocumentState:
         self.dirty = False
 
 
+class PlusTabBar(QTabBar):
+    """标签栏：最后一个标签后面紧跟一个 + 按钮"""
+    addTabRequested = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._plus_btn = None
+
+    def _ensure_plus_btn(self):
+        """延迟创建 + 按钮，确保父窗口已设置"""
+        if self._plus_btn is None:
+            self._plus_btn = QToolButton(self)
+            self._plus_btn.setText("+")
+            self._plus_btn.setFixedSize(28, 24)
+            self._plus_btn.setToolTip("新建文档 (Ctrl+N)")
+            self._plus_btn.setStyleSheet(
+                "QToolButton { "
+                "   border: 1px solid #ccc; "
+                "   border-radius: 4px; "
+                "   font-size: 16px; "
+                "   font-weight: bold; "
+                "   background: #f0f0f0; "
+                "   color: #333; "
+                "}"
+                "QToolButton:hover { "
+                "   background: #e0e0e0; "
+                "   border-color: #999; "
+                "}"
+                "QToolButton:pressed { "
+                "   background: #d0d0d0; "
+                "}"
+            )
+            self._plus_btn.clicked.connect(self.addTabRequested)
+            self._plus_btn.setVisible(True)
+            self._plus_btn.raise_()
+            print("加号按钮已创建")
+
+    def _move_plus_btn(self):
+        """将 + 按钮放在最后一个标签的右侧"""
+        self._ensure_plus_btn()
+        if self._plus_btn is None:
+            return
+        count = self.count()
+        if count > 0:
+            last_rect = self.tabRect(count - 1)
+            x = last_rect.right() + 2
+            y = last_rect.top() + (last_rect.height() - 24) // 2
+            print(f"移动加号按钮到: x={x}, y={y}, 标签数={count}, 标签宽度={last_rect.width()}")
+        else:
+            x, y = 4, 4
+            print(f"无标签，加号按钮位置: x={x}, y={y}")
+        self._plus_btn.move(x, y)
+        self._plus_btn.setVisible(True)
+        self._plus_btn.raise_()
+
+    def tabLayoutChange(self):
+        super().tabLayoutChange()
+        self._move_plus_btn()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._move_plus_btn()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._move_plus_btn()
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -8336,15 +8415,21 @@ class MainWindow(QMainWindow):
         self.asset_library = None
         
         self.document_tabs = QTabWidget()
-        self.document_tabs.setTabsClosable(True)
         self.document_tabs.setMovable(False)
-        self.document_tabs.setDocumentMode(True)
+        self.document_tabs.setDocumentMode(False)
+        # 使用自定义标签栏，+ 按钮紧跟在标签后面
+        plus_tab_bar = PlusTabBar()
+        plus_tab_bar.addTabRequested.connect(self.new_document)
+        plus_tab_bar.setTabsClosable(True)
+        self.document_tabs.setTabBar(plus_tab_bar)
+        self.document_tabs.setTabsClosable(True)
         self.document_tabs.tabCloseRequested.connect(self.close_document)
         self.document_tabs.tabBarDoubleClicked.connect(self.rename_document)
         self.document_tabs.addTab(self.view, "文档 1")
         self._set_document_tab_close_text(0)
         self.document_tabs.setCurrentIndex(0)
         self.document_tabs.currentChanged.connect(self._on_document_changed)
+
         self.setCentralWidget(self.document_tabs)
         self.create_menu_bar()
         self.create_toolbars()
@@ -8384,6 +8469,9 @@ class MainWindow(QMainWindow):
         # 恢复上次窗口大小和停靠面板布局
         self._restore_window_state()
         self._update_document_tab_title(self._documents[0])
+        
+        # 延迟触发加号按钮显示
+        QTimer.singleShot(100, lambda: self.document_tabs.tabBar()._move_plus_btn())
 
     def _create_document(self, name):
         """创建一个独立的场景和视图。"""
@@ -8579,7 +8667,14 @@ class MainWindow(QMainWindow):
         if not self._startup_fit_done:
             self._startup_fit_done = True
             self._fit_window_to_available_screen()
-            QTimer.singleShot(0, self.fit_in_view)
+            # 确保在窗口完全显示后执行画布适应，即使是最大化窗口
+            QTimer.singleShot(100, self.fit_in_view)
+
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if event.type() == QEvent.Type.WindowStateChange:
+            if self.isMaximized():
+                QTimer.singleShot(100, self.fit_in_view)
 
     def _fit_window_to_available_screen(self):
         """启动时确保窗口落在当前屏幕可用区域内。"""
