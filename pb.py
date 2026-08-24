@@ -8293,13 +8293,22 @@ class PlusTabBar(QTabBar):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._plus_btn = None
+        # Keep tabs at their content width so the trailing + button remains
+        # inside the tab bar instead of being pushed outside its clipped area.
+        self.setExpanding(False)
 
     def _ensure_plus_btn(self):
         """延迟创建 + 按钮，确保父窗口已设置"""
+        # Before QTabWidget.setTabBar() the tab bar has no container parent;
+        # defer creation until it can be placed outside the clipped tab bar.
+        button_parent = self.parentWidget()
+        if button_parent is None:
+            return
         if self._plus_btn is None:
-            self._plus_btn = QToolButton(self)
+            self._plus_btn = QToolButton(button_parent)
             self._plus_btn.setText("+")
-            self._plus_btn.setFixedSize(28, 24)
+            self._plus_btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+            self._plus_btn.setFixedSize(28, 28)
             self._plus_btn.setToolTip("新建文档 (Ctrl+N)")
             self._plus_btn.setStyleSheet(
                 "QToolButton { "
@@ -8309,6 +8318,10 @@ class PlusTabBar(QTabBar):
                 "   font-weight: bold; "
                 "   background: #f0f0f0; "
                 "   color: #333; "
+                "   padding: 0px; "
+                "   margin: 0px; "
+                "   min-width: 0px; "
+                "   min-height: 0px; "
                 "}"
                 "QToolButton:hover { "
                 "   background: #e0e0e0; "
@@ -8332,18 +8345,25 @@ class PlusTabBar(QTabBar):
         if count > 0:
             last_rect = self.tabRect(count - 1)
             x = last_rect.right() + 2
-            y = last_rect.top() + (last_rect.height() - 24) // 2
+            y = last_rect.top() + (last_rect.height() - self._plus_btn.height()) // 2
             print(f"移动加号按钮到: x={x}, y={y}, 标签数={count}, 标签宽度={last_rect.width()}")
         else:
             x, y = 4, 4
             print(f"无标签，加号按钮位置: x={x}, y={y}")
-        self._plus_btn.move(x, y)
+        button_parent = self._plus_btn.parentWidget()
+        if button_parent is self:
+            self._plus_btn.move(x, y)
+        else:
+            self._plus_btn.move(self.mapTo(button_parent, QPoint(x, y)))
         self._plus_btn.setVisible(True)
         self._plus_btn.raise_()
 
     def tabLayoutChange(self):
         super().tabLayoutChange()
-        self._move_plus_btn()
+        # QTabBar can invoke this virtual method during its base
+        # constructor, before our instance attributes have been initialized.
+        if hasattr(self, "_plus_btn"):
+            self._move_plus_btn()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -8667,14 +8687,15 @@ class MainWindow(QMainWindow):
         if not self._startup_fit_done:
             self._startup_fit_done = True
             self._fit_window_to_available_screen()
-            # 确保在窗口完全显示后执行画布适应，即使是最大化窗口
-            QTimer.singleShot(100, self.fit_in_view)
+            # 确保在窗口完全显示后执行画布适应，无论是否最大化
+            QTimer.singleShot(200, self.fit_in_view)
 
     def changeEvent(self, event):
         super().changeEvent(event)
         if event.type() == QEvent.Type.WindowStateChange:
-            if self.isMaximized():
-                QTimer.singleShot(100, self.fit_in_view)
+            # 窗口状态改变后延迟执行，确保布局已完成
+            if self.isMaximized() and self._startup_fit_done:
+                QTimer.singleShot(150, self.fit_in_view)
 
     def _fit_window_to_available_screen(self):
         """启动时确保窗口落在当前屏幕可用区域内。"""
@@ -12216,5 +12237,5 @@ if __name__ == "__main__":
             sys.exit(0)
 
     w = MainWindow()
-    w.show()
+    w.showMaximized()  # 启动时最大化窗口
     sys.exit(app.exec())
