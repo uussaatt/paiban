@@ -8645,13 +8645,17 @@ class MainWindow(QMainWindow):
             if reply == QMessageBox.StandardButton.Save and not self.quick_save_proj():
                 return
 
-        self.document_tabs.removeTab(index)
+        # Keep the document model in sync before removeTab() emits
+        # currentChanged; otherwise the navigator can rebind to this view
+        # immediately before it is deleted.
         self._documents.pop(index)
+        self.document_tabs.removeTab(index)
         document.view.deleteLater()
         if not self._documents:
             self.new_document()
         else:
             self.document_tabs.setCurrentIndex(min(index, len(self._documents) - 1))
+            self._on_document_changed(self.document_tabs.currentIndex())
 
     def _replace_documents(self, document_data):
         """用加载结果替换当前窗口内的全部文档。"""
