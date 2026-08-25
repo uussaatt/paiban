@@ -8381,6 +8381,8 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self._startup_fit_done = False
+        self._startup_fit_last_viewport_size = None
+        self._startup_fit_attempts = 0
         self.setWindowTitle("VertiLayout Pro - 竖排排版引擎")
         self.setGeometry(100, 100, 1400, 900)
         # 应用Fluent Design样式
@@ -8567,6 +8569,12 @@ class MainWindow(QMainWindow):
                 self.scene.config_manager.get('bg_above_connectors', False)
             )
             self.bg_above_connectors_action.blockSignals(False)
+        if hasattr(self, 'horizontal_move_only_action'):
+            self.horizontal_move_only_action.blockSignals(True)
+            self.horizontal_move_only_action.setChecked(
+                self.scene.config_manager.get('horizontal_move_only', False)
+            )
+            self.horizontal_move_only_action.blockSignals(False)
         if hasattr(self, 'marquee_mode_combo'):
             self._sync_marquee_mode_ui()
         if hasattr(self, 'refresh_ui'):
@@ -8694,15 +8702,32 @@ class MainWindow(QMainWindow):
         if not self._startup_fit_done:
             self._startup_fit_done = True
             self._fit_window_to_available_screen()
-            # 确保在窗口完全显示后执行画布适应，无论是否最大化
-            QTimer.singleShot(200, self.fit_in_view)
+            self._startup_fit_last_viewport_size = None
+            self._startup_fit_attempts = 0
+            QTimer.singleShot(0, self._fit_startup_view)
+
+    def _fit_startup_view(self):
+        """Fit the current document once the visible viewport has a size."""
+        if not self.isVisible() or not hasattr(self, 'view'):
+            return
+        viewport = self.view.viewport()
+        if viewport.width() <= 0 or viewport.height() <= 0:
+            QTimer.singleShot(100, self._fit_startup_view)
+            return
+        viewport_size = viewport.size()
+        size_is_stable = viewport_size == self._startup_fit_last_viewport_size
+        self._startup_fit_last_viewport_size = QSize(viewport_size)
+        self._startup_fit_attempts += 1
+        self.view.fit_in_view()
+        if not size_is_stable and self._startup_fit_attempts < 10:
+            QTimer.singleShot(100, self._fit_startup_view)
 
     def changeEvent(self, event):
         super().changeEvent(event)
         if event.type() == QEvent.Type.WindowStateChange:
             # 窗口状态改变后延迟执行，确保布局已完成
             if self.isMaximized() and self._startup_fit_done:
-                QTimer.singleShot(150, self.fit_in_view)
+                QTimer.singleShot(100, self.fit_in_view)
 
     def _fit_window_to_available_screen(self):
         """启动时确保窗口落在当前屏幕可用区域内。"""
@@ -9522,7 +9547,10 @@ class MainWindow(QMainWindow):
 
     def toggle_horizontal_move_only(self, enabled):
         """切换水平移动模式：拖动/方向键移动时保持Y坐标不变。"""
-        self.scene.config_manager.set('horizontal_move_only', enabled)
+        # ConfigManager is instantiated once per document, so update every
+        # document copy; otherwise switching tabs restores a stale value.
+        for document in self._documents:
+            document.scene.config_manager.set('horizontal_move_only', enabled)
         if enabled:
             self.status_bar.showMessage('已开启：水平移动模式，移动对象时Y坐标不变', 3000)
         else:
