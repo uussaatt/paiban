@@ -4846,17 +4846,15 @@ class CorelSvgExporter:
         if content_rect.isEmpty():
             raise ValueError("No visible content to export.")
 
-        # 关键：SVG viewBox 强制从 (0, 0) 起，view 的尺寸 = content_rect 尺寸 + 2×margin。
-        # viewBox 中 content_rect 的左上角位于 (margin, margin)，所以一个 scene 坐标
-        # 里的元素 P，要写到 SVG view 局部坐标 = P_scene - content_rect.topLeft() + (margin, margin)
-        # = P_scene - offset，其中 offset = content_rect.topLeft() - (margin, margin)。
-        # 之前用 scene_rect.united(content_rect) 把 viewBox 起点撑成整个 scene 的
-        # 左上角（常常是负值或过大），导致 offset 与实际偏移不一致。
-        margin = 10
-        view = content_rect.adjusted(-margin, -margin, margin, margin)
+        # Keep the SVG page aligned with the editor canvas.  Cropping the page
+        # to content_rect makes every object appear shifted toward the SVG
+        # origin, so the exported layout no longer matches the canvas.
+        scene_rect = scene.sceneRect()
+        if scene_rect.isEmpty():
+            scene_rect = content_rect
+        view = QRectF(scene_rect)
         view.moveTo(0, 0)
-        offset = QPointF(content_rect.topLeft().x() - margin,
-                         content_rect.topLeft().y() - margin)
+        offset = scene_rect.topLeft()
         lines = [
             '<?xml version="1.0" encoding="UTF-8"?>',
             (
@@ -4990,8 +4988,8 @@ class CorelSvgExporter:
         # sceneTransform 的 dx/dy 表示"局部 (0,0) 映射到的场景坐标"，
         # SVG 的 matrix(a,b,c,d,e,f) 中 (e,f) 也是相对锚点的最终平移，
         # 二者语义一致，所以直接把 sceneTransform 的 dx/dy 扣掉偏移即可。
-        # offset 这里传的是 content_rect.topLeft() - (margin, margin)，
-        # 让所有元素对齐到 viewBox 左上角。
+        # offset 这里传的是画布 scene_rect 的左上角，
+        # 让场景坐标直接对齐到 SVG viewBox。
         # 不要再叠加 x/y，否则旋转/缩放会以 (0,0) 为锚点，导致图片跑到错位置。
         rect = item.boundingRect()
         transform = item.sceneTransform()
@@ -5033,7 +5031,12 @@ class CorelSvgExporter:
             if not text:
                 continue
             glyph_path = QPainterPath()
-            glyph_path.addText(QPointF(0, 0), child.font(), text)
+            # QGraphicsSimpleTextItem positions its text box from y=0, but
+            # QPainterPath.addText() treats the supplied y as the baseline.
+            # Use the same ascent that Qt uses for the item so exported glyphs
+            # occupy the same scene coordinates as they do on the canvas.
+            baseline_y = QFontMetrics(child.font()).ascent()
+            glyph_path.addText(QPointF(0, baseline_y), child.font(), text)
             # 先将字形转换到场景坐标，再在场景坐标中减去 SVG 视图偏移。
             # 不能把 offset 直接加入 sceneTransform，否则旋转字符会把
             # 偏移量一起旋转，造成文字与图片的相对位置发生变化。
