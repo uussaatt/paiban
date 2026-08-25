@@ -131,6 +131,7 @@ class ConfigManager:
             'insert_image_to_bottom': False,  # 插入图片时置于底层
             'nudge_large_step': 10,  # Shift+方向键大步长（像素）
             'horizontal_move_only': False,  # 拖动/方向键移动时只允许水平移动
+            'image_right_edge_snap_enabled': False,  # 水平移动图片时吸附右边缘X
             'smart_brush_radius': 18,  # 智能笔刷默认大小
             'default_save_dir': '',  # 默认保存目录
             'insert_image_max_width_ratio': 0.3,  # 插入图片最大宽度（画布宽度的比例）
@@ -2995,7 +2996,11 @@ class BaseElement(QGraphicsItem):
             if self in horizontal_lock:
                 parent = self.parentItem()
                 new_scene_pos = parent.mapToScene(value) if parent else value
-                locked_scene_pos = QPointF(new_scene_pos.x(), horizontal_lock[self])
+                snap_dx = self._horizontal_image_snap_offset(new_scene_pos, horizontal_lock)
+                locked_scene_pos = QPointF(
+                    new_scene_pos.x() + snap_dx,
+                    horizontal_lock[self]
+                )
                 value = parent.mapFromScene(locked_scene_pos) if parent else locked_scene_pos
 
         if change == QGraphicsItem.GraphicsItemChange.ItemPositionHasChanged:
@@ -3008,6 +3013,82 @@ class BaseElement(QGraphicsItem):
                 self._update_children_connectors()
 
         return super().itemChange(change, value)
+
+    def _horizontal_image_snap_offset(self, new_scene_pos, horizontal_lock):
+        """Align the moving image's right edge X with the nearest image."""
+        scene = self.scene()
+        def set_indicator(indicator):
+            if scene and getattr(scene, '_image_right_edge_snap_indicator', None) != indicator:
+                scene._image_right_edge_snap_indicator = indicator
+                scene.update()
+
+        owner = getattr(scene, '_horizontal_move_lock_owner', None) if scene else None
+        lock_x = getattr(scene, '_horizontal_move_lock_x', {}) if scene else {}
+        owner_right_x = getattr(scene, '_horizontal_move_owner_right_x', None) if scene else None
+        if (not scene
+                or not scene.config_manager.get('image_right_edge_snap_enabled', False)
+                or not isinstance(owner, VImageItem)
+                or owner not in horizontal_lock
+                or self not in lock_x
+                or owner_right_x is None):
+            set_indicator(None)
+            return 0.0
+
+        moving_items = {
+            item for item in scene.selectedItems()
+            if isinstance(item, BaseElement) and item in horizontal_lock
+        }
+        moving_items.add(owner)
+
+        def belongs_to_moving_group(candidate):
+            for moving_item in moving_items:
+                current = candidate
+                while current is not None:
+                    if current is moving_item:
+                        return True
+                    current = current.parentItem()
+
+                current = moving_item.parentItem()
+                while current is not None:
+                    if current is candidate:
+                        return True
+                    current = current.parentItem()
+            return False
+
+        drag_dx = new_scene_pos.x() - lock_x[self]
+        moving_right_x = owner_right_x + drag_dx
+        threshold = scene.snap_threshold
+        best_offset = None
+        best_candidate = None
+        for candidate in scene.items():
+            if (not isinstance(candidate, VImageItem)
+                    or not candidate.isVisible()
+                    or getattr(candidate, '_was_hidden', False)
+                    or belongs_to_moving_group(candidate)):
+                continue
+            candidate_right_x = candidate.sceneBoundingRect().right()
+            offset = candidate_right_x - moving_right_x
+            if abs(offset) <= threshold and (
+                    best_offset is None or abs(offset) < abs(best_offset)):
+                best_offset = offset
+                best_candidate = candidate
+
+        if best_candidate is None:
+            set_indicator(None)
+            return 0.0
+
+        owner_rect = owner.sceneBoundingRect()
+        candidate_rect = best_candidate.sceneBoundingRect()
+        aligned_x = candidate_rect.right()
+        set_indicator((
+            aligned_x,
+            min(owner_rect.top(), candidate_rect.top()),
+            max(owner_rect.bottom(), candidate_rect.bottom()),
+            owner_rect.top(),
+            candidate_rect.top(),
+        ))
+
+        return best_offset
 
     def _snap_to_guides(self, new_pos, threshold=None):
         """将位置吸附到最近的辅助线"""
@@ -3088,7 +3169,11 @@ class BaseElement(QGraphicsItem):
                 scene.undo_stack.push(command)
             if getattr(scene, '_horizontal_move_lock_owner', None) is self:
                 scene._horizontal_move_lock_y = {}
+                scene._horizontal_move_lock_x = {}
                 scene._horizontal_move_lock_owner = None
+                scene._horizontal_move_owner_right_x = None
+                scene._image_right_edge_snap_indicator = None
+                scene.update()
 
         super().mouseReleaseEvent(event)
 
@@ -3108,7 +3193,13 @@ class BaseElement(QGraphicsItem):
                     item: item.scenePos().y()
                     for item in selected_items
                 }
+                scene._horizontal_move_lock_x = {
+                    item: item.scenePos().x()
+                    for item in selected_items
+                }
                 scene._horizontal_move_lock_owner = self
+                scene._horizontal_move_owner_right_x = self.sceneBoundingRect().right()
+                scene._image_right_edge_snap_indicator = None
         super().mousePressEvent(event)
 
     
@@ -5398,7 +5489,10 @@ class LayoutScene(QGraphicsScene):
         self.show_image_text_connectors = True  
         self.undo_stack = UndoStack()  
         self._horizontal_move_lock_y = {}
+        self._horizontal_move_lock_x = {}
         self._horizontal_move_lock_owner = None
+        self._horizontal_move_owner_right_x = None
+        self._image_right_edge_snap_indicator = None
         self.clipboard_items = []  
         self.clipboard_image_text_connections = []  
         self.show_connection_points = True  
@@ -5614,29 +5708,44 @@ class LayoutScene(QGraphicsScene):
 
     def drawForeground(self, painter, rect):
         """图片管理模式下，给原本隐藏的图片画虚线边框和标注"""
-        if not self.image_manage_mode:
-            return
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        for item in self.items():
-            if isinstance(item, VImageItem) and getattr(item, '_was_hidden', False):
-                scene_rect = item.mapRectToScene(item.boundingRect())
-                # 半透明蓝色遮罩
-                painter.setOpacity(0.25)
-                painter.fillRect(scene_rect, QColor(0, 120, 215))
-                painter.setOpacity(1.0)
-                # 虚线边框
-                pen = QPen(QColor(0, 120, 215), 2, Qt.PenStyle.DashLine)
-                pen.setCosmetic(True)
-                painter.setPen(pen)
-                painter.setBrush(Qt.BrushStyle.NoBrush)
-                painter.drawRect(scene_rect)
-                # 文件名提示
-                painter.setPen(QColor(255, 255, 255))
-                font = QFont('Arial', 9)
-                font.setBold(True)
-                painter.setFont(font)
-                name = os.path.basename(item.file_path)
-                painter.drawText(scene_rect, Qt.AlignmentFlag.AlignCenter, f'点击显示\n{name}')
+        if self.image_manage_mode:
+            for item in self.items():
+                if isinstance(item, VImageItem) and getattr(item, '_was_hidden', False):
+                    scene_rect = item.mapRectToScene(item.boundingRect())
+                    # 半透明蓝色遮罩
+                    painter.setOpacity(0.25)
+                    painter.fillRect(scene_rect, QColor(0, 120, 215))
+                    painter.setOpacity(1.0)
+                    # 虚线边框
+                    pen = QPen(QColor(0, 120, 215), 2, Qt.PenStyle.DashLine)
+                    pen.setCosmetic(True)
+                    painter.setPen(pen)
+                    painter.setBrush(Qt.BrushStyle.NoBrush)
+                    painter.drawRect(scene_rect)
+                    # 文件名提示
+                    painter.setPen(QColor(255, 255, 255))
+                    font = QFont('Arial', 9)
+                    font.setBold(True)
+                    painter.setFont(font)
+                    name = os.path.basename(item.file_path)
+                    painter.drawText(scene_rect, Qt.AlignmentFlag.AlignCenter, f'点击显示\n{name}')
+
+        indicator = self._image_right_edge_snap_indicator
+        if indicator and not getattr(self, '_rendering_pdf', False):
+            x, top, bottom, moving_top, target_top = indicator
+            scale = abs(painter.worldTransform().m11()) or 1.0
+            padding = 8.0 / scale
+            radius = 5.0 / scale
+            color = QColor(255, 45, 100)
+            pen = QPen(color, 3, Qt.PenStyle.SolidLine)
+            pen.setCosmetic(True)
+            painter.setOpacity(1.0)
+            painter.setPen(pen)
+            painter.setBrush(QBrush(color))
+            painter.drawLine(QPointF(x, top - padding), QPointF(x, bottom + padding))
+            painter.drawEllipse(QPointF(x, moving_top), radius, radius)
+            painter.drawEllipse(QPointF(x, target_top), radius, radius)
 
     def drawBackground(self, painter, rect):
         # PDF导出时：直接填白色，跳过灰色外框和网格
@@ -8575,6 +8684,12 @@ class MainWindow(QMainWindow):
                 self.scene.config_manager.get('horizontal_move_only', False)
             )
             self.horizontal_move_only_action.blockSignals(False)
+        if hasattr(self, 'image_right_edge_snap_action'):
+            self.image_right_edge_snap_action.blockSignals(True)
+            self.image_right_edge_snap_action.setChecked(
+                self.scene.config_manager.get('image_right_edge_snap_enabled', False)
+            )
+            self.image_right_edge_snap_action.blockSignals(False)
         if hasattr(self, 'marquee_mode_combo'):
             self._sync_marquee_mode_ui()
         if hasattr(self, 'refresh_ui'):
@@ -9517,6 +9632,14 @@ class MainWindow(QMainWindow):
         self.horizontal_move_only_action.toggled.connect(self.toggle_horizontal_move_only)
         edit_menu.addAction(self.horizontal_move_only_action)
 
+        self.image_right_edge_snap_action = QAction('图片右边缘X自动吸附', self)
+        self.image_right_edge_snap_action.setCheckable(True)
+        self.image_right_edge_snap_action.setChecked(
+            self.scene.config_manager.get('image_right_edge_snap_enabled', False)
+        )
+        self.image_right_edge_snap_action.toggled.connect(self.toggle_image_right_edge_snap)
+        edit_menu.addAction(self.image_right_edge_snap_action)
+
         eye_role_from_selection_menu = edit_menu.addMenu('设置选中文字眼睛颜色')
         for color_key, color_label in [
             ('yellow', '设为黄色眼睛'),
@@ -9555,6 +9678,15 @@ class MainWindow(QMainWindow):
             self.status_bar.showMessage('已开启：水平移动模式，移动对象时Y坐标不变', 3000)
         else:
             self.status_bar.showMessage('已关闭：水平移动模式', 3000)
+
+    def toggle_image_right_edge_snap(self, enabled):
+        """切换水平移动图片时的右边缘X吸附。"""
+        for document in self._documents:
+            document.scene.config_manager.set('image_right_edge_snap_enabled', enabled)
+        if enabled:
+            self.status_bar.showMessage('已开启：图片右边缘X自动吸附（阈值20px）', 3000)
+        else:
+            self.status_bar.showMessage('已关闭：图片右边缘X自动吸附', 3000)
 
     def set_marquee_mode(self, mode):
         """设置框选模式：all / images / connected"""
