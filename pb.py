@@ -123,6 +123,16 @@ class ConfigManager:
             'background_scale_mode': 'fit',
             'default_font_family': DEFAULT_FONT,
             'default_font_size': DEFAULT_FONT_SIZE,
+            'default_text_format': {
+                'font_family': DEFAULT_FONT,
+                'font_size': DEFAULT_FONT_SIZE,
+                'text_color': '#000000',
+                'chars_per_column': 15,
+                'column_spacing': COLUMN_SPACING,
+                'character_spacing': 0,
+                'manual_line_break': True,
+            },
+            'text_format_presets': [],
             'default_line_width': DEFAULT_LINE_WIDTH,  # 默认连线粗细
             'bg_above_connectors': False,  # 背景图片是否在连线之上
             'marquee_only_images': False,  # 框选时仅选择图片（兼容旧版）
@@ -216,6 +226,11 @@ class AssetManager:
             'box_height': text_item.box_height,
             'font_family': text_item.font_family,
             'text_color': text_item.text_color.name(),
+            'chars_per_column': text_item.chars_per_column,
+            'column_spacing': text_item.column_spacing,
+            'character_spacing': text_item.character_spacing,
+            'auto_height': text_item.auto_height,
+            'manual_line_break': text_item.manual_line_break,
             'created_time': QDateTime.currentDateTime().toString()
         }
         self.assets['texts'].append(asset_data)
@@ -288,6 +303,7 @@ class AssetManager:
                     'text_color': item.text_color.name(),
                     'chars_per_column': item.chars_per_column,
                     'column_spacing': item.column_spacing,
+                    'character_spacing': item.character_spacing,
                     'auto_height': item.auto_height,
                     'manual_line_break': item.manual_line_break,
                     'layer_eye_color': getattr(item, 'layer_eye_color', None),
@@ -1328,7 +1344,7 @@ class AssetLibraryDockWidget(QDockWidget):
                 new_item = VTextItem(item_data['text'], item_data['font_size'], item_data['box_height'])
                 new_item.font_family = item_data['font_family']
                 new_item.text_color = QColor(item_data['text_color'])
-                for k in ('chars_per_column', 'column_spacing', 'auto_height', 'manual_line_break', 'layer_eye_color'):
+                for k in ('chars_per_column', 'column_spacing', 'character_spacing', 'auto_height', 'manual_line_break', 'layer_eye_color'):
                     if k in item_data:
                         setattr(new_item, k, item_data[k])
                 new_item.rebuild()
@@ -1635,6 +1651,9 @@ class AssetLibraryWidget(QWidget):
             )
             text_item.font_family = asset['font_family']
             text_item.text_color = QColor(asset['text_color'])
+            for key in ('chars_per_column', 'column_spacing', 'character_spacing', 'auto_height', 'manual_line_break'):
+                if key in asset:
+                    setattr(text_item, key, asset[key])
             text_item.rebuild()
             
             # 添加到画布中央
@@ -1691,6 +1710,8 @@ class AssetLibraryWidget(QWidget):
                         new_item.chars_per_column = item_data['chars_per_column']
                     if 'column_spacing' in item_data:
                         new_item.column_spacing = item_data['column_spacing']
+                    if 'character_spacing' in item_data:
+                        new_item.character_spacing = item_data['character_spacing']
                     if 'auto_height' in item_data:
                         new_item.auto_height = item_data['auto_height']
                     if 'manual_line_break' in item_data:
@@ -1829,6 +1850,7 @@ class ProjectData:
                 data['text_color'] = item.text_color.name()
                 data['chars_per_column'] = item.chars_per_column
                 data['column_spacing'] = item.column_spacing
+                data['character_spacing'] = item.character_spacing
                 data['auto_height'] = item.auto_height
                 data['manual_line_break'] = item.manual_line_break
                 data['layer_eye_color'] = getattr(item, 'layer_eye_color', None)
@@ -1989,6 +2011,8 @@ class ProjectData:
                     item.chars_per_column = d['chars_per_column']
                 if 'column_spacing' in d:
                     item.column_spacing = d['column_spacing']
+                if 'character_spacing' in d:
+                    item.character_spacing = d['character_spacing']
                 if 'auto_height' in d:
                     item.auto_height = d['auto_height']
                 if 'manual_line_break' in d:
@@ -2144,6 +2168,11 @@ class DeleteItemCommand(UndoCommand):
             )
             new_item.font_family = self.item_data['font_family']
             new_item.text_color = QColor(self.item_data['text_color'])
+            new_item.chars_per_column = self.item_data.get('chars_per_column', new_item.chars_per_column)
+            new_item.column_spacing = self.item_data.get('column_spacing', new_item.column_spacing)
+            new_item.character_spacing = self.item_data.get('character_spacing', 0)
+            new_item.auto_height = self.item_data.get('auto_height', new_item.auto_height)
+            new_item.manual_line_break = self.item_data.get('manual_line_break', new_item.manual_line_break)
             new_item.rebuild()
         elif self.item_data['type'] == 'VImageItem':
             new_item = VImageItem(
@@ -2210,6 +2239,11 @@ class DeleteItemCommand(UndoCommand):
                 'box_height': self.item.box_height,
                 'font_family': self.item.font_family,
                 'text_color': self.item.text_color.name(),
+                'chars_per_column': self.item.chars_per_column,
+                'column_spacing': self.item.column_spacing,
+                'character_spacing': self.item.character_spacing,
+                'auto_height': self.item.auto_height,
+                'manual_line_break': self.item.manual_line_break,
                 'pos': (self.item.x(), self.item.y()),
                 'scene_pos': (self.item.scenePos().x(), self.item.scenePos().y())
             }
@@ -3660,6 +3694,7 @@ class VTextItem(BaseElement):
         
         # 列间距属性
         self.column_spacing = COLUMN_SPACING  # 列间距（所有列间距相同）
+        self.character_spacing = 0  # 同一列中字符之间的额外间距
         
         self._rect = QRectF(0, 0, 100, 100)  # 初始值，会在rebuild中重新计算
         self.connection_point = None  # 连接线
@@ -3701,7 +3736,8 @@ class VTextItem(BaseElement):
         
         # 换行高度限制
         if self.auto_height:
-            effective_height = self.chars_per_column * char_h_main * LINE_HEIGHT_RATIO
+            char_step_main = max(1.0, char_h_main * LINE_HEIGHT_RATIO + self.character_spacing)
+            effective_height = char_h_main + (self.chars_per_column - 1) * char_step_main
         else:
             effective_height = self.box_height
         
@@ -3780,7 +3816,7 @@ class VTextItem(BaseElement):
             generated_items.append(t)
             
             # 累加 Y 坐标
-            cursor_y += current_h * LINE_HEIGHT_RATIO
+            cursor_y += max(1.0, current_h * LINE_HEIGHT_RATIO + self.character_spacing)
             i += 1
 
         # 3. 重新对齐并计算方框 (Bounding Rect)
@@ -3882,6 +3918,7 @@ class VTextItem(BaseElement):
         action_color = menu.addAction("设置颜色 (Color)")
         action_chars_per_col = menu.addAction("设置每列字数 (Chars per Column)")
         action_column_spacing = menu.addAction("设置列间距 (Column Spacing)")
+        action_character_spacing = menu.addAction("设置字间距 (Character Spacing)")
         menu.addSeparator()
         
         # 添加隐藏/显示/删除连接点选项
@@ -3958,6 +3995,8 @@ class VTextItem(BaseElement):
             self.change_chars_per_column_settings()
         elif action == action_column_spacing:
             self.change_column_spacing_settings()
+        elif action == action_character_spacing:
+            self.change_character_spacing_settings()
         elif action == toggle_connection_point_action:
             self.toggle_connection_point()
         elif delete_cp_action and action == delete_cp_action:
@@ -4046,6 +4085,18 @@ class VTextItem(BaseElement):
                 self.scene().update_connectors(self)
                 self.scene().update_image_text_connectors(self)
             print(f"列间距已设置为: {self.column_spacing}px")
+
+    def change_character_spacing_settings(self):
+        """设置同一竖列中相邻字符之间的额外间距。"""
+        spacing, ok = QInputDialog.getInt(
+            None, "设置字间距", "字间距 (像素):", self.character_spacing, -200, 200
+        )
+        if ok:
+            self.character_spacing = spacing
+            self.rebuild()
+            if self.scene():
+                self.scene().update_connectors(self)
+                self.scene().update_image_text_connectors(self)
     
     def toggle_connection_point(self):
         """切换连接点的可见性"""
@@ -4279,8 +4330,9 @@ class VTextItem(BaseElement):
         main_fm = QFontMetrics(main_font)
         char_h = main_fm.height()
         col_step = self.font_size + self.column_spacing
+        char_step = max(1.0, char_h * LINE_HEIGHT_RATIO + self.character_spacing)
         effective_height = (
-            self.chars_per_column * char_h * LINE_HEIGHT_RATIO
+            char_h + (self.chars_per_column - 1) * char_step
             if self.auto_height else self.box_height
         )
         # 去掉 rebuild 里 adjusted(-2,-2,2,2) 带来的 2px 右边偏移，保持与非编辑状态对齐
@@ -4319,7 +4371,7 @@ class VTextItem(BaseElement):
                 'col_idx': col_idx,
                 'x': x,
             })
-            cursor_y += char_h * LINE_HEIGHT_RATIO
+            cursor_y += char_step
 
         col_x_left = right_edge - (col_idx + 1) * col_step
         positions.append({
@@ -4831,6 +4883,7 @@ class VImageItem(BaseElement):
                 t_menu.addAction("设置颜色").triggered.connect(lambda _, t=txt: t.change_color_settings())
                 t_menu.addAction("每列字数").triggered.connect(lambda _, t=txt: t.change_chars_per_column_settings())
                 t_menu.addAction("列间距").triggered.connect(lambda _, t=txt: t.change_column_spacing_settings())
+                t_menu.addAction("字间距").triggered.connect(lambda _, t=txt: t.change_character_spacing_settings())
                 t_menu.addSeparator()
                 t_menu.addAction("解除父级绑定").triggered.connect(
                     lambda _, t=txt: (
@@ -6156,6 +6209,7 @@ class LayoutScene(QGraphicsScene):
                 clone.text_color = QColor(item.text_color)
                 clone.chars_per_column = item.chars_per_column
                 clone.column_spacing = item.column_spacing
+                clone.character_spacing = item.character_spacing
                 clone.auto_height = item.auto_height
                 clone.manual_line_break = item.manual_line_break
                 clone.layer_eye_color = getattr(item, 'layer_eye_color', None)
@@ -6762,6 +6816,7 @@ class LayoutScene(QGraphicsScene):
                     'text_color': item.text_color.name(),
                     'chars_per_column': item.chars_per_column,
                     'column_spacing': item.column_spacing,
+                    'character_spacing': item.character_spacing,
                     'auto_height': item.auto_height,
                     'manual_line_break': item.manual_line_break,
                     'layer_eye_color': getattr(item, 'layer_eye_color', None),
@@ -6829,7 +6884,7 @@ class LayoutScene(QGraphicsScene):
                 new_item = VTextItem(item_data['text'], item_data['font_size'], item_data['box_height'])
                 new_item.font_family = item_data['font_family']
                 new_item.text_color = QColor(item_data['text_color'])
-                for k in ('chars_per_column', 'column_spacing', 'auto_height', 'manual_line_break', 'layer_eye_color'):
+                for k in ('chars_per_column', 'column_spacing', 'character_spacing', 'auto_height', 'manual_line_break', 'layer_eye_color'):
                     if k in item_data:
                         setattr(new_item, k, item_data[k])
                 new_item.rebuild()
@@ -8690,6 +8745,8 @@ class MainWindow(QMainWindow):
                 self.scene.config_manager.get('image_right_edge_snap_enabled', False)
             )
             self.image_right_edge_snap_action.blockSignals(False)
+        if hasattr(self, 'text_preset_combo'):
+            self._refresh_text_preset_combo()
         if hasattr(self, 'marquee_mode_combo'):
             self._sync_marquee_mode_ui()
         if hasattr(self, 'refresh_ui'):
@@ -8991,6 +9048,13 @@ class MainWindow(QMainWindow):
         self.column_spacing_spin.valueChanged.connect(self.change_column_spacing)
         layout_form.addRow("列间距", self.column_spacing_spin)
 
+        self.character_spacing_spin = QSpinBox()
+        self.character_spacing_spin.setRange(-200, 200)
+        self.character_spacing_spin.setValue(0)
+        self.character_spacing_spin.setSuffix("px")
+        self.character_spacing_spin.valueChanged.connect(self.change_character_spacing)
+        layout_form.addRow("字间距", self.character_spacing_spin)
+
         self.manual_line_break_btn = QPushButton("手动换行")
         self.manual_line_break_btn.setCheckable(True)
         self.manual_line_break_btn.setChecked(True)
@@ -8998,6 +9062,36 @@ class MainWindow(QMainWindow):
         self.manual_line_break_btn.toggled.connect(self.toggle_manual_line_break)
         layout_form.addRow("", self.manual_line_break_btn)
         layout.addWidget(layout_group)
+
+        preset_group = QGroupBox("文字格式预设")
+        preset_layout = QVBoxLayout(preset_group)
+        preset_layout.setContentsMargins(10, 14, 10, 10)
+        preset_layout.setSpacing(8)
+
+        self.text_preset_combo = QComboBox()
+        self.text_preset_combo.setToolTip("选择后应用到当前选中的文字")
+        self.text_preset_combo.activated.connect(lambda _index: self.apply_selected_text_preset())
+        preset_layout.addWidget(self.text_preset_combo)
+
+        preset_actions = QHBoxLayout()
+        apply_preset_btn = QPushButton("应用")
+        apply_preset_btn.clicked.connect(self.apply_selected_text_preset)
+        add_preset_btn = QPushButton("新增预设")
+        add_preset_btn.clicked.connect(self.add_current_text_format_preset)
+        preset_actions.addWidget(apply_preset_btn)
+        preset_actions.addWidget(add_preset_btn)
+        preset_layout.addLayout(preset_actions)
+
+        default_actions = QHBoxLayout()
+        set_default_btn = QPushButton("当前格式设为默认")
+        set_default_btn.clicked.connect(self.set_current_text_format_as_default)
+        delete_preset_btn = QPushButton("删除预设")
+        delete_preset_btn.clicked.connect(self.delete_selected_text_preset)
+        default_actions.addWidget(set_default_btn)
+        default_actions.addWidget(delete_preset_btn)
+        preset_layout.addLayout(default_actions)
+        layout.addWidget(preset_group)
+        self._refresh_text_preset_combo()
 
         selection_group = QGroupBox("选择模式")
         selection_form = QFormLayout(selection_group)
@@ -9048,6 +9142,163 @@ class MainWindow(QMainWindow):
             self.property_summary_label.setText(
                 f"已选择 {len(selected)} 个对象：{len(texts)} 个文字，{len(images)} 张图片"
             )
+
+    @staticmethod
+    def _text_format_from_item(item):
+        return {
+            'font_family': item.font_family,
+            'font_size': item.font_size,
+            'text_color': item.text_color.name(),
+            'chars_per_column': item.chars_per_column,
+            'column_spacing': item.column_spacing,
+            'character_spacing': item.character_spacing,
+            'manual_line_break': item.manual_line_break,
+        }
+
+    def _default_text_format(self):
+        stored = self.scene.config_manager.get('default_text_format', {})
+        if not isinstance(stored, dict):
+            stored = {}
+        return {
+            'font_family': stored.get(
+                'font_family',
+                self.scene.config_manager.get('default_font_family', DEFAULT_FONT)
+            ),
+            'font_size': stored.get(
+                'font_size',
+                self.scene.config_manager.get('default_font_size', DEFAULT_FONT_SIZE)
+            ),
+            'text_color': stored.get('text_color', '#000000'),
+            'chars_per_column': stored.get('chars_per_column', 15),
+            'column_spacing': stored.get('column_spacing', COLUMN_SPACING),
+            'character_spacing': stored.get('character_spacing', 0),
+            'manual_line_break': stored.get('manual_line_break', True),
+        }
+
+    def _set_shared_configs(self, values):
+        for document in self._documents:
+            for key, value in values.items():
+                document.scene.config_manager.config[key] = copy.deepcopy(value)
+        self.scene.config_manager.save_config()
+
+    def _set_shared_config(self, key, value):
+        self._set_shared_configs({key: value})
+
+    def _text_format_presets(self):
+        presets = self.scene.config_manager.get('text_format_presets', [])
+        if not isinstance(presets, list):
+            return []
+        return [
+            preset for preset in presets
+            if isinstance(preset, dict)
+            and isinstance(preset.get('name'), str)
+            and isinstance(preset.get('format'), dict)
+        ]
+
+    def _refresh_text_preset_combo(self, select_name=None):
+        if not hasattr(self, 'text_preset_combo'):
+            return
+        if select_name is None:
+            select_name = self.text_preset_combo.currentData()
+        self.text_preset_combo.blockSignals(True)
+        self.text_preset_combo.clear()
+        self.text_preset_combo.addItem("选择预设...", None)
+        for preset in self._text_format_presets():
+            self.text_preset_combo.addItem(preset['name'], preset['name'])
+        index = self.text_preset_combo.findData(select_name)
+        self.text_preset_combo.setCurrentIndex(index if index >= 0 else 0)
+        self.text_preset_combo.blockSignals(False)
+
+    def _selected_text_format_source(self):
+        selected = [
+            item for item in self.scene.selectedItems()
+            if isinstance(item, VTextItem)
+        ]
+        if not selected:
+            self.status_bar.showMessage("请先选中一个文字对象", 3000)
+            return None
+        return selected[0]
+
+    def _apply_text_format(self, item, text_format):
+        item.font_family = str(text_format.get('font_family', item.font_family))
+        item.font_size = max(1, int(text_format.get('font_size', item.font_size)))
+        color = QColor(text_format.get('text_color', item.text_color.name()))
+        if color.isValid():
+            item.text_color = color
+        item.chars_per_column = max(1, int(text_format.get('chars_per_column', item.chars_per_column)))
+        item.column_spacing = int(text_format.get('column_spacing', item.column_spacing))
+        item.character_spacing = int(text_format.get('character_spacing', item.character_spacing))
+        item.manual_line_break = bool(text_format.get('manual_line_break', item.manual_line_break))
+        item.rebuild()
+        self.scene.update_connectors(item)
+        self.scene.update_image_text_connectors(item)
+
+    def set_current_text_format_as_default(self):
+        item = self._selected_text_format_source()
+        if item is None:
+            return
+        text_format = self._text_format_from_item(item)
+        self._set_shared_configs({
+            'default_text_format': text_format,
+            'default_font_family': text_format['font_family'],
+            'default_font_size': text_format['font_size'],
+        })
+        self.status_bar.showMessage("当前文字样式和竖排参数已设为默认值", 3000)
+
+    def add_current_text_format_preset(self):
+        item = self._selected_text_format_source()
+        if item is None:
+            return
+        name, ok = QInputDialog.getText(self, "新增文字预设", "预设名称:")
+        name = name.strip()
+        if not ok or not name:
+            return
+        presets = self._text_format_presets()
+        existing = next((preset for preset in presets if preset['name'] == name), None)
+        if existing:
+            reply = QMessageBox.question(
+                self, "覆盖预设", f"预设“{name}”已存在，是否覆盖？"
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+            existing['format'] = self._text_format_from_item(item)
+        else:
+            presets.append({'name': name, 'format': self._text_format_from_item(item)})
+        self._set_shared_config('text_format_presets', presets)
+        self._refresh_text_preset_combo(name)
+        self.status_bar.showMessage(f"已保存文字预设：{name}", 3000)
+
+    def apply_selected_text_preset(self):
+        name = self.text_preset_combo.currentData() if hasattr(self, 'text_preset_combo') else None
+        if not name:
+            return
+        preset = next((preset for preset in self._text_format_presets() if preset['name'] == name), None)
+        if preset is None:
+            self._refresh_text_preset_combo()
+            return
+        selected = [
+            item for item in self.scene.selectedItems()
+            if isinstance(item, VTextItem)
+        ]
+        if not selected:
+            self.status_bar.showMessage("请先选中要应用预设的文字对象", 3000)
+            return
+        for item in selected:
+            self._apply_text_format(item, preset['format'])
+        self.update_font_controls()
+        self.status_bar.showMessage(f"已将预设“{name}”应用到 {len(selected)} 个文字对象", 3000)
+
+    def delete_selected_text_preset(self):
+        name = self.text_preset_combo.currentData() if hasattr(self, 'text_preset_combo') else None
+        if not name:
+            return
+        reply = QMessageBox.question(self, "删除预设", f"确定删除预设“{name}”吗？")
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        presets = [preset for preset in self._text_format_presets() if preset['name'] != name]
+        self._set_shared_config('text_format_presets', presets)
+        self._refresh_text_preset_combo()
+        self.status_bar.showMessage(f"已删除文字预设：{name}", 3000)
     
     def create_toolbars_legacy(self):
         # 主工具栏 - 编辑和格式化
@@ -9165,6 +9416,14 @@ class MainWindow(QMainWindow):
         self.column_spacing_spin.setSuffix("px")
         self.column_spacing_spin.valueChanged.connect(self.change_column_spacing)
         main_toolbar.addWidget(self.column_spacing_spin)
+
+        main_toolbar.addWidget(QLabel("字间距:"))
+        self.character_spacing_spin = QSpinBox()
+        self.character_spacing_spin.setRange(-200, 200)
+        self.character_spacing_spin.setValue(0)
+        self.character_spacing_spin.setSuffix("px")
+        self.character_spacing_spin.valueChanged.connect(self.change_character_spacing)
+        main_toolbar.addWidget(self.character_spacing_spin)
         
         self.manual_line_break_btn = QPushButton("手动换行")
         self.manual_line_break_btn.setCheckable(True)
@@ -9388,6 +9647,14 @@ class MainWindow(QMainWindow):
         set_default_font_action = QAction('设置默认字体...', self)
         set_default_font_action.triggered.connect(self.set_default_font)
         file_menu.addAction(set_default_font_action)
+
+        set_current_text_default_action = QAction('将选中文字格式设为默认', self)
+        set_current_text_default_action.triggered.connect(self.set_current_text_format_as_default)
+        file_menu.addAction(set_current_text_default_action)
+
+        add_text_preset_action = QAction('将选中文字格式新增为预设...', self)
+        add_text_preset_action.triggered.connect(self.add_current_text_format_preset)
+        file_menu.addAction(add_text_preset_action)
 
         set_save_dir_action = QAction('设置默认保存目录...', self)
         set_save_dir_action.triggered.connect(self.set_default_save_dir)
@@ -9993,13 +10260,13 @@ class MainWindow(QMainWindow):
         self.view.transformChanged.emit()
 
     def add_text(self):
-        # 从配置获取默认字体和大小
-        default_font = self.scene.config_manager.get('default_font_family', DEFAULT_FONT)
-        default_size = self.scene.config_manager.get('default_font_size', DEFAULT_FONT_SIZE)
-        
-        t = VTextItem("此处输入竖排文字\n支持自动换行\n从右向左排列", default_size, 400)
-        t.font_family = default_font
-        t.rebuild()
+        text_format = self._default_text_format()
+        t = VTextItem(
+            "此处输入竖排文字\n支持自动换行\n从右向左排列",
+            text_format['font_size'],
+            400
+        )
+        self._apply_text_format(t, text_format)
         center = self.view.mapToScene(self.view.viewport().rect().center())
         t.setPos(center)
         self.scene.add_item_with_undo(t)
@@ -10372,7 +10639,7 @@ class MainWindow(QMainWindow):
                     new_item = VTextItem(item_data['text'], item_data['font_size'], item_data['box_height'])
                     new_item.font_family = item_data['font_family']
                     new_item.text_color = QColor(item_data['text_color'])
-                    for key in ('chars_per_column', 'column_spacing', 'auto_height', 'manual_line_break', 'layer_eye_color'):
+                    for key in ('chars_per_column', 'column_spacing', 'character_spacing', 'auto_height', 'manual_line_break', 'layer_eye_color'):
                         if key in item_data:
                             setattr(new_item, key, item_data[key])
                     new_item.rebuild()
@@ -10764,6 +11031,13 @@ class MainWindow(QMainWindow):
         for item in selected_items:
             item.column_spacing = spacing
             item.rebuild()
+
+    def change_character_spacing(self, spacing):
+        """改变选中文字在同一竖列中的字间距。"""
+        selected_items = [item for item in self.scene.selectedItems() if isinstance(item, VTextItem)]
+        for item in selected_items:
+            item.character_spacing = spacing
+            item.rebuild()
     
     def update_font_controls(self):
         try:
@@ -10778,12 +11052,14 @@ class MainWindow(QMainWindow):
                 self.font_size_spin.blockSignals(True)
                 self.chars_per_column_spin.blockSignals(True)
                 self.column_spacing_spin.blockSignals(True)
+                self.character_spacing_spin.blockSignals(True)
                 self.manual_line_break_btn.blockSignals(True)
 
                 self.font_combo.setCurrentText(item.font_family)
                 self.font_size_spin.setValue(item.font_size)
                 self.chars_per_column_spin.setValue(item.chars_per_column)
                 self.column_spacing_spin.setValue(item.column_spacing)
+                self.character_spacing_spin.setValue(item.character_spacing)
                 self.manual_line_break_btn.setChecked(item.manual_line_break)
                 self._set_color_button_color(item.text_color)
                 
@@ -10791,6 +11067,7 @@ class MainWindow(QMainWindow):
                 self.font_size_spin.blockSignals(False)
                 self.chars_per_column_spin.blockSignals(False)
                 self.column_spacing_spin.blockSignals(False)
+                self.character_spacing_spin.blockSignals(False)
                 self.manual_line_break_btn.blockSignals(False)
         except (RuntimeError, AttributeError):
             # 处理 C++ 对象已被删除的情况
@@ -11251,7 +11528,7 @@ class MainWindow(QMainWindow):
         ws_txt = wb.create_sheet("文字")
         ws_txt.append([
             "文字内容", "字体", "字号(pt)", "颜色", "X(mm)", "Y(mm)",
-            "宽(mm)", "高(mm)", "每列字数", "列间距(mm)", "自动高度", "手动换行"
+            "宽(mm)", "高(mm)", "每列字数", "列间距(mm)", "字间距(mm)", "自动高度", "手动换行"
         ])
         text_items = [
             item for item in self.scene.items()
@@ -11272,6 +11549,7 @@ class MainWindow(QMainWindow):
                     px_to_mm(scene_item_rect.height()),
                     item.chars_per_column,
                     px_to_mm(item.column_spacing),
+                    px_to_mm(item.character_spacing),
                     "是" if item.auto_height else "否",
                     "是" if item.manual_line_break else "否",
                 ])
@@ -11777,9 +12055,14 @@ class MainWindow(QMainWindow):
         # 打开字体选择对话框
         font, ok = FontPickerDialog.get_font(current_font, self.scene.config_manager, self, "设置默认字体")
         if ok:
-            # 保存到配置
-            self.scene.config_manager.set('default_font_family', font.family())
-            self.scene.config_manager.set('default_font_size', font.pointSize())
+            text_format = self._default_text_format()
+            text_format['font_family'] = font.family()
+            text_format['font_size'] = font.pointSize()
+            self._set_shared_configs({
+                'default_font_family': font.family(),
+                'default_font_size': font.pointSize(),
+                'default_text_format': text_format,
+            })
             
             # 更新工具栏显示
             self.font_combo.setCurrentText(font.family())
