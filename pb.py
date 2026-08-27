@@ -318,7 +318,16 @@ class AssetManager:
                 # 复制图片文件
                 original_path = item.file_path
                 filename = os.path.basename(original_path)
-                asset_path = os.path.join(ASSETS_DIR, f"group_{len(self.assets['groups'])}_{idx}_{filename}")
+                
+                # 清理文件名：移除已有的 group_ 前缀，避免重复叠加
+                import re
+                # 匹配 group_数字_数字_ 开头的模式并移除
+                clean_filename = re.sub(r'^(group_\d+_\d+_)+', '', filename)
+                
+                # 生成新的唯一文件名
+                import time
+                timestamp = int(time.time() * 1000)  # 毫秒级时间戳
+                asset_path = os.path.join(ASSETS_DIR, f"group_{timestamp}_{idx}_{clean_filename}")
 
                 try:
                     import shutil
@@ -393,16 +402,24 @@ class AssetManager:
                     scene.render(painter, QRectF(0, 0, img_w, img_h), combined)
                     scene._rendering_thumb = False
                     painter.end()
-                    thumb_path = os.path.join(ASSETS_DIR, f"group_{len(self.assets['groups'])}_thumb.png")
+                    # 使用时间戳生成唯一的缩略图文件名
+                    import time
+                    timestamp = int(time.time() * 1000)
+                    thumb_path = os.path.join(ASSETS_DIR, f"group_{timestamp}_thumb.png")
                     img.save(thumb_path)
                     print(f"缩略图已保存: {thumb_path}")
         except Exception as e:
             print(f"生成缩略图失败: {e}")
             thumb_path = ''
 
-        # 创建组合素材数据
+        # 创建组合素材数据 - 使用唯一 ID 避免重复
+        existing_ids = {asset.get('id', -1) for asset in self.assets.get('groups', [])}
+        new_id = 0
+        while new_id in existing_ids:
+            new_id += 1
+        
         group_asset = {
-            'id': len(self.assets['groups']),
+            'id': new_id,
             'name': group_name,
             'items': items_data,
             'image_text_connections': image_text_connections,
