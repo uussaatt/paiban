@@ -10557,25 +10557,28 @@ class MainWindow(QMainWindow):
             created_items = []
             if not extra_texts:
                 return created_items
-            # 字号字体优先从参考文字对象（B组）取，取不到再用params默认值
+            # 字号、字体、列间距优先从参考文字对象（副文字2/t3/B组）取，取不到再用params默认值
             if ref_text_item and isinstance(ref_text_item, VTextItem):
                 font_size = ref_text_item.font_size
                 font_family = ref_text_item.font_family
+                column_spacing = ref_text_item.column_spacing  # 使用副文字2的列间距
             else:
                 font_size = params['font_size']
                 font_family = params['font_family']
+                column_spacing = COLUMN_SPACING  # 没有参考时使用默认列间距
             anchor_rect = QRectF(base_pos, QSizeF(0, 0))
             for item in anchor_items or []:
                 anchor_rect = anchor_rect.united(item_scene_rect(item))
-            x = anchor_rect.left() - font_size * 2 - 20
+            x = anchor_rect.left() - font_size * 2 - column_spacing
             y = anchor_rect.top()
             for idx, text in enumerate(extra_texts):
                 if not text:
                     continue
                 text_item = VTextItem(text, font_size, 400)
                 text_item.font_family = font_family
+                text_item.column_spacing = column_spacing  # 设置与副文字2相同的列间距
                 text_item.rebuild()
-                text_item.setPos(x - idx * (font_size * 2 + 20), y)
+                text_item.setPos(x - idx * (font_size * 2 + column_spacing), y)
                 text_cmd = AddItemCommand(self.scene, text_item)
                 text_cmd.execute()
                 commands.append(text_cmd)
