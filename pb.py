@@ -8145,11 +8145,24 @@ class LayoutView(QGraphicsView):
             event.acceptProposedAction()
             return
 
-        # 处理图片文件
+        # 处理文件拖入
         if event.mimeData().hasUrls():
             for url in event.mimeData().urls():
                 path = url.toLocalFile()
-                if path.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp')):
+                
+                # 处理 Excel 文件
+                if path.lower().endswith(('.xlsx', '.xls')):
+                    mw = self.window()
+                    while mw and not hasattr(mw, 'open_family_tree_import_dialog'):
+                        mw = mw.parent()
+                    if mw:
+                        # 使用延迟调用，避免拖放事件处理中的模态对话框问题
+                        QTimer.singleShot(100, lambda: mw._open_excel_import_with_path(path))
+                    event.acceptProposedAction()
+                    return
+                
+                # 处理图片文件
+                elif path.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp')):
                     pix = QPixmap(path)
                     mw = self.window()
                     w, h = mw._calc_insert_size(pix, self.scene()) if not pix.isNull() else (DEFAULT_FONT_SIZE * 4, 0)
@@ -10649,6 +10662,41 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "导入失败", f"Excel 文件不存在：\n{excel_path}")
             return
 
+        # 执行实际导入逻辑
+        self._perform_excel_import(params, excel_path)
+
+    def _open_excel_import_with_path(self, excel_path):
+        """打开 Excel 导入对话框并预填文件路径（用于拖拽）"""
+        try:
+            import openpyxl
+        except ImportError:
+            QMessageBox.critical(
+                self, "缺少依赖",
+                "需要安装 openpyxl 库。\n请在命令行执行：pip install openpyxl"
+            )
+            return
+        
+        if not os.path.exists(excel_path):
+            QMessageBox.warning(self, "文件不存在", f"Excel 文件不存在：\n{excel_path}")
+            return
+        
+        dlg = FamilyTreeImportDialog(self.scene, self)
+        dlg.txt_excel.setText(excel_path)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        
+        # 获取参数并执行导入
+        params = dlg.get_params()
+        self._perform_excel_import(params, excel_path)
+
+    def _perform_excel_import(self, params, excel_path):
+        """执行Excel导入的核心逻辑"""
+        try:
+            import openpyxl
+        except ImportError:
+            return
+
+
         generation_map = {
             '1': 0, '一': 0, '一代': 0, '第1代': 0, '第一代': 0,
             '2': 1, '二': 1, '二代': 1, '第2代': 1, '第二代': 1,
@@ -10749,6 +10797,32 @@ class MainWindow(QMainWindow):
             return created_items
 
         def apply_template_text(new_items, cloned_by_asset_index, main_text, sub_text1, sub_text2):
+            def remove_item_and_connectors(item):
+                """删除元素及其所有相关的连接线（包括父子线和图文连接线）"""
+                # 删除与该元素相关的所有连接线
+                connectors_to_remove = []
+                
+                # 检查父子连接线
+                for conn in self.scene.connectors:
+                    if conn.child_element == item or conn.parent_element == item:
+                        connectors_to_remove.append(conn)
+                
+                # 检查图文连接线
+                for conn in self.scene.image_text_connectors:
+                    if hasattr(conn, 'image_item') and hasattr(conn, 'text_item'):
+                        if conn.image_item == item or conn.text_item == item:
+                            connectors_to_remove.append(conn)
+                    elif hasattr(conn, 'item1') and hasattr(conn, 'item2'):
+                        if conn.item1 == item or conn.item2 == item:
+                            connectors_to_remove.append(conn)
+                
+                # 删除找到的连接线
+                for conn in connectors_to_remove:
+                    self.scene.remove_connector_item(conn)
+                
+                # 删除元素本身
+                self.scene.removeItem(item)
+            
             placeholders = params['placeholders']
             slot_values = {
                 't1': main_text,
@@ -10765,9 +10839,16 @@ class MainWindow(QMainWindow):
                     continue
                 text_item = cloned_by_asset_index[asset_index]
                 if isinstance(text_item, VTextItem):
-                    text_item.full_text = value
-                    rebuild_template_text(text_item, keep_template_anchor=True)
-                    slot_items[slot] = text_item
+                    # 如果值为空，删除该文本对象及其连接线
+                    if not value or not value.strip():
+                        remove_item_and_connectors(text_item)
+                        cloned_by_asset_index[asset_index] = None
+                        if text_item in new_items:
+                            new_items.remove(text_item)
+                    else:
+                        text_item.full_text = value
+                        rebuild_template_text(text_item, keep_template_anchor=True)
+                        slot_items[slot] = text_item
                     mapped_any = True
 
             if mapped_any:
@@ -10789,9 +10870,16 @@ class MainWindow(QMainWindow):
             for text_item in text_items:
                 key = text_item.full_text.strip().lower()
                 if key in values:
-                    text_item.full_text = values[key]
-                    rebuild_template_text(text_item, keep_template_anchor=True)
-                    slot_items[placeholder_to_slot[key]] = text_item
+                    value = values[key]
+                    # 如果值为空，删除该文本对象及其连接线
+                    if not value or not value.strip():
+                        remove_item_and_connectors(text_item)
+                        if text_item in new_items:
+                            new_items.remove(text_item)
+                    else:
+                        text_item.full_text = value
+                        rebuild_template_text(text_item, keep_template_anchor=True)
+                        slot_items[placeholder_to_slot[key]] = text_item
                     matched.add(key)
 
             if matched:
@@ -10804,9 +10892,15 @@ class MainWindow(QMainWindow):
             )
             for slot, text_item in zip(('t1', 't2', 't3'), ordered_text_items):
                 value = slot_values[slot]
-                text_item.full_text = value
-                rebuild_template_text(text_item, keep_template_anchor=True)
-                slot_items[slot] = text_item
+                # 如果值为空，删除该文本对象及其连接线
+                if not value or not value.strip():
+                    remove_item_and_connectors(text_item)
+                    if text_item in new_items:
+                        new_items.remove(text_item)
+                else:
+                    text_item.full_text = value
+                    rebuild_template_text(text_item, keep_template_anchor=True)
+                    slot_items[slot] = text_item
             return slot_items
 
         def clone_group_asset(asset, base_pos):
