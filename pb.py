@@ -10330,6 +10330,8 @@ class MainWindow(QMainWindow):
         menu.addAction("添加文本", self.add_text)
         menu.addAction("插入图片", self.add_image)
         menu.addSeparator()
+        menu.addAction("批量导入族谱... (Ctrl+I)", self.open_family_tree_import_dialog)
+        menu.addSeparator()
         # 编辑组合模式下显示"更新到素材库"
         editing_id = getattr(self.scene, '_editing_group_asset_id', None)
         if editing_id is not None:
@@ -10340,7 +10342,10 @@ class MainWindow(QMainWindow):
         menu.addSeparator()
         menu.addAction("打开工程\tCtrl+O", self.load_proj)
         menu.addAction("保存工程\tCtrl+S", self.save_proj)
+        menu.addSeparator()
         menu.addAction("导出图片\tCtrl+E", self.export_image)
+        menu.addAction("导出 PDF\tCtrl+Alt+P", self.export_pdf)
+        menu.addAction("导出 CorelDRAW SVG", self.export_coreldraw_svg)
         menu.exec(self.view.mapToGlobal(pos))
 
     def finish_edit_group_asset(self):
