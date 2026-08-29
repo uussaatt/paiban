@@ -142,6 +142,7 @@ class ConfigManager:
             'nudge_large_step': 10,  # Shift+方向键大步长（像素）
             'horizontal_move_only': False,  # 拖动/方向键移动时只允许水平移动
             'image_right_edge_snap_enabled': False,  # 水平移动图片时吸附右边缘X
+            'image_top_edge_snap_enabled': False,  # 移动图片时吸附顶部Y
             'smart_brush_radius': 18,  # 智能笔刷默认大小
             'default_save_dir': '',  # 默认保存目录
             'insert_image_max_width_ratio': 0.3,  # 插入图片最大宽度（画布宽度的比例）
@@ -3043,6 +3044,8 @@ class BaseElement(QGraphicsItem):
             # 吸附到辅助线
             if self.scene() and self.scene().guides:
                 value = self._snap_to_guides(value)
+            
+            # 水平移动模式：锁定Y + 右边缘X吸附
             horizontal_lock = getattr(self.scene(), '_horizontal_move_lock_y', {}) if self.scene() else {}
             if self in horizontal_lock:
                 parent = self.parentItem()
@@ -3053,6 +3056,15 @@ class BaseElement(QGraphicsItem):
                     horizontal_lock[self]
                 )
                 value = parent.mapFromScene(locked_scene_pos) if parent else locked_scene_pos
+            else:
+                # 非水平移动模式：顶部Y吸附（如果开启）
+                if isinstance(self, VImageItem):
+                    parent = self.parentItem()
+                    new_scene_pos = parent.mapToScene(value) if parent else value
+                    snap_dy = self._calc_top_edge_snap(new_scene_pos)
+                    if abs(snap_dy) > 0.01:
+                        snapped_scene_pos = QPointF(new_scene_pos.x(), new_scene_pos.y() + snap_dy)
+                        value = parent.mapFromScene(snapped_scene_pos) if parent else snapped_scene_pos
 
         if change == QGraphicsItem.GraphicsItemChange.ItemPositionHasChanged:
             # 先更新连接点位置，再更新连线，确保连线使用最新的连接点坐标
@@ -3141,6 +3153,78 @@ class BaseElement(QGraphicsItem):
 
         return best_offset
 
+    def _calc_top_edge_snap(self, new_scene_pos):
+        """计算顶部Y吸附偏移量（不依赖水平移动模式）"""
+        scene = self.scene()
+        def set_indicator(indicator):
+            if scene and getattr(scene, '_image_top_edge_snap_indicator', None) != indicator:
+                scene._image_top_edge_snap_indicator = indicator
+                scene.update()
+
+        if (not scene
+                or not scene.config_manager.get('image_top_edge_snap_enabled', False)
+                or not isinstance(self, VImageItem)):
+            set_indicator(None)
+            return 0.0
+
+        # 获取所有正在移动的元素
+        moving_items = {
+            item for item in scene.selectedItems()
+            if isinstance(item, BaseElement)
+        }
+        if self not in moving_items:
+            moving_items.add(self)
+
+        def belongs_to_moving_group(candidate):
+            for moving_item in moving_items:
+                current = candidate
+                while current is not None:
+                    if current is moving_item:
+                        return True
+                    current = current.parentItem()
+                current = moving_item.parentItem()
+                while current is not None:
+                    if current is candidate:
+                        return True
+                    current = current.parentItem()
+            return False
+
+        moving_top_y = new_scene_pos.y()
+        threshold = scene.snap_threshold
+        best_offset = None
+        best_candidate = None
+
+        for candidate in scene.items():
+            if (not isinstance(candidate, VImageItem)
+                    or not candidate.isVisible()
+                    or getattr(candidate, '_was_hidden', False)
+                    or belongs_to_moving_group(candidate)):
+                continue
+            candidate_top_y = candidate.sceneBoundingRect().top()
+            offset = candidate_top_y - moving_top_y
+            if abs(offset) <= threshold and (
+                    best_offset is None or abs(offset) < abs(best_offset)):
+                best_offset = offset
+                best_candidate = candidate
+
+        if best_candidate is None:
+            set_indicator(None)
+            return 0.0
+
+        owner_rect = self.sceneBoundingRect()
+        candidate_rect = best_candidate.sceneBoundingRect()
+        aligned_y = candidate_rect.top()
+        set_indicator((
+            aligned_y,
+            min(owner_rect.left(), candidate_rect.left()),
+            max(owner_rect.right(), candidate_rect.right()),
+            owner_rect.left(),
+            candidate_rect.left(),
+        ))
+
+        return best_offset
+
+
     def _snap_to_guides(self, new_pos, threshold=None):
         """将位置吸附到最近的辅助线"""
         scene = self.scene()
@@ -3224,6 +3308,10 @@ class BaseElement(QGraphicsItem):
                 scene._horizontal_move_lock_owner = None
                 scene._horizontal_move_owner_right_x = None
                 scene._image_right_edge_snap_indicator = None
+                scene.update()
+            # 清除顶部吸附指示器
+            if isinstance(self, VImageItem):
+                scene._image_top_edge_snap_indicator = None
                 scene.update()
 
         super().mouseReleaseEvent(event)
@@ -5563,6 +5651,7 @@ class LayoutScene(QGraphicsScene):
         self._horizontal_move_lock_owner = None
         self._horizontal_move_owner_right_x = None
         self._image_right_edge_snap_indicator = None
+        self._image_top_edge_snap_indicator = None  # 顶部吸附指示器
         self.clipboard_items = []  
         self.clipboard_image_text_connections = []  
         self.show_connection_points = True  
@@ -5816,6 +5905,23 @@ class LayoutScene(QGraphicsScene):
             painter.drawLine(QPointF(x, top - padding), QPointF(x, bottom + padding))
             painter.drawEllipse(QPointF(x, moving_top), radius, radius)
             painter.drawEllipse(QPointF(x, target_top), radius, radius)
+
+        # 绘制顶部Y吸附指示线
+        top_indicator = self._image_top_edge_snap_indicator
+        if top_indicator and not getattr(self, '_rendering_pdf', False):
+            y, left, right, moving_left, target_left = top_indicator
+            scale = abs(painter.worldTransform().m11()) or 1.0
+            padding = 8.0 / scale
+            radius = 5.0 / scale
+            color = QColor(50, 200, 255)  # 蓝色，与右边缘的红色区分
+            pen = QPen(color, 3, Qt.PenStyle.SolidLine)
+            pen.setCosmetic(True)
+            painter.setOpacity(1.0)
+            painter.setPen(pen)
+            painter.setBrush(QBrush(color))
+            painter.drawLine(QPointF(left - padding, y), QPointF(right + padding, y))
+            painter.drawEllipse(QPointF(moving_left, y), radius, radius)
+            painter.drawEllipse(QPointF(target_left, y), radius, radius)
 
     def drawBackground(self, painter, rect):
         # PDF导出时：直接填白色，跳过灰色外框和网格
@@ -8566,6 +8672,7 @@ class MainWindow(QMainWindow):
         self._startup_fit_attempts = 0
         self.setWindowTitle("VertiLayout Pro - 竖排排版引擎")
         self.setGeometry(100, 100, 1400, 900)
+        self.setMinimumSize(800, 600)  # 设置最小窗口尺寸，允许自由调整
         # 应用Fluent Design样式
         self.apply_fluent_design_style()
         
@@ -8664,7 +8771,7 @@ class MainWindow(QMainWindow):
                               QDockWidget.DockWidgetFeature.DockWidgetFloatable)
         self.navigator = NavigatorWidget(self.view, self.scene)
         nav_dock.setWidget(self.navigator)
-        nav_dock.setFixedHeight(self.navigator.NAV_H + 30)
+        nav_dock.setMaximumHeight(self.navigator.NAV_H + 30)  # 改为最大高度，不固定
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, nav_dock)
         
         self.timer = QTimer(self)
@@ -9518,12 +9625,32 @@ class MainWindow(QMainWindow):
         main_toolbar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
         self.addToolBar(Qt.ToolBarArea.TopToolBarArea, main_toolbar)
 
-        self._add_toolbar_action(main_toolbar, "添加文本", self.add_text, "在画布中添加竖排文字")
-        self._add_toolbar_action(main_toolbar, "插入图片", self.add_image, "插入图片素材")
-        self._add_toolbar_action(main_toolbar, "编辑文字", self.edit_selected_text, "编辑当前选中的文字")
+        # 插入下拉组：整合添加文本、插入图片、编辑文字
+        insert_menu = QMenu(self)
+        insert_menu.addAction("添加文本 (Ctrl+T)", self.add_text)
+        insert_menu.addAction("插入图片 (Ctrl+Shift+I)", self.add_image)
+        insert_menu.addAction("编辑选中文字", self.edit_selected_text)
+        
+        insert_btn = QToolButton()
+        insert_btn.setText("插入 ▼")
+        insert_btn.setMenu(insert_menu)
+        insert_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        insert_btn.setToolTip("添加文本、插入图片、编辑文字")
+        main_toolbar.addWidget(insert_btn)
 
         main_toolbar.addSeparator()
         self._add_toolbar_action(main_toolbar, "撤销", self.undo, "撤销上一步操作", "Ctrl+Z")
+        
+        # 水平移动开关
+        self.btn_horizontal_move = self._add_toolbar_action(
+            main_toolbar,
+            "🔒水平移动",
+            lambda checked: self.toggle_horizontal_move_only(checked),
+            "锁定垂直移动，只允许水平方向移动选中对象 (Ctrl+H)",
+            checkable=True
+        )
+        self.btn_horizontal_move.setChecked(self.scene.config_manager.get('horizontal_move_only', False))
+        
         self.btn_resize = self._add_toolbar_action(
             main_toolbar,
             "调整图片",
@@ -9924,6 +10051,14 @@ class MainWindow(QMainWindow):
         self.image_right_edge_snap_action.toggled.connect(self.toggle_image_right_edge_snap)
         edit_menu.addAction(self.image_right_edge_snap_action)
 
+        self.image_top_edge_snap_action = QAction('图片顶部Y自动吸附', self)
+        self.image_top_edge_snap_action.setCheckable(True)
+        self.image_top_edge_snap_action.setChecked(
+            self.scene.config_manager.get('image_top_edge_snap_enabled', False)
+        )
+        self.image_top_edge_snap_action.toggled.connect(self.toggle_image_top_edge_snap)
+        edit_menu.addAction(self.image_top_edge_snap_action)
+
         eye_role_from_selection_menu = edit_menu.addMenu('设置选中文字眼睛颜色')
         for color_key, color_label in [
             ('yellow', '设为黄色眼睛'),
@@ -9958,19 +10093,41 @@ class MainWindow(QMainWindow):
         # document copy; otherwise switching tabs restores a stale value.
         for document in self._documents:
             document.scene.config_manager.set('horizontal_move_only', enabled)
-        if enabled:
-            self.status_bar.showMessage('已开启：水平移动模式，移动对象时Y坐标不变', 3000)
-        else:
-            self.status_bar.showMessage('已关闭：水平移动模式', 3000)
+        
+        # 同步工具栏按钮和菜单动作的状态
+        if hasattr(self, 'btn_horizontal_move') and self.btn_horizontal_move.isChecked() != enabled:
+            self.btn_horizontal_move.setChecked(enabled)
+        if hasattr(self, 'horizontal_move_only_action') and self.horizontal_move_only_action.isChecked() != enabled:
+            self.horizontal_move_only_action.blockSignals(True)
+            self.horizontal_move_only_action.setChecked(enabled)
+            self.horizontal_move_only_action.blockSignals(False)
+        
+        # 显示状态消息（确保 status_bar 已创建）
+        if hasattr(self, 'status_bar'):
+            if enabled:
+                self.status_bar.showMessage('已开启：水平移动模式，移动对象时Y坐标不变', 3000)
+            else:
+                self.status_bar.showMessage('已关闭：水平移动模式', 3000)
 
     def toggle_image_right_edge_snap(self, enabled):
         """切换水平移动图片时的右边缘X吸附。"""
         for document in self._documents:
             document.scene.config_manager.set('image_right_edge_snap_enabled', enabled)
-        if enabled:
-            self.status_bar.showMessage('已开启：图片右边缘X自动吸附（阈值20px）', 3000)
-        else:
-            self.status_bar.showMessage('已关闭：图片右边缘X自动吸附', 3000)
+        if hasattr(self, 'status_bar'):
+            if enabled:
+                self.status_bar.showMessage('已开启：图片右边缘X自动吸附（阈值20px）', 3000)
+            else:
+                self.status_bar.showMessage('已关闭：图片右边缘X自动吸附', 3000)
+
+    def toggle_image_top_edge_snap(self, enabled):
+        """切换移动图片时的顶部Y吸附。"""
+        for document in self._documents:
+            document.scene.config_manager.set('image_top_edge_snap_enabled', enabled)
+        if hasattr(self, 'status_bar'):
+            if enabled:
+                self.status_bar.showMessage('已开启：图片顶部Y自动吸附（阈值20px）', 3000)
+            else:
+                self.status_bar.showMessage('已关闭：图片顶部Y自动吸附', 3000)
 
     def set_marquee_mode(self, mode):
         """设置框选模式：all / images / connected"""
