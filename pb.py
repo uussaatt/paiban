@@ -143,6 +143,10 @@ class ConfigManager:
             'horizontal_move_only': False,  # 拖动/方向键移动时只允许水平移动
             'image_right_edge_snap_enabled': False,  # 水平移动图片时吸附右边缘X
             'image_top_edge_snap_enabled': False,  # 移动图片时吸附顶部Y
+            'startup_horizontal_guides_enabled': False,  # 启动/新建画布时添加默认横向辅助线
+            'startup_horizontal_guides': [],  # 启动时横向辅助线Y坐标（场景像素）
+            'startup_horizontal_guides_unit': 'px',  # 启动横向辅助线输入单位：px / mm
+            'display_unit': 'mm',  # 全局显示/输入单位：px / mm
             'smart_brush_radius': 18,  # 智能笔刷默认大小
             'default_save_dir': '',  # 默认保存目录
             'insert_image_max_width_ratio': 0.3,  # 插入图片最大宽度（画布宽度的比例）
@@ -3232,7 +3236,7 @@ class BaseElement(QGraphicsItem):
 
 
     def _snap_to_guides(self, new_pos, threshold=None):
-        """将位置吸附到最近的辅助线，并显示临时对齐提示线"""
+        """将位置吸附到最近的永久辅助线。"""
         scene = self.scene()
         if threshold is None:
             threshold = scene.snap_threshold
@@ -3279,26 +3283,8 @@ class BaseElement(QGraphicsItem):
                         best_dy = gy - ey
                         best_guide_y = gy
 
-        # 检查其他元素的对齐（用于显示临时辅助线）
-        snap_y_pos = None
-        min_y_dist = threshold + 1
-        for item in scene.items():
-            if item is self or not isinstance(item, BaseElement):
-                continue
-            item_y = item.scenePos().y()
-            for ey in y_edges:
-                d = abs(ey - item_y)
-                if d < min_y_dist:
-                    min_y_dist = d
-                    if d < abs(best_dy):
-                        best_dy = item_y - ey
-                        snap_y_pos = item_y
-
-        # 只有在吸附距离内才显示临时辅助线（批量导入时不显示）
-        if not getattr(scene, '_batch_importing', False) and abs(best_dy) <= threshold and snap_y_pos is not None:
-            scene.show_temp_alignment_guide(Qt.Orientation.Horizontal, snap_y_pos)
-        else:
-            scene.hide_temp_alignment_guide()
+        # 画布存在永久辅助线时，只使用永久辅助线吸附，不显示元素间临时水平线。
+        scene.hide_temp_alignment_guide()
 
         if abs(best_dx) <= threshold:
             x += best_dx
@@ -5760,6 +5746,22 @@ class LayoutScene(QGraphicsScene):
         guide.setVisible(self.show_guides)
         return guide
 
+    def add_startup_horizontal_guides(self):
+        """按配置添加启动横向辅助线，列表中的每项为场景Y坐标。"""
+        if self.guides:
+            return
+        rect = self.sceneRect()
+        if rect.isEmpty():
+            return
+        positions = self.config_manager.get('startup_horizontal_guides', [])
+        for value in positions:
+            try:
+                y = float(value)
+            except (TypeError, ValueError):
+                continue
+            if rect.top() <= y <= rect.bottom():
+                self.add_guide(Qt.Orientation.Horizontal, y)
+
     def select_guide(self, guide):
         """高亮当前操作的辅助线，并显示删除提示。"""
         if guide not in self.guides:
@@ -7548,6 +7550,18 @@ class LayoutView(QGraphicsView):
     def adjust_smart_brush_radius(self, delta):
         self.set_smart_brush_radius(self._smart_brush_radius + delta)
 
+    def _update_smart_brush_overlay(self, old_pos=None):
+        """只刷新智能笔刷光标覆盖的区域，避免每次移动重绘整个视口。"""
+        radius = self._smart_brush_radius + 4
+        rect = QRectF(self._smart_brush_pos.x() - radius,
+                      self._smart_brush_pos.y() - radius,
+                      radius * 2, radius * 2)
+        if old_pos is not None:
+            old_rect = QRectF(old_pos.x() - radius, old_pos.y() - radius,
+                              radius * 2, radius * 2)
+            rect = rect.united(old_rect)
+        self.viewport().update(rect.toAlignedRect())
+
     def _smart_brush_scene_path(self, pos):
         center = self.mapToScene(pos)
         scale = max(abs(self.transform().m11()), 0.001)
@@ -7750,7 +7764,8 @@ class LayoutView(QGraphicsView):
         font = QFont("Arial", 7)
         painter.setFont(font)
         painter.setPen(text_color)
-        painter.drawText(3, R - 5, "mm")
+        display_unit = self.scene().config_manager.get('display_unit', 'mm')
+        painter.drawText(3, R - 5, "mm" if display_unit == 'mm' else "px")
 
         # 水平刻度
         scene_left = self.mapToScene(QPoint(R, 0)).x()
@@ -7787,8 +7802,13 @@ class LayoutView(QGraphicsView):
             painter.drawLine(0, cursor_vp.y(), R, cursor_vp.y())
 
     def _ruler_step(self):
-        """根据当前缩放计算合适的标尺刻度间距（内部仍返回 px）"""
+        """根据当前缩放计算合适的标尺刻度间距（内部返回场景像素）。"""
         scale = self.transform().m11()
+        if self.scene().config_manager.get('display_unit', 'mm') == 'px':
+            for step_px in [10, 20, 50, 100, 200, 500, 1000, 2000]:
+                if step_px * scale >= 40:
+                    return step_px
+            return 2000
         px_per_mm = CORELDRAW_EXPORT_DPI / 25.4
         for step_mm in [1, 2, 5, 10, 20, 50, 100, 200, 500]:
             step_px = step_mm * px_per_mm
@@ -7797,6 +7817,8 @@ class LayoutView(QGraphicsView):
         return 500 * px_per_mm
 
     def _format_ruler_label(self, scene_value):
+        if self.scene().config_manager.get('display_unit', 'mm') == 'px':
+            return str(int(round(scene_value)))
         value_mm = scene_value * 25.4 / CORELDRAW_EXPORT_DPI
         if abs(value_mm) >= 100 or abs(value_mm - round(value_mm)) < 0.01:
             return str(int(round(value_mm)))
@@ -7929,15 +7951,18 @@ class LayoutView(QGraphicsView):
             super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
-        self._sync_connection_point_hover(event.pos())
+        # 智能笔刷模式下不需要连接点悬停扫描；该扫描会遍历整个场景。
+        if not self._smart_brush_enabled:
+            self._sync_connection_point_hover(event.pos())
         if self._smart_brush_enabled:
+            old_pos = self._smart_brush_pos
             self._smart_brush_pos = event.pos()
             if self._smart_brush_active and event.buttons() & Qt.MouseButton.LeftButton:
                 self._apply_smart_brush_at(event.pos(), bool(event.modifiers() & Qt.KeyboardModifier.AltModifier))
-                self.viewport().update()
+                self._update_smart_brush_overlay(old_pos)
                 event.accept()
                 return
-            self.viewport().update()
+            self._update_smart_brush_overlay(old_pos)
 
         # 标尺辅助线拖拽预览
         if self._guide_dragging and self._guide_preview:
@@ -8755,6 +8780,8 @@ class MainWindow(QMainWindow):
         self._current_project_path = None  # 当前工程文件路径
         self.scene = LayoutScene(self)
         self.scene.setSceneRect(0, 0, 7054, 5021)
+        if self.scene.config_manager.get('startup_horizontal_guides_enabled', False):
+            self.scene.add_startup_horizontal_guides()
         self.scene.selectionChanged.connect(self.on_selection_changed)
         self._asset_manager = self.scene.asset_manager
         self._toast = ToastNotification()
@@ -8864,6 +8891,8 @@ class MainWindow(QMainWindow):
         scene = LayoutScene(self)
         scene.asset_manager = self._asset_manager
         scene.setSceneRect(0, 0, 7054, 5021)
+        if scene.config_manager.get('startup_horizontal_guides_enabled', False):
+            scene.add_startup_horizontal_guides()
         scene.selectionChanged.connect(self.on_selection_changed)
         scene.changed.connect(lambda *_args, scene=scene: self._mark_scene_dirty(scene))
         view = LayoutView(scene)
@@ -10020,6 +10049,34 @@ class MainWindow(QMainWindow):
         clear_guides_action = QAction('清除所有辅助线', self)
         clear_guides_action.triggered.connect(self.clear_guides)
         view_menu.addAction(clear_guides_action)
+
+        unit_menu = view_menu.addMenu('界面单位')
+        self.display_unit_group = QActionGroup(self)
+        self.display_unit_group.setExclusive(True)
+        self.display_unit_px_action = QAction('像素 (px)', self)
+        self.display_unit_px_action.setCheckable(True)
+        self.display_unit_px_action.setData('px')
+        self.display_unit_mm_action = QAction('毫米 (mm)', self)
+        self.display_unit_mm_action.setCheckable(True)
+        self.display_unit_mm_action.setData('mm')
+        self.display_unit_group.addAction(self.display_unit_px_action)
+        self.display_unit_group.addAction(self.display_unit_mm_action)
+        unit_menu.addActions([self.display_unit_px_action, self.display_unit_mm_action])
+        current_unit = self.scene.config_manager.get('display_unit', 'mm')
+        (self.display_unit_px_action if current_unit == 'px' else self.display_unit_mm_action).setChecked(True)
+        self.display_unit_group.triggered.connect(self.set_display_unit)
+
+        self.startup_horizontal_guides_action = QAction('启动时添加横向辅助线', self)
+        self.startup_horizontal_guides_action.setCheckable(True)
+        self.startup_horizontal_guides_action.setChecked(
+            self.scene.config_manager.get('startup_horizontal_guides_enabled', False)
+        )
+        self.startup_horizontal_guides_action.toggled.connect(self.toggle_startup_horizontal_guides)
+        view_menu.addAction(self.startup_horizontal_guides_action)
+
+        startup_horizontal_guides_settings_action = QAction('设置启动横向辅助线位置...', self)
+        startup_horizontal_guides_settings_action.triggered.connect(self.set_startup_horizontal_guides)
+        view_menu.addAction(startup_horizontal_guides_settings_action)
 
         self.hide_points_on_image_select_action = QAction('选中图片时隐藏连接点', self)
         self.hide_points_on_image_select_action.setCheckable(True)
@@ -12361,6 +12418,78 @@ class MainWindow(QMainWindow):
     def toggle_guides(self):
         """切换辅助线显示/隐藏"""
         self.scene.set_guides_visible(not self.scene.show_guides)
+
+    def toggle_startup_horizontal_guides(self, enabled):
+        """设置是否在启动和新建画布时自动添加横向辅助线。"""
+        for document in self._documents:
+            document.scene.config_manager.set('startup_horizontal_guides_enabled', enabled)
+        if hasattr(self, 'status_bar'):
+            message = '已开启：启动时添加横向辅助线' if enabled else '已关闭：启动时添加横向辅助线'
+            self.status_bar.showMessage(message, 3000)
+
+    def set_display_unit(self, action):
+        """切换全局显示/输入单位；场景内部坐标始终为像素。"""
+        unit = action.data() or 'mm'
+        for document in self._documents:
+            document.scene.config_manager.set('display_unit', unit)
+        for view in (document.view for document in self._documents):
+            view.viewport().update()
+        if hasattr(self, 'status_bar'):
+            self.status_bar.showMessage(f'界面单位已切换为{"毫米" if unit == "mm" else "像素"}', 3000)
+
+    def set_startup_horizontal_guides(self):
+        """设置启动横向辅助线的位置和输入单位。内部始终保存为场景像素。"""
+        config = self.scene.config_manager
+        positions = config.get('startup_horizontal_guides', [])
+        unit = config.get('display_unit', 'mm')
+        dialog = QDialog(self)
+        dialog.setWindowTitle('设置启动横向辅助线位置')
+        layout = QFormLayout(dialog)
+        unit_combo = QComboBox(dialog)
+        unit_combo.addItem('像素 (px)', 'px')
+        unit_combo.addItem('毫米 (mm)', 'mm')
+        unit_combo.setCurrentIndex(1 if unit == 'mm' else 0)
+        values = []
+        for raw in positions:
+            try:
+                number = float(raw)
+                values.append(number * 25.4 / CORELDRAW_EXPORT_DPI if unit == 'mm' else number)
+            except (TypeError, ValueError):
+                continue
+        value_edit = QLineEdit(', '.join(f'{number:g}' for number in values), dialog)
+        layout.addRow('输入单位：', unit_combo)
+        layout.addRow('Y 坐标（逗号分隔）：', value_edit)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel, parent=dialog)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addRow(buttons)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        value = value_edit.text()
+        selected_unit = unit_combo.currentData()
+        parsed = []
+        for part in value.replace('，', ',').split(','):
+            part = part.strip()
+            if not part:
+                continue
+            try:
+                number = float(part)
+                parsed.append(number * CORELDRAW_EXPORT_DPI / 25.4 if selected_unit == 'mm' else number)
+            except ValueError:
+                QMessageBox.warning(self, '输入无效', f'无法识别坐标：{part}')
+                return
+        for document in self._documents:
+            document.scene.config_manager.set('startup_horizontal_guides', parsed)
+            document.scene.config_manager.set('startup_horizontal_guides_unit', selected_unit)
+            document.scene.config_manager.set('display_unit', selected_unit)
+        if hasattr(self, 'display_unit_px_action'):
+            self.display_unit_px_action.setChecked(selected_unit == 'px')
+            self.display_unit_mm_action.setChecked(selected_unit == 'mm')
+        for document in self._documents:
+            document.view.viewport().update()
+        if hasattr(self, 'status_bar'):
+            unit_label = '毫米' if selected_unit == 'mm' else '像素'
+            self.status_bar.showMessage(f'已保存 {len(parsed)} 条启动横向辅助线位置（{unit_label}）', 3000)
 
     def clear_guides(self):
         """清除所有辅助线"""
