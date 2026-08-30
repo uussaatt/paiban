@@ -3226,7 +3226,7 @@ class BaseElement(QGraphicsItem):
 
 
     def _snap_to_guides(self, new_pos, threshold=None):
-        """将位置吸附到最近的辅助线"""
+        """将位置吸附到最近的辅助线，并显示临时对齐提示线"""
         scene = self.scene()
         if threshold is None:
             threshold = scene.snap_threshold
@@ -3252,7 +3252,9 @@ class BaseElement(QGraphicsItem):
             y_edges.append(cp_scene.y())
 
         best_dx, best_dy = threshold + 1, threshold + 1
+        best_guide_x, best_guide_y = None, None
 
+        # 检查永久辅助线
         for guide in scene.guides:
             if not guide.isVisible():
                 continue
@@ -3262,12 +3264,35 @@ class BaseElement(QGraphicsItem):
                     d = abs(ex - gx)
                     if d < abs(best_dx):
                         best_dx = gx - ex
+                        best_guide_x = gx
             else:
                 gy = guide.pos_value
                 for ey in y_edges:
                     d = abs(ey - gy)
                     if d < abs(best_dy):
                         best_dy = gy - ey
+                        best_guide_y = gy
+
+        # 检查其他元素的对齐（用于显示临时辅助线）
+        snap_y_pos = None
+        min_y_dist = threshold + 1
+        for item in scene.items():
+            if item is self or not isinstance(item, BaseElement):
+                continue
+            item_y = item.scenePos().y()
+            for ey in y_edges:
+                d = abs(ey - item_y)
+                if d < min_y_dist:
+                    min_y_dist = d
+                    if d < abs(best_dy):
+                        best_dy = item_y - ey
+                        snap_y_pos = item_y
+
+        # 只有在吸附距离内才显示临时辅助线（批量导入时不显示）
+        if not getattr(scene, '_batch_importing', False) and abs(best_dy) <= threshold and snap_y_pos is not None:
+            scene.show_temp_alignment_guide(Qt.Orientation.Horizontal, snap_y_pos)
+        else:
+            scene.hide_temp_alignment_guide()
 
         if abs(best_dx) <= threshold:
             x += best_dx
@@ -3298,6 +3323,10 @@ class BaseElement(QGraphicsItem):
             if scene is None:
                 super().mouseReleaseEvent(event)
                 return
+            
+            # 隐藏临时对齐辅助线
+            scene.hide_temp_alignment_guide()
+            
             current_pos_scene = self.scenePos()
             if (current_pos_scene - self._drag_start_pos_scene).manhattanLength() > 2.0:
                 command = MoveItemCommand(scene, self, self._drag_start_pos_scene, current_pos_scene)
@@ -5668,6 +5697,8 @@ class LayoutScene(QGraphicsScene):
         self._selected_guide = None
         self.show_guides = True   # 辅助线显示开关
         self.snap_threshold = 20  # 辅助线吸附距离（场景像素）
+        self._temp_alignment_guide = None  # 临时对齐辅助线
+        self._batch_importing = False  # 批量导入标志，禁止显示临时对齐线
         self.resize_mode = False  # 图片调整大小模式
         self.stamping_session = None  # 盖章式批量复制会话
         self.image_manage_mode = False  # 图片管理模式（Alt+, 切换）
@@ -5769,6 +5800,28 @@ class LayoutScene(QGraphicsScene):
         self.show_guides = visible
         for g in self.guides:
             g.setVisible(visible)
+
+    def show_temp_alignment_guide(self, orientation, pos_value):
+        """显示临时对齐辅助线（拖动时使用）"""
+        # 如果已存在临时辅助线，更新位置
+        if self._temp_alignment_guide is not None:
+            self._temp_alignment_guide.pos_value = pos_value
+            self._temp_alignment_guide.orientation = orientation
+            self._temp_alignment_guide.update()
+        else:
+            # 创建新的临时辅助线
+            self._temp_alignment_guide = GuideItem(orientation, pos_value, self.sceneRect())
+            # 设置临时辅助线样式（可以设置不同颜色或虚线样式）
+            self._temp_alignment_guide._is_temp = True
+            self.addItem(self._temp_alignment_guide)
+            self._temp_alignment_guide.setVisible(True)
+            self._temp_alignment_guide.setZValue(100)  # 确保在最上层显示
+
+    def hide_temp_alignment_guide(self):
+        """隐藏临时对齐辅助线"""
+        if self._temp_alignment_guide is not None:
+            self.removeItem(self._temp_alignment_guide)
+            self._temp_alignment_guide = None
 
     def set_resize_mode(self, enabled):
         """切换图片调整大小模式"""
@@ -10983,6 +11036,9 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "导入失败", f"读取 Excel 失败：\n{e}")
             return
 
+        # 设置批量导入标志，禁止显示临时对齐线
+        self.scene._batch_importing = True
+
         if rows:
             header_map.update({
                 cell_text(value).lower(): idx
@@ -11239,12 +11295,31 @@ class MainWindow(QMainWindow):
             return
 
         self.scene.undo_stack.push(MacroCommand(self.scene, commands))
-        self.scene.clearSelection()
-        for item in imported_items:
-            item.setSelected(True)
+        
+        # 清除批量导入标志
+        self.scene._batch_importing = False
+        
+        # 清除辅助线选择状态和所有辅助线，避免导入后显示对齐提示线
+        self.scene.clear_guide_selection()
+        
+        # 强制隐藏并清除临时对齐线（导入时setPos触发的残留辅助线）
+        if self.scene._temp_alignment_guide is not None:
+            self.scene.removeItem(self.scene._temp_alignment_guide)
+            self.scene._temp_alignment_guide = None
+            self.scene.update()  # 强制刷新场景
+        
+        # 可选：清除所有辅助线（如果不想保留导入产生的辅助线）
+        # self.scene.clear_guides()
+        
+        # 计算导入区域用于视图缩放
         imported_rect = QRectF()
         for item in imported_items:
             imported_rect = imported_rect.united(item_scene_rect(item))
+        
+        # 取消选择所有元素，避免显示蓝色选择框和对齐线
+        self.scene.clearSelection()
+        
+        # 缩放视图到导入区域
         if not imported_rect.isEmpty():
             self.view.fitInView(imported_rect.adjusted(-100, -100, 100, 100), Qt.AspectRatioMode.KeepAspectRatio)
             self.view.transformChanged.emit()
