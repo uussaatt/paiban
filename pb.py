@@ -3154,7 +3154,7 @@ class BaseElement(QGraphicsItem):
         return best_offset
 
     def _calc_top_edge_snap(self, new_scene_pos):
-        """计算顶部Y吸附偏移量（不依赖水平移动模式）"""
+        """计算顶部Y吸附偏移量，行为与右边缘X吸附保持一致。"""
         scene = self.scene()
         def set_indicator(indicator):
             if scene and getattr(scene, '_image_top_edge_snap_indicator', None) != indicator:
@@ -3162,6 +3162,7 @@ class BaseElement(QGraphicsItem):
                 scene.update()
 
         if (not scene
+                or getattr(scene, '_batch_importing', False)
                 or not scene.config_manager.get('image_top_edge_snap_enabled', False)
                 or not isinstance(self, VImageItem)):
             set_indicator(None)
@@ -3189,7 +3190,12 @@ class BaseElement(QGraphicsItem):
                     current = current.parentItem()
             return False
 
-        moving_top_y = new_scene_pos.y()
+        # 与右边缘X吸附一样，按场景包围盒边缘计算，兼容父子元素和非零局部边界。
+        current_scene_pos = self.scenePos()
+        moving_top_y = (
+            self.sceneBoundingRect().top()
+            + new_scene_pos.y() - current_scene_pos.y()
+        )
         threshold = scene.snap_threshold
         best_offset = None
         best_candidate = None
@@ -3326,6 +3332,9 @@ class BaseElement(QGraphicsItem):
             
             # 隐藏临时对齐辅助线
             scene.hide_temp_alignment_guide()
+            scene._image_right_edge_snap_indicator = None
+            scene._image_top_edge_snap_indicator = None
+            scene.update()
             
             current_pos_scene = self.scenePos()
             if (current_pos_scene - self._drag_start_pos_scene).manhattanLength() > 2.0:
@@ -3336,12 +3345,6 @@ class BaseElement(QGraphicsItem):
                 scene._horizontal_move_lock_x = {}
                 scene._horizontal_move_lock_owner = None
                 scene._horizontal_move_owner_right_x = None
-                scene._image_right_edge_snap_indicator = None
-                scene.update()
-            # 清除顶部吸附指示器
-            if isinstance(self, VImageItem):
-                scene._image_top_edge_snap_indicator = None
-                scene.update()
 
         super().mouseReleaseEvent(event)
 
@@ -3350,6 +3353,10 @@ class BaseElement(QGraphicsItem):
         if event.button() == Qt.MouseButton.LeftButton:
             self._drag_start_pos_scene = self.scenePos()
             scene = self.scene()
+            if scene:
+                scene._image_right_edge_snap_indicator = None
+                scene._image_top_edge_snap_indicator = None
+                scene.update()
             if scene and scene.config_manager.get('horizontal_move_only', False):
                 selected_items = [
                     item for item in scene.selectedItems()
@@ -11306,7 +11313,9 @@ class MainWindow(QMainWindow):
         if self.scene._temp_alignment_guide is not None:
             self.scene.removeItem(self.scene._temp_alignment_guide)
             self.scene._temp_alignment_guide = None
-            self.scene.update()  # 强制刷新场景
+        self.scene._image_right_edge_snap_indicator = None
+        self.scene._image_top_edge_snap_indicator = None
+        self.scene.update()  # 强制刷新场景
         
         # 可选：清除所有辅助线（如果不想保留导入产生的辅助线）
         # self.scene.clear_guides()
