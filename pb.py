@@ -5703,7 +5703,7 @@ class LayoutScene(QGraphicsScene):
         self.guides = []          # 辅助线列表
         self._selected_guide = None
         self.show_guides = True   # 辅助线显示开关
-        self.snap_threshold = 20  # 辅助线吸附距离（场景像素）
+        self.snap_threshold = self.config_manager.get('snap_threshold', 20)  # 辅助线吸附距离（场景像素）
         self._temp_alignment_guide = None  # 临时对齐辅助线
         self._batch_importing = False  # 批量导入标志，禁止显示临时对齐线
         self.resize_mode = False  # 图片调整大小模式
@@ -12374,6 +12374,8 @@ class MainWindow(QMainWindow):
         )
         if ok:
             self.scene.snap_threshold = val
+            # 保存到配置文件
+            self.scene.config_manager.set('snap_threshold', val)
     
     def set_background_opacity(self):
         """设置背景透明度"""
