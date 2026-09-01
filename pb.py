@@ -5907,7 +5907,7 @@ class LayoutScene(QGraphicsScene):
         self.snap_threshold = self.config_manager.get('snap_threshold', 20)  # 辅助线吸附距离（场景像素）
         self._temp_alignment_guide = None  # 临时对齐辅助线
         self.free_connection_points = []  # 画布上的独立连接点
-        self.free_connection_point_mode = 'move'  # 独立连接点模式：move / connect
+        self.free_connection_point_mode = 'connect'  # 独立连接点模式：move / connect
         self._batch_importing = False  # 批量导入标志，禁止显示临时对齐线
         self.resize_mode = False  # 图片调整大小模式
         self.stamping_session = None  # 盖章式批量复制会话
@@ -5997,11 +5997,11 @@ class LayoutScene(QGraphicsScene):
             QPointF(nearest_vertical.pos_value, nearest_horizontal.pos_value)
         )
 
-    def set_free_connection_point_mode(self, mode):
+    def set_free_connection_point_mode(self, mode, cancel_pending_connection=True):
         """切换独立连接点的移动/连接模式。"""
         if mode not in ('move', 'connect'):
             return
-        if mode == 'move' and self.connection_mode:
+        if mode == 'move' and cancel_pending_connection and self.connection_mode:
             self.cancel_connection_mode()
         self.free_connection_point_mode = mode
         label = '移动模式' if mode == 'move' else '连接模式'
@@ -7798,6 +7798,7 @@ class LayoutView(QGraphicsView):
         self.setRenderHint(QPainter.RenderHint.Antialiasing)
         self.setRenderHint(QPainter.RenderHint.Antialiasing)
         self.setDragMode(QGraphicsView.DragMode.NoDrag)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setAcceptDrops(True)
         self._is_panning = False
         self._marquee_origin = QPoint()
@@ -7805,6 +7806,7 @@ class LayoutView(QGraphicsView):
         self._marquee_mode = Qt.ItemSelectionMode.ContainsItemShape
         self._marquee_band = QRubberBand(QRubberBand.Shape.Rectangle, self.viewport())
         self._marquee_sweep_order = []  # 框选过程中鼠标扫过的元素顺序
+        self._free_point_f5_move_active = False
         self._pan_start = QPoint()
         self._main_window = None
         self._smart_brush_enabled = False
@@ -8027,6 +8029,13 @@ class LayoutView(QGraphicsView):
             else:
                 if item.flags() & QGraphicsItem.GraphicsItemFlag.ItemIsSelectable:
                     item.setSelected(True)
+
+        # 独立连接点按圆心是否落入选框判定。这样左到右的“完全包含”框选
+        # 不会因为点的可点击范围较大而漏选。
+        if getattr(scene, 'free_connection_point_mode', 'move') == 'move':
+            for point in getattr(scene, 'free_connection_points', []):
+                if point.scene() is scene and point.isVisible() and path.contains(point.get_scene_center()):
+                    point.setSelected(True)
 
         # 仅图片模式下框选到连线时弹出提示
         if mode == 'images' and has_connector_in_rect:
@@ -8427,6 +8436,27 @@ class LayoutView(QGraphicsView):
             event.accept()
         else:
             super().mouseReleaseEvent(event)
+
+    def keyPressEvent(self, event):
+        """按住 F5 时，独立连接点临时进入移动模式。"""
+        if event.key() == Qt.Key.Key_F5 and self.scene():
+            scene = self.scene()
+            if (getattr(scene, 'free_connection_point_mode', 'connect') == 'connect'
+                    and not getattr(self, '_free_point_f5_move_active', False)):
+                self._free_point_f5_move_active = True
+                scene.set_free_connection_point_mode('move', cancel_pending_connection=False)
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def keyReleaseEvent(self, event):
+        if event.key() == Qt.Key.Key_F5 and self.scene():
+            if getattr(self, '_free_point_f5_move_active', False):
+                self._free_point_f5_move_active = False
+                self.scene().set_free_connection_point_mode('connect', cancel_pending_connection=False)
+            event.accept()
+            return
+        super().keyReleaseEvent(event)
     
     def mouseDoubleClickEvent(self, event):
         """双击空白处：调整图片模式下确认调整"""
