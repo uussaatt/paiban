@@ -1835,6 +1835,7 @@ class ProjectData:
             'items': [],
             'connectors': [],
             'image_text_connectors': [],
+            'free_connection_points': [],
             'scene_rect': [
                 scene.sceneRect().x(),
                 scene.sceneRect().y(),
@@ -1890,8 +1891,19 @@ class ProjectData:
                     data['connection_point_visible'] = item.connection_point.isVisible()
                 else:
                     data['connection_point_deleted'] = True
+            data['custom_connection_points'] = [
+                [point.pos().x(), point.pos().y()]
+                for point in getattr(item, 'custom_connection_points', [])
+                if point.scene() is scene
+            ]
             
             project_data['items'].append(data)
+
+        project_data['free_connection_points'] = [
+            [point.pos().x(), point.pos().y()]
+            for point in getattr(scene, 'free_connection_points', [])
+            if point.scene() is scene
+        ]
         
         # Save parent-child connectors
         for conn in scene.connectors:
@@ -1918,11 +1930,16 @@ class ProjectData:
                         'text_id': text_id,
                         'line_width': conn.line_width if hasattr(conn, 'line_width') else 3
                     }
+                    if getattr(conn, 'point1', None) is not None and getattr(conn, 'point1', None).point_type == 'custom':
+                        conn_data['point1_custom_index'] = getattr(conn.item1, 'custom_connection_points', []).index(conn.point1)
+                    if getattr(conn, 'point2', None) is not None and getattr(conn, 'point2', None).point_type == 'custom':
+                        conn_data['point2_custom_index'] = getattr(conn.item2, 'custom_connection_points', []).index(conn.point2)
             elif hasattr(conn, 'item1') and hasattr(conn, 'item2'):
                 # VGenericConnector
                 item1_id = item_map.get(conn.item1, -1)
                 item2_id = item_map.get(conn.item2, -1)
-                if item1_id != -1 and item2_id != -1:
+                has_point_refs = getattr(conn, 'point1', None) is not None and getattr(conn, 'point2', None) is not None
+                if (item1_id != -1 and item2_id != -1) or has_point_refs:
                     conn_data = {
                         'type': 'VGenericConnector',
                         'item1_id': item1_id,
@@ -1930,6 +1947,20 @@ class ProjectData:
                         'connection_type': conn.connection_type if hasattr(conn, 'connection_type') else 'generic',
                         'line_width': conn.line_width if hasattr(conn, 'line_width') else 3
                     }
+                    if getattr(conn, 'point1', None) is not None and conn.point1.point_type == 'custom':
+                        if conn.point1.parent_element is None:
+                            conn_data['free_point1_index'] = scene.free_connection_points.index(conn.point1)
+                        else:
+                            conn_data['point1_custom_index'] = conn.item1.custom_connection_points.index(conn.point1)
+                    elif getattr(conn, 'point1', None) is not None:
+                        conn_data['point1_default'] = True
+                    if getattr(conn, 'point2', None) is not None and conn.point2.point_type == 'custom':
+                        if conn.point2.parent_element is None:
+                            conn_data['free_point2_index'] = scene.free_connection_points.index(conn.point2)
+                        else:
+                            conn_data['point2_custom_index'] = conn.item2.custom_connection_points.index(conn.point2)
+                    elif getattr(conn, 'point2', None) is not None:
+                        conn_data['point2_default'] = True
             
             if conn_data:
                 project_data['image_text_connectors'].append(conn_data)
@@ -1995,6 +2026,7 @@ class ProjectData:
         scene.clear()
         scene.connectors = []
         scene.image_text_connectors = []
+        scene.free_connection_points = []
         scene.selection_order = []
         scene.undo_stack.clear()
 
@@ -2065,6 +2097,12 @@ class ProjectData:
                     item.delete_connection_point()
                 elif 'connection_point_visible' in d and item.connection_point:
                     item.connection_point.setVisible(d['connection_point_visible'])
+                for point_pos in d.get('custom_connection_points', []):
+                    if isinstance(point_pos, (list, tuple)) and len(point_pos) == 2:
+                        point = item.create_custom_connection_point(item.mapToScene(
+                            QPointF(float(point_pos[0]), float(point_pos[1]))
+                        ))
+                        point.setVisible(scene.show_connection_points)
                 
                 id_map[d['id']] = item
                 if d['parent_id'] != -1:
@@ -2081,6 +2119,10 @@ class ProjectData:
                 # 将场景坐标转换为父级的本地坐标并设置
                 local_pos = parent.mapFromScene(curr_scene_pos)
                 item.setPos(local_pos)
+
+        for point_pos in project_data.get('free_connection_points', []):
+            if isinstance(point_pos, (list, tuple)) and len(point_pos) == 2:
+                scene.add_free_connection_point(QPointF(float(point_pos[0]), float(point_pos[1])))
         
         # Third pass: Restore parent-child connectors
         for conn_data in connectors_data:
@@ -2107,12 +2149,42 @@ class ProjectData:
                 item1_id = conn_data.get('item1_id', -1)
                 item2_id = conn_data.get('item2_id', -1)
                 connection_type = conn_data.get('connection_type', 'generic')
-                if item1_id in id_map and item2_id in id_map:
-                    conn = VGenericConnector(id_map[item1_id], id_map[item2_id], connection_type, line_width)
+                item1 = id_map.get(item1_id)
+                item2 = id_map.get(item2_id)
+                free_points = getattr(scene, 'free_connection_points', [])
+                point1 = free_points[conn_data['free_point1_index']] if (
+                    'free_point1_index' in conn_data
+                    and 0 <= conn_data['free_point1_index'] < len(free_points)
+                ) else None
+                point2 = free_points[conn_data['free_point2_index']] if (
+                    'free_point2_index' in conn_data
+                    and 0 <= conn_data['free_point2_index'] < len(free_points)
+                ) else None
+                if point1 is None and item1 is not None:
+                    points1 = getattr(item1, 'custom_connection_points', [])
+                    point1 = points1[conn_data['point1_custom_index']] if (
+                        'point1_custom_index' in conn_data
+                        and 0 <= conn_data['point1_custom_index'] < len(points1)
+                    ) else None
+                if point2 is None and item2 is not None:
+                    points2 = getattr(item2, 'custom_connection_points', [])
+                    point2 = points2[conn_data['point2_custom_index']] if (
+                        'point2_custom_index' in conn_data
+                        and 0 <= conn_data['point2_custom_index'] < len(points2)
+                    ) else None
+                if point1 is None and conn_data.get('point1_default') and item1 is not None:
+                    point1 = getattr(item1, 'connection_point', None)
+                if point2 is None and conn_data.get('point2_default') and item2 is not None:
+                    point2 = getattr(item2, 'connection_point', None)
+                if (item1 is not None and item2 is not None) or (point1 is not None and point2 is not None):
+                    conn = VGenericConnector(item1, item2, connection_type, line_width, point1, point2)
                     scene.addItem(conn)
                     scene.image_text_connectors.append(conn)
+                    for point in (point1, point2):
+                        if point is not None and conn not in point.connected_lines:
+                            point.connected_lines.append(conn)
                     conn.update_path()
-                    scene.sync_connectors_visibility(id_map[item1_id])
+                    scene.sync_connectors_visibility()
         
         print(f"工程已加载: {len(id_map)} 个元素, {len(connectors_data)} 个父子连接, {len(image_text_connectors_data)} 个图文连接")
 
@@ -2517,6 +2589,8 @@ class ConnectionPoint(QGraphicsEllipseItem):
         super().__init__()
         self.parent_element = parent_item
         self.point_type = point_type
+        self._custom_position = point_type == "custom"
+        self._press_scene_pos = None
         self.connected_lines = []
         self._hovered = False
         self.base_brush = QBrush(QColor(255, 100, 100, 200))
@@ -2524,13 +2598,15 @@ class ConnectionPoint(QGraphicsEllipseItem):
         self.hover_brush = QBrush(QColor(0, 255, 120, 240)) # 悬停时的绿色
         self.hover_pen = QPen(QColor(0, 200, 80), 3)
 
-        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, False)
-        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, False)
+        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, self._custom_position)
+        # 画布独立点需要能够被点击选中、拖动和通过右键删除；元素上的固定连接点仍不可选。
+        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, self._custom_position)
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemSendsGeometryChanges, True)
 
         # --- 核心修改：将 ZValue 设为极高，确保点永远在连线之上 ---
         self.setZValue(2500) 
-        self.setParentItem(parent_item)
+        if parent_item is not None:
+            self.setParentItem(parent_item)
         self.update_position()
         self.setAcceptHoverEvents(True)
 
@@ -2579,13 +2655,13 @@ class ConnectionPoint(QGraphicsEllipseItem):
 
     def boundingRect(self):
         """扩大重绘范围，避免缩小时视觉被裁切"""
-        r = self.BOUNDS_RADIUS
+        r = max(self.BOUNDS_RADIUS, 10 if self._custom_position else self.BOUNDS_RADIUS)
         return QRectF(-r, -r, r * 2, r * 2)
 
     def shape(self):
         """扩大点击/悬停感应区到约 40x40 像素"""
         path = QPainterPath()
-        r = self.HIT_RADIUS
+        r = 8 if self._custom_position else self.HIT_RADIUS
         path.addEllipse(QRectF(-r, -r, r * 2, r * 2))
         return path
 
@@ -2609,6 +2685,8 @@ class ConnectionPoint(QGraphicsEllipseItem):
         """更新连接点位置（仅更新自身坐标，连线由父元素的 itemChange 统一更新）"""
         if not self.parent_element:
             return
+        if self._custom_position:
+            return
         rect = self.parent_element.boundingRect()
         if self.point_type == "image_top":
             self.setPos(rect.center().x(), rect.top())
@@ -2630,6 +2708,17 @@ class ConnectionPoint(QGraphicsEllipseItem):
     def mousePressEvent(self, event):
         """鼠标按下开始连接"""
         if event.button() == Qt.MouseButton.LeftButton:
+            if self._custom_position:
+                if self.scene() and getattr(self.scene(), 'free_connection_point_mode', 'move') == 'connect':
+                    self.scene().start_connection_from_point(self)
+                    event.accept()
+                    return
+                self._press_scene_pos = event.scenePos()
+                self.setSelected(True)
+                if self.scene():
+                    self.scene().hide_temp_alignment_guide()
+                super().mousePressEvent(event)
+                return
             self.setSelected(False)
             if self.scene():
                 self.scene().start_connection_from_point(self)
@@ -2637,16 +2726,119 @@ class ConnectionPoint(QGraphicsEllipseItem):
             return
         super().mousePressEvent(event)
 
+    def mouseReleaseEvent(self, event):
+        if self._custom_position and event.button() == Qt.MouseButton.LeftButton:
+            super().mouseReleaseEvent(event)
+            self._press_scene_pos = None
+            if self.scene():
+                self.scene().hide_temp_alignment_guide()
+            return
+        super().mouseReleaseEvent(event)
+
+    def mouseDoubleClickEvent(self, event):
+        """独立连接点单击用于选中/拖动，双击才开始或完成连线。"""
+        if (self._custom_position and event.button() == Qt.MouseButton.LeftButton
+                and self.scene()
+                and getattr(self.scene(), 'free_connection_point_mode', 'move') == 'connect'):
+            self.setSelected(True)
+            self.scene().start_connection_from_point(self)
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
+
+    def contextMenuEvent(self, event):
+        if self._custom_position:
+            self._show_context_menu(event.screenPos())
+            event.accept()
+            return
+        super().contextMenuEvent(event)
+
+    def _show_context_menu(self, global_pos):
+        """显示独立连接点菜单；视图拦截右键时也通过此入口调用。"""
+        menu = QMenu()
+        delete_action = menu.addAction("删除此连接点")
+        if menu.exec(global_pos) != delete_action or self.scene() is None:
+            return
+        scene = self.scene()
+        # 先移除依赖此点的连线，避免删除后留下无法更新的端点引用。
+        for connector in list(self.connected_lines):
+            scene.remove_connector_item(connector)
+        self.connected_lines.clear()
+        if self.parent_element is not None:
+            points = getattr(self.parent_element, 'custom_connection_points', [])
+            if self in points:
+                points.remove(self)
+        free_points = getattr(scene, 'free_connection_points', [])
+        if self in free_points:
+            free_points.remove(self)
+        scene.removeItem(self)
+
+    def itemChange(self, change, value):
+        if (self._custom_position
+                and change == QGraphicsItem.GraphicsItemChange.ItemPositionChange
+                and self.scene()):
+            parent = self.parentItem()
+            scene_pos = parent.mapToScene(value) if parent else value
+            threshold = self.scene().snap_threshold
+            snap_x, snap_y = scene_pos.x(), scene_pos.y()
+            best_x = best_y = threshold + 1
+            horizontal_point_alignment_y = None
+            for guide in self.scene().guides:
+                if not guide.isVisible():
+                    continue
+                if guide.orientation == Qt.Orientation.Vertical:
+                    delta = guide.pos_value - snap_x
+                    if abs(delta) < abs(best_x):
+                        best_x = delta
+                else:
+                    delta = guide.pos_value - snap_y
+                    if abs(delta) < abs(best_y):
+                        best_y = delta
+            for item in self.scene().items():
+                if not isinstance(item, ConnectionPoint) or item is self or not item.isVisible():
+                    continue
+                target = item.get_scene_center()
+                dx, dy = target.x() - snap_x, target.y() - snap_y
+                if abs(dx) < abs(best_x):
+                    best_x = dx
+                if abs(dy) < abs(best_y):
+                    best_y = dy
+                    horizontal_point_alignment_y = target.y()
+            if abs(best_x) <= threshold:
+                snap_x += best_x
+            if abs(best_y) <= threshold:
+                snap_y += best_y
+
+            # 仅在独立连接点与另一个连接点水平吸附时显示临时蓝线。
+            # 对齐到永久辅助线时，该辅助线本身已提供可见反馈，无需重复显示。
+            if horizontal_point_alignment_y is not None and abs(best_y) <= threshold:
+                self.scene().show_temp_alignment_guide(
+                    Qt.Orientation.Horizontal, horizontal_point_alignment_y
+                )
+            else:
+                self.scene().hide_temp_alignment_guide()
+            scene_pos = QPointF(snap_x, snap_y)
+            value = parent.mapFromScene(scene_pos) if parent else scene_pos
+        elif (self._custom_position
+              and change == QGraphicsItem.GraphicsItemChange.ItemPositionHasChanged):
+            for connector in self.connected_lines:
+                if connector.scene():
+                    connector.update_path()
+        return super().itemChange(change, value)
+
     def get_scene_center(self):
         """获取连接点在场景中的中心位置"""
         return self.mapToScene(0, 0)
 
 class VGenericConnector(QGraphicsPathItem):
     """通用连接线 - 支持任意两个元素之间的连接"""
-    def __init__(self, item1, item2, connection_type="generic", line_width=None):
+    def __init__(self, item1, item2, connection_type="generic", line_width=None,
+                 point1=None, point2=None):
         super().__init__()
         self.item1 = item1
         self.item2 = item2
+        self.point1 = point1
+        self.point2 = point2
         self.connection_type = connection_type  # "image-image", "text-text", "generic"
         self.line_width = line_width if line_width is not None else DEFAULT_LINE_WIDTH  # 线条粗细
         self.base_color = QColor(255, 0, 0, 200)  # 基础颜色
@@ -2765,25 +2957,30 @@ class VGenericConnector(QGraphicsPathItem):
                 self.scene().remove_connector_item(self)
         
     def update_path(self):
-        if not self.item1.scene() or not self.item2.scene():
-            return
-
-        # 获取两个元素的连接点
-        point1 = self.get_connection_point(self.item1)
-        point2 = self.get_connection_point(self.item2)
-        
-        if not point1 or not point2:
-            # 如果没有连接点，使用中心点
-            rect1 = self.item1.boundingRect()
-            pos1 = self.item1.scenePos()
-            anchor1 = pos1 + QPointF(rect1.width()/2, rect1.height()/2)
-            
-            rect2 = self.item2.boundingRect()
-            pos2 = self.item2.scenePos()
-            anchor2 = pos2 + QPointF(rect2.width()/2, rect2.height()/2)
+        if self.point1 is not None or self.point2 is not None:
+            if (self.point1 is None or self.point2 is None
+                    or self.point1.scene() is None or self.point2.scene() is None):
+                return
+            anchor1 = self.point1.get_scene_center()
+            anchor2 = self.point2.get_scene_center()
         else:
-            anchor1 = point1.get_scene_center()
-            anchor2 = point2.get_scene_center()
+            if not self.item1 or not self.item2 or not self.item1.scene() or not self.item2.scene():
+                return
+
+            # 获取两个元素的连接点
+            point1 = self.get_connection_point(self.item1)
+            point2 = self.get_connection_point(self.item2)
+
+            if not point1 or not point2:
+                rect1 = self.item1.boundingRect()
+                pos1 = self.item1.scenePos()
+                anchor1 = pos1 + QPointF(rect1.width()/2, rect1.height()/2)
+                rect2 = self.item2.boundingRect()
+                pos2 = self.item2.scenePos()
+                anchor2 = pos2 + QPointF(rect2.width()/2, rect2.height()/2)
+            else:
+                anchor1 = point1.get_scene_center()
+                anchor2 = point2.get_scene_center()
         
         path = QPainterPath()
         path.moveTo(anchor1)
@@ -3041,6 +3238,7 @@ class BaseElement(QGraphicsItem):
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable)
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemSendsGeometryChanges)
         self.connectors = []
+        self.custom_connection_points = []
         self._drag_start_pos_scene = QPointF() # 记录拖动开始时的场景位置 
 
     def itemChange(self, change, value):
@@ -3368,9 +3566,22 @@ class BaseElement(QGraphicsItem):
         """供外部直接调用的右键菜单入口"""
         self._build_base_context_menu(global_pos)
 
+    def create_custom_connection_point(self, scene_pos=None):
+        """在元素上创建一个可独立拖动的连接点。"""
+        if scene_pos is None:
+            scene_pos = self.mapToScene(self.boundingRect().center())
+        local_pos = self.mapFromScene(scene_pos)
+        point = ConnectionPoint(self, "custom")
+        point.setPos(local_pos)
+        point.setVisible(self.scene().show_connection_points if self.scene() else True)
+        self.custom_connection_points.append(point)
+        if self.scene():
+            self.scene().update()
+        return point
+
     def _build_base_context_menu(self, global_pos):
         menu = QMenu()
-        
+
         # 添加隐藏/显示/删除连接点选项
         if hasattr(self, 'connection_point') and self.connection_point:
             if self.connection_point.isVisible():
@@ -3419,7 +3630,7 @@ class BaseElement(QGraphicsItem):
             clear_connections_action = batch_menu.addAction("清除所有连接")
         
         action = menu.exec(global_pos)
-        
+
         # 处理隐藏/显示/删除连接点
         if toggle_connection_point_action and action == toggle_connection_point_action:
             self.toggle_connection_point()
@@ -4024,6 +4235,8 @@ class VTextItem(BaseElement):
         """设置连接点可见性"""
         if self.connection_point:
             self.connection_point.setVisible(visible)
+        for point in getattr(self, 'custom_connection_points', []):
+            point.setVisible(visible)
         
     def _show_context_menu(self, global_pos, item_pos=None):
         self._build_text_context_menu(global_pos, item_pos)
@@ -4978,6 +5191,8 @@ class VImageItem(BaseElement):
         """设置连接点可见性"""
         if self.connection_point:
             self.connection_point.setVisible(visible)
+        for point in getattr(self, 'custom_connection_points', []):
+            point.setVisible(visible)
     
     def toggle_connection_point(self):
         """切换连接点的可见性"""
@@ -5691,6 +5906,8 @@ class LayoutScene(QGraphicsScene):
         self.show_guides = True   # 辅助线显示开关
         self.snap_threshold = self.config_manager.get('snap_threshold', 20)  # 辅助线吸附距离（场景像素）
         self._temp_alignment_guide = None  # 临时对齐辅助线
+        self.free_connection_points = []  # 画布上的独立连接点
+        self.free_connection_point_mode = 'move'  # 独立连接点模式：move / connect
         self._batch_importing = False  # 批量导入标志，禁止显示临时对齐线
         self.resize_mode = False  # 图片调整大小模式
         self.stamping_session = None  # 盖章式批量复制会话
@@ -5745,6 +5962,50 @@ class LayoutScene(QGraphicsScene):
         self.guides.append(guide)
         guide.setVisible(self.show_guides)
         return guide
+
+    def add_free_connection_point(self, scene_pos):
+        """在画布上创建一个不依附任何元素的连接点。"""
+        point = ConnectionPoint(None, "custom")
+        self.addItem(point)
+        point.setPos(scene_pos)
+        point.setVisible(self.show_connection_points)
+        self.free_connection_points.append(point)
+        return point
+
+    def add_free_connection_point_at_nearest_guide_intersection(self, scene_pos):
+        """在右键位置最近的可见横、竖辅助线交叉点创建独立连接点。"""
+        vertical_guides = [
+            guide for guide in self.guides
+            if guide.isVisible() and guide.orientation == Qt.Orientation.Vertical
+        ]
+        horizontal_guides = [
+            guide for guide in self.guides
+            if guide.isVisible() and guide.orientation == Qt.Orientation.Horizontal
+        ]
+        if not vertical_guides or not horizontal_guides:
+            return None
+
+        nearest_vertical = min(
+            vertical_guides,
+            key=lambda guide: abs(guide.pos_value - scene_pos.x())
+        )
+        nearest_horizontal = min(
+            horizontal_guides,
+            key=lambda guide: abs(guide.pos_value - scene_pos.y())
+        )
+        return self.add_free_connection_point(
+            QPointF(nearest_vertical.pos_value, nearest_horizontal.pos_value)
+        )
+
+    def set_free_connection_point_mode(self, mode):
+        """切换独立连接点的移动/连接模式。"""
+        if mode not in ('move', 'connect'):
+            return
+        if mode == 'move' and self.connection_mode:
+            self.cancel_connection_mode()
+        self.free_connection_point_mode = mode
+        label = '移动模式' if mode == 'move' else '连接模式'
+        self._show_status_message(f'独立连接点：{label}', 2500)
 
     def add_startup_horizontal_guides(self):
         """按配置添加启动横向辅助线，列表中的每项为场景Y坐标。"""
@@ -6471,6 +6732,13 @@ class LayoutScene(QGraphicsScene):
             return conn.item1, conn.item2
         return None, None
 
+    def _image_text_connector_visible(self, conn):
+        """独立连接点连线没有两个元素端点，按连线显示总开关处理。"""
+        item1, item2 = self._image_text_connector_items(conn)
+        if item1 is None or item2 is None:
+            return self.show_image_text_connectors
+        return self.show_image_text_connectors and self._connector_items_visible(item1, item2)
+
     def sync_connectors_visibility(self, changed_item=None):
         for conn in self.connectors:
             if changed_item is not None and conn.parent_element != changed_item and conn.child_element != changed_item:
@@ -6482,14 +6750,11 @@ class LayoutScene(QGraphicsScene):
 
         for conn in self.image_text_connectors:
             item1, item2 = self._image_text_connector_items(conn)
-            if item1 is None or item2 is None:
+            if (changed_item is not None
+                    and item1 is not None and item2 is not None
+                    and item1 != changed_item and item2 != changed_item):
                 continue
-            if changed_item is not None and item1 != changed_item and item2 != changed_item:
-                continue
-            conn.setVisible(
-                self.show_image_text_connectors and
-                self._connector_items_visible(item1, item2)
-            )
+            conn.setVisible(self._image_text_connector_visible(conn))
     
     def set_connectors_visible(self, visible):
         """控制所有连接器的可见性"""
@@ -6501,8 +6766,7 @@ class LayoutScene(QGraphicsScene):
         """控制图文连接器的可见性"""
         self.show_image_text_connectors = visible
         for c in self.image_text_connectors:
-            item1, item2 = self._image_text_connector_items(c)
-            c.setVisible(visible and self._connector_items_visible(item1, item2))
+            c.setVisible(self._image_text_connector_visible(c))
     
     def set_connection_points_visible(self, visible):
         """控制所有连接点的可见性"""
@@ -6510,6 +6774,9 @@ class LayoutScene(QGraphicsScene):
         for item in self.items():
             if isinstance(item, (VTextItem, VImageItem)):
                 item.set_connection_points_visible(visible)
+        for point in getattr(self, 'free_connection_points', []):
+            if point.scene() is self:
+                point.setVisible(visible)
 
     def _show_status_message(self, message, timeout=0):
         main_window = self.parent()
@@ -6557,7 +6824,45 @@ class LayoutScene(QGraphicsScene):
         
         source_item = source_point.parent_element
         target_item = target_point.parent_element
-        
+        if (getattr(source_point, 'point_type', '') == 'custom'
+                or getattr(target_point, 'point_type', '') == 'custom') and (
+                    source_item is None or target_item is None):
+            if source_point.scene() is None or target_point.scene() is None:
+                return False
+            conn = VGenericConnector(
+                source_item, target_item, 'generic',
+                self.config_manager.get('default_line_width', DEFAULT_LINE_WIDTH),
+                source_point, target_point
+            )
+            self.addItem(conn)
+            self.image_text_connectors.append(conn)
+            source_point.connected_lines.append(conn)
+            target_point.connected_lines.append(conn)
+            conn.update_path()
+            self.sync_connectors_visibility()
+            return True
+        if (isinstance(source_item, BaseElement)
+                and isinstance(target_item, BaseElement)
+                and (getattr(source_point, 'point_type', '') == 'custom'
+                     or getattr(target_point, 'point_type', '') == 'custom')):
+            connection_type = (
+                "image-image" if isinstance(source_item, VImageItem) and isinstance(target_item, VImageItem)
+                else "text-text" if isinstance(source_item, VTextItem) and isinstance(target_item, VTextItem)
+                else "generic"
+            )
+            conn = VGenericConnector(
+                source_item, target_item, connection_type,
+                self.config_manager.get('default_line_width', DEFAULT_LINE_WIDTH),
+                source_point, target_point
+            )
+            self.addItem(conn)
+            self.image_text_connectors.append(conn)
+            source_point.connected_lines.append(conn)
+            target_point.connected_lines.append(conn)
+            conn.update_path()
+            self.sync_connectors_visibility()
+            return True
+
         if isinstance(source_item, VImageItem) and isinstance(target_item, VTextItem):
             self.add_image_text_connector(source_item, target_item)
         elif isinstance(source_item, VTextItem) and isinstance(target_item, VImageItem):
@@ -6971,6 +7276,10 @@ class LayoutScene(QGraphicsScene):
     
     def remove_connector_item(self, connector):
         """删除单个连接线"""
+        # 从连接点的反向引用中同步移除，防止点被移动或删除时访问已失效的连线。
+        for point in (getattr(connector, 'point1', None), getattr(connector, 'point2', None)):
+            if point is not None and connector in getattr(point, 'connected_lines', []):
+                point.connected_lines.remove(connector)
         if connector in self.image_text_connectors:
             self.removeItem(connector)
             self.image_text_connectors.remove(connector)
@@ -7699,7 +8008,13 @@ class LayoutView(QGraphicsView):
 
         has_connector_in_rect = False
         for item in items:
-            if mode == 'images':
+            if (isinstance(item, ConnectionPoint)
+                    and getattr(item, 'point_type', '') == 'custom'
+                    and getattr(scene, 'free_connection_point_mode', 'move') == 'move'
+                    and item.isVisible()
+                    and (item.flags() & QGraphicsItem.GraphicsItemFlag.ItemIsSelectable)):
+                item.setSelected(True)
+            elif mode == 'images':
                 if isinstance(item, VImageItem) and not getattr(item, 'locked', False):
                     item.setSelected(True)
                 elif isinstance(item, (VImageTextConnector, VGenericConnector)):
@@ -7832,6 +8147,12 @@ class LayoutView(QGraphicsView):
         items_at = self.scene().items(scene_pos, Qt.ItemSelectionMode.IntersectsItemShape,
                                       Qt.SortOrder.DescendingOrder, self.transform())
         target = None
+        # 独立连接点位于画布顶层，优先交给连接点自身处理右键菜单。
+        for it in items_at:
+            if isinstance(it, ConnectionPoint) and getattr(it, 'point_type', '') == 'custom':
+                it._show_context_menu(event.globalPos())
+                event.accept()
+                return
         for it in items_at:
             if isinstance(it, VTextItem):
                 target = it
@@ -7881,7 +8202,15 @@ class LayoutView(QGraphicsView):
             exclude_point = self.scene().connection_source_point if self.scene().connection_mode else None
             point = self._connection_point_at(pos, exclude_point=exclude_point)
             if point:
-                self.scene().start_connection_from_point(point)
+                is_custom = getattr(point, 'point_type', '') == 'custom'
+                point_mode = getattr(self.scene(), 'free_connection_point_mode', 'move')
+                if is_custom and point_mode == 'move':
+                    # 移动模式交给 QGraphicsItem 处理，支持单击、拖动和框选。
+                    super().mousePressEvent(event)
+                else:
+                    # 图片/文字连接点保持原有单击连线；独立点仅在连接模式下连线。
+                    self.scene().start_connection_from_point(point)
+                    event.accept()
                 event.accept()
                 return
 
@@ -7996,7 +8325,13 @@ class LayoutView(QGraphicsView):
                 for item in items_in_rect:
                     if item in self._marquee_sweep_order:
                         continue
-                    if mode == 'images':
+                    if (isinstance(item, ConnectionPoint)
+                            and getattr(item, 'point_type', '') == 'custom'
+                            and getattr(scene, 'free_connection_point_mode', 'move') == 'move'
+                            and item.isVisible()
+                            and (item.flags() & QGraphicsItem.GraphicsItemFlag.ItemIsSelectable)):
+                        newly_entered.append(item)
+                    elif mode == 'images':
                         if isinstance(item, VImageItem) and not getattr(item, 'locked', False):
                             newly_entered.append(item)
                     elif mode == 'connected':
@@ -10457,6 +10792,18 @@ class MainWindow(QMainWindow):
     def show_canvas_context_menu(self, pos):
         """画布空白处右键菜单"""
         menu = QMenu(self)
+        point_mode_menu = menu.addMenu("独立连接点模式")
+        move_mode_action = point_mode_menu.addAction("移动模式（选中/拖动/框选）")
+        move_mode_action.setCheckable(True)
+        connect_mode_action = point_mode_menu.addAction("连接模式（左键依次点击连接点）")
+        connect_mode_action.setCheckable(True)
+        current_point_mode = getattr(self.scene, 'free_connection_point_mode', 'move')
+        move_mode_action.setChecked(current_point_mode == 'move')
+        connect_mode_action.setChecked(current_point_mode == 'connect')
+        point_mode_menu.addSeparator()
+        add_free_point_here_action = menu.addAction("在此处新建连接点")
+        add_free_point_action = menu.addAction("在最近辅助线交叉点新建连接点")
+        menu.addSeparator()
         menu.addAction("添加文本", self.add_text)
         menu.addAction("插入图片", self.add_image)
         menu.addSeparator()
@@ -10476,7 +10823,19 @@ class MainWindow(QMainWindow):
         menu.addAction("导出图片\tCtrl+E", self.export_image)
         menu.addAction("导出 PDF\tCtrl+Alt+P", self.export_pdf)
         menu.addAction("导出 CorelDRAW SVG", self.export_coreldraw_svg)
-        menu.exec(self.view.mapToGlobal(pos))
+        action = menu.exec(self.view.mapToGlobal(pos))
+        if action == move_mode_action:
+            self.scene.set_free_connection_point_mode('move')
+        elif action == connect_mode_action:
+            self.scene.set_free_connection_point_mode('connect')
+        elif action == add_free_point_here_action:
+            self.scene.add_free_connection_point(self.view.mapToScene(pos))
+        elif action == add_free_point_action:
+            point = self.scene.add_free_connection_point_at_nearest_guide_intersection(
+                self.view.mapToScene(pos)
+            )
+            if point is None:
+                self.status_bar.showMessage("请先添加至少一条横向和一条竖向辅助线", 3000)
 
     def finish_edit_group_asset(self):
         """完成编辑，把放置时记录的完整元素列表更新到素材库"""
