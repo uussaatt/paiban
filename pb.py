@@ -11273,15 +11273,17 @@ class MainWindow(QMainWindow):
             created_items = []
             if not extra_texts:
                 return created_items
-            # 字号、字体、列间距优先从参考文字对象（副文字2/t3/B组）取，取不到再用params默认值
+            # 字号、字体、字间距、列间距优先从参考文字对象（副文字2/t3）取，取不到再用默认值
             if ref_text_item and isinstance(ref_text_item, VTextItem):
                 font_size = ref_text_item.font_size
                 font_family = ref_text_item.font_family
-                column_spacing = ref_text_item.column_spacing  # 使用副文字2的列间距
+                character_spacing = ref_text_item.character_spacing
+                column_spacing = ref_text_item.column_spacing
             else:
                 font_size = params['font_size']
                 font_family = params['font_family']
-                column_spacing = COLUMN_SPACING  # 没有参考时使用默认列间距
+                character_spacing = 0
+                column_spacing = COLUMN_SPACING
             anchor_rect = QRectF(base_pos, QSizeF(0, 0))
             for item in anchor_items or []:
                 anchor_rect = anchor_rect.united(item_scene_rect(item))
@@ -11292,7 +11294,8 @@ class MainWindow(QMainWindow):
                     continue
                 text_item = VTextItem(text, font_size, 400)
                 text_item.font_family = font_family
-                text_item.column_spacing = column_spacing  # 设置与副文字2相同的列间距
+                text_item.character_spacing = character_spacing
+                text_item.column_spacing = column_spacing
                 text_item.rebuild()
                 text_item.setPos(x - idx * (font_size * 2 + column_spacing), y)
                 text_cmd = AddItemCommand(self.scene, text_item)
@@ -11592,9 +11595,19 @@ class MainWindow(QMainWindow):
                 slot_items = apply_template_text(new_items, cloned_by_asset_index, main_text, sub_text1, sub_text2)
                 imported_items.extend(new_items)
                 commands.extend(new_commands)
-                # 取B组对应的t3文字对象作为D组的字号字体参考
+                
+                # 从模板资源中直接获取t3的样式作为D组参考
                 t3_index = params['template_text_map'].get('t3')
-                ref_item = slot_items.get('t3') or (cloned_by_asset_index[t3_index] if t3_index is not None and 0 <= t3_index < len(cloned_by_asset_index) else None) or next((i for i in new_items if isinstance(i, VTextItem)), None)
+                ref_item = None
+                if t3_index is not None and 0 <= t3_index < len(template_asset['items']):
+                    t3_data = template_asset['items'][t3_index]
+                    if t3_data.get('type') == 'VTextItem':
+                        # 从模板数据创建一个临时参考对象
+                        ref_item = VTextItem("", t3_data['font_size'], 400)
+                        ref_item.font_family = t3_data['font_family']
+                        ref_item.character_spacing = t3_data.get('character_spacing', 0)
+                        ref_item.column_spacing = t3_data.get('column_spacing', COLUMN_SPACING)
+                
                 extra_items = add_extra_text_items(extra_texts, base_pos, new_items, ref_text_item=ref_item)
                 placed_items = new_items + extra_items
                 keep_items_inside_canvas(placed_items)
@@ -11634,7 +11647,9 @@ class MainWindow(QMainWindow):
                 commands.append(text_cmd)
                 imported_items.append(text_item)
                 row_items.append(text_item)
-                ref_item = text_item
+            
+            # D组（extra_texts）的样式参考：纯文字模式下不使用主文字，保持None使用默认配置
+            ref_item = None
 
             extra_items = add_extra_text_items(extra_texts, base_pos, row_items, ref_text_item=ref_item)
             placed_items = row_items + extra_items
