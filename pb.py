@@ -2668,19 +2668,39 @@ class ConnectionPoint(QGraphicsEllipseItem):
         return path
 
     def paint(self, painter, option, widget):
-        """圆心始终保持在(0,0)，缩小时仍保持足够可见"""
+        """圆心始终保持在(0,0)，缩小时仍保持足够可见，选中时显示蓝色边框"""
         lod = option.levelOfDetailFromTransform(painter.worldTransform())
         lod = max(lod, 0.001)
 
-        radius = self.HOVER_RADIUS if self._hovered else self.BASE_RADIUS
-        min_screen_radius = self.HOVER_RADIUS if self._hovered else self.BASE_RADIUS
+        # 判断当前点是否是选中的"连线起点"
+        is_active_source = (self.scene() and getattr(self.scene(), 'connection_source_point', None) == self)
+        is_selected = self.isSelected()
+
+        radius = self.HOVER_RADIUS if (self._hovered or is_active_source) else self.BASE_RADIUS
+        min_screen_radius = self.HOVER_RADIUS if (self._hovered or is_active_source) else self.BASE_RADIUS
         if lod < 1.0:
             radius = max(radius, min_screen_radius / lod)
 
         rect = QRectF(-radius, -radius, radius * 2, radius * 2)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        painter.setBrush(self.hover_brush if self._hovered else self.base_brush)
-        painter.setPen(self.hover_pen if self._hovered else self.base_pen)
+        
+        if is_active_source:
+            # 连线起点：黄色
+            painter.setBrush(QBrush(Qt.GlobalColor.yellow))
+            painter.setPen(QPen(QColor(200, 200, 0), 3))
+        elif is_selected:
+            # 被框选选中：蓝色填充+蓝色粗边框
+            painter.setBrush(QBrush(QColor(100, 150, 255, 200)))
+            painter.setPen(QPen(QColor(0, 100, 255), 4))
+        elif self._hovered:
+            # 悬停：绿色
+            painter.setBrush(self.hover_brush)
+            painter.setPen(self.hover_pen)
+        else:
+            # 正常：红色
+            painter.setBrush(self.base_brush)
+            painter.setPen(self.base_pen)
+            
         painter.drawEllipse(rect)
 
     def update_position(self):
@@ -2734,8 +2754,13 @@ class ConnectionPoint(QGraphicsEllipseItem):
             self._press_scene_pos = None
             if self.scene():
                 self.scene().hide_temp_alignment_guide()
-            return
-        super().mouseReleaseEvent(event)
+
+    def itemChange(self, change, value):
+        """监听选中状态变化，触发重绘"""
+        if change == QGraphicsItem.GraphicsItemChange.ItemSelectedChange:
+            # 选中状态改变时触发重绘
+            self.update()
+        return super().itemChange(change, value)
 
     def mouseDoubleClickEvent(self, event):
         """独立连接点单击用于选中/拖动，双击才开始或完成连线。"""
@@ -7624,6 +7649,11 @@ class LayoutScene(QGraphicsScene):
                 elif isinstance(item, (VImageTextConnector, VGenericConnector)):
                     # 删除连接线
                     self.remove_connector_item(item)
+                elif isinstance(item, ConnectionPoint) and getattr(item, '_custom_position', False):
+                    # 删除独立连接点
+                    if item in self.free_connection_points:
+                        self.free_connection_points.remove(item)
+                    self.removeItem(item)
         elif event.key() in (Qt.Key.Key_Left, Qt.Key.Key_Right, Qt.Key.Key_Up, Qt.Key.Key_Down):
             items = [i for i in self.selectedItems() if isinstance(i, BaseElement)]
             if items:
@@ -8025,7 +8055,6 @@ class LayoutView(QGraphicsView):
         for item in items:
             if (isinstance(item, ConnectionPoint)
                     and getattr(item, 'point_type', '') == 'custom'
-                    and getattr(scene, 'free_connection_point_mode', 'move') == 'move'
                     and item.isVisible()
                     and (item.flags() & QGraphicsItem.GraphicsItemFlag.ItemIsSelectable)):
                 item.setSelected(True)
@@ -8045,10 +8074,10 @@ class LayoutView(QGraphicsView):
 
         # 独立连接点按圆心是否落入选框判定。这样左到右的“完全包含”框选
         # 不会因为点的可点击范围较大而漏选。
-        if getattr(scene, 'free_connection_point_mode', 'move') == 'move':
-            for point in getattr(scene, 'free_connection_points', []):
-                if point.scene() is scene and point.isVisible() and path.contains(point.get_scene_center()):
-                    point.setSelected(True)
+        # 移除模式检查，连接模式下也能框选独立连接点
+        for point in getattr(scene, 'free_connection_points', []):
+            if point.scene() is scene and point.isVisible() and path.contains(point.get_scene_center()):
+                point.setSelected(True)
 
         # 仅图片模式下框选到连线时弹出提示
         if mode == 'images' and has_connector_in_rect:
@@ -8712,8 +8741,8 @@ class FamilyTreeImportDialog(QDialog):
 
         # Excel 列映射说明
         hint = QLabel(
-            "Excel 默认格式：A列=辈分  B列=主文字  C列=副文字1  D列=副文字2  E列=图片路径\n"
-            "使用组合模板时，模板中文字内容需与下方占位符一致"
+            "Excel 默认格式：A列=辈分  B列=主文字(对应A组)  C列=副文字1(对应C组)  D列=副文字2(对应B组)  E列=图片路径\n"
+            "使用组合模板时，通过下方'模板文字对象指定'设置Excel列与模板中文字对象的对应关系"
         )
         hint.setStyleSheet("color: #666; font-size: 11px;")
         hint.setWordWrap(True)
@@ -8736,9 +8765,9 @@ class FamilyTreeImportDialog(QDialog):
         self.combo_template_t1 = QComboBox()
         self.combo_template_t2 = QComboBox()
         self.combo_template_t3 = QComboBox()
-        tm.addRow("主文字填入:", self.combo_template_t1)
-        tm.addRow("副文字1填入:", self.combo_template_t2)
-        tm.addRow("副文字2填入:", self.combo_template_t3)
+        tm.addRow("主文字(A组)填入:", self.combo_template_t1)
+        tm.addRow("副文字1(C组)填入:", self.combo_template_t2)
+        tm.addRow("副文字2(B组)填入:", self.combo_template_t3)
         self.btn_save_template_map = QPushButton("保存此模板指定")
         self.btn_save_template_map.clicked.connect(self._save_template_map_clicked)
         tm.addRow("", self.btn_save_template_map)
