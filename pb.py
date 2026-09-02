@@ -2216,7 +2216,9 @@ class AddItemCommand(UndoCommand):
             self.scene.addItem(self.item)
             
         if isinstance(self.item, (VTextItem, VImageItem)):
-            self.item.set_connection_points_visible(self.scene.show_connection_points)
+            # 只有连接点存在时才设置可见性
+            if hasattr(self.item, 'connection_point') and self.item.connection_point is not None:
+                self.item.set_connection_points_visible(self.scene.show_connection_points)
         if isinstance(self.item, VTextItem):
             self.item.update_hover_tooltip()
 
@@ -6660,16 +6662,20 @@ class LayoutScene(QGraphicsScene):
                 clone.manual_line_break = item.manual_line_break
                 clone.layer_eye_color = getattr(item, 'layer_eye_color', None)
                 clone.rebuild()
-                # 同步连接点可见性
-                if item.connection_point and clone.connection_point:
+                # 同步连接点状态（删除/可见性）
+                if item.connection_point is None:
+                    clone.delete_connection_point()
+                elif clone.connection_point:
                     clone.connection_point.setVisible(item.connection_point.isVisible())
             elif isinstance(item, VImageItem):
                 clone = VImageItem(item.file_path, item.target_width)
                 clone.set_opacity(item.image_opacity)
                 if item.locked:
                     clone.set_locked(True)
-                # 同步连接点可见性
-                if item.connection_point and clone.connection_point:
+                # 同步连接点状态（删除/可见性）
+                if item.connection_point is None:
+                    clone.delete_connection_point()
+                elif clone.connection_point:
                     clone.connection_point.setVisible(item.connection_point.isVisible())
             
             if clone:
@@ -7298,7 +7304,8 @@ class LayoutScene(QGraphicsScene):
         
         for idx, item in enumerate(items):
             if isinstance(item, VTextItem):
-                # 保存连接点可见性状态
+                # 保存连接点状态（删除/可见性）
+                connection_point_deleted = item.connection_point is None
                 connection_point_visible = item.connection_point.isVisible() if item.connection_point else True
                 
                 item_data = {
@@ -7314,6 +7321,7 @@ class LayoutScene(QGraphicsScene):
                     'auto_height': item.auto_height,
                     'manual_line_break': item.manual_line_break,
                     'layer_eye_color': getattr(item, 'layer_eye_color', None),
+                    'connection_point_deleted': connection_point_deleted,
                     'connection_point_visible': connection_point_visible,
                     'scene_pos': (item.scenePos().x(), item.scenePos().y()),
                     'local_pos': (item.x(), item.y()),
@@ -7321,13 +7329,15 @@ class LayoutScene(QGraphicsScene):
                 }
                 self.clipboard_items.append(item_data)
             elif isinstance(item, VImageItem):
-                # 保存连接点可见性状态
+                # 保存连接点状态（删除/可见性）
+                connection_point_deleted = item.connection_point is None
                 connection_point_visible = item.connection_point.isVisible() if item.connection_point else True
                 
                 item_data = {
                     'type': 'VImageItem',
                     'path': item.file_path,
                     'width': item.target_width,
+                    'connection_point_deleted': connection_point_deleted,
                     'connection_point_visible': connection_point_visible,
                     'scene_pos': (item.scenePos().x(), item.scenePos().y()),
                     'local_pos': (item.x(), item.y()),
@@ -7390,14 +7400,17 @@ class LayoutScene(QGraphicsScene):
                 offset_y = item_data['scene_pos'][1] - min_y
                 new_item.setPos(base_x + offset_x, base_y + offset_y)
 
-                # 直接执行，不 push 到栈
+                # 在添加到场景之前，先应用连接点删除状态
+                if item_data.get('connection_point_deleted', False):
+                    new_item.delete_connection_point()
+
+                # 执行添加命令
                 cmd = AddItemCommand(self, new_item)
                 cmd.execute()
                 sub_commands.append(cmd)
 
-                if item_data.get('connection_point_deleted', False):
-                    new_item.delete_connection_point()
-                elif 'connection_point_visible' in item_data and new_item.connection_point:
+                # 设置连接点可见性（如果连接点还存在）
+                if not item_data.get('connection_point_deleted', False) and 'connection_point_visible' in item_data and new_item.connection_point:
                     new_item.connection_point.setVisible(item_data['connection_point_visible'])
 
                 new_items.append(new_item)
