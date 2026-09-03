@@ -5386,7 +5386,8 @@ class CorelSvgExporter:
         exported_groups = set()
         group_number = 0
 
-        export_dir = os.path.splitext(filepath)[0] + "_assets"
+        # 图片导出目录：直接使用SVG所在目录，不创建_assets子文件夹
+        export_dir = os.path.dirname(filepath)
 
         for item in items:
             group_root = CorelSvgExporter._group_root(item)
@@ -5483,17 +5484,24 @@ class CorelSvgExporter:
         if not os.path.isabs(path):
             path = os.path.abspath(path)
 
+        # 将图片转换为Base64嵌入SVG
         href = path.replace('\\', '/')
         try:
-            if not os.path.exists(export_dir):
-                os.makedirs(export_dir)
+            import base64
             pix = QPixmap(path)
             if not pix.isNull():
-                safe_name = f"image_{abs(hash((path, item.scenePos().x(), item.scenePos().y())))}.png"
-                out_path = os.path.join(export_dir, safe_name)
-                pix.save(out_path, "PNG")
-                href = os.path.relpath(out_path, os.path.dirname(svg_path)).replace('\\', '/')
-        except Exception:
+                # 转换为PNG格式的字节流
+                byte_array = QByteArray()
+                buffer = QBuffer(byte_array)
+                buffer.open(QBuffer.OpenModeFlag.WriteOnly)
+                pix.save(buffer, "PNG")
+                buffer.close()
+                
+                # Base64编码
+                base64_data = base64.b64encode(byte_array.data()).decode('utf-8')
+                href = f"data:image/png;base64,{base64_data}"
+        except Exception as e:
+            print(f"嵌入图片失败: {e}，使用文件路径")
             href = path.replace('\\', '/')
 
         # 关键：rect 是 item 局部坐标的 (0,0,w,h)，SVG <image> 在没有 x/y 时
