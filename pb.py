@@ -8750,6 +8750,7 @@ class FamilyTreeImportDialog(QDialog):
         # Excel 列映射说明
         hint = QLabel(
             "Excel 默认格式：A列=辈分  B列=主文字(对应A组)  C列=副文字1(对应C组)  D列=副文字2(对应B组)  E列=图片路径\n"
+            "也支持中文表头：辈分/代数/分类  名称/内容  组/组值\n"
             "使用组合模板时，通过下方'模板文字对象指定'设置Excel列与模板中文字对象的对应关系"
         )
         hint.setStyleSheet("color: #666; font-size: 11px;")
@@ -11739,8 +11740,8 @@ class MainWindow(QMainWindow):
                 current_fields = set()
 
             for row in rows:
-                generation = row_value(row, columns['generation'])
-                group_value = normalize_key(row_value(row, columns['group']))
+                generation = row_first_value(row, (columns['generation'], '辈分', '代数', 'generation'))
+                group_value = normalize_key(row_first_value(row, (columns['group'], '组', '组值')))
                 name_text = row_first_value(row, (columns['name'], '名称', '内容'))
                 image_path = row_value(row, columns['image'])
 
