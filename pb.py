@@ -8720,6 +8720,248 @@ class LayoutView(QGraphicsView):
 
 # --- Main Window ---
 
+
+class ExcelPreviewDialog(QDialog):
+    """Excel数据预览对话框 - 支持编辑、保存和直接导入"""
+    
+    def __init__(self, parent, records, excel_path):
+        super().__init__(parent)
+        self.records = records
+        self.excel_path = excel_path
+        self.should_import = False
+        self.direct_import = False
+        
+        self.setWindowTitle("Excel数据预览")
+        self.setMinimumSize(900, 550)
+        self.resize(1100, 650)
+        
+        self._build_ui()
+    
+    def _build_ui(self):
+        layout = QVBoxLayout(self)
+        
+        # 顶部工具栏
+        toolbar = QHBoxLayout()
+        info_label = QLabel(f"共识别到 {len(self.records)} 条记录，可直接编辑表格内容")
+        info_label.setStyleSheet("color: #333; font-weight: bold; padding: 5px;")
+        toolbar.addWidget(info_label)
+        toolbar.addStretch()
+        
+        # 添加行按钮
+        btn_add_row = QPushButton("+ 添加行")
+        btn_add_row.setFixedWidth(80)
+        btn_add_row.clicked.connect(self._add_row)
+        toolbar.addWidget(btn_add_row)
+        
+        # 删除行按钮
+        btn_delete_row = QPushButton("- 删除行")
+        btn_delete_row.setFixedWidth(80)
+        btn_delete_row.clicked.connect(self._delete_row)
+        toolbar.addWidget(btn_delete_row)
+        
+        layout.addLayout(toolbar)
+        
+        # 创建可编辑表格
+        self.table = QTableWidget()
+        self.table.setColumnCount(5)
+        self.table.setHorizontalHeaderLabels(["辈分", "t1(A组)", "t2(C组)", "t3(B组)", "d(D组)"])
+        self.table.setRowCount(len(self.records))
+        self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        
+        # 填充数据
+        for row_idx, record in enumerate(self.records):
+            self.table.setItem(row_idx, 0, QTableWidgetItem(record['generation']))
+            self.table.setItem(row_idx, 1, QTableWidgetItem(record['t1']))
+            self.table.setItem(row_idx, 2, QTableWidgetItem(record['t2']))
+            self.table.setItem(row_idx, 3, QTableWidgetItem(record['t3']))
+            d_texts = ' | '.join(record.get('d', []))
+            self.table.setItem(row_idx, 4, QTableWidgetItem(d_texts))
+        
+        # 设置列宽模式
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)  # 辈分列自适应
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)  # t1列拉伸
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)  # t2列拉伸
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)  # t3列拉伸
+        header.setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)  # d列拉伸
+        
+        layout.addWidget(self.table)
+        
+        # 底部说明
+        hint = QLabel("提示：可直接在表格中编辑数据。d(D组)列中多个值请用 | 分隔。")
+        hint.setStyleSheet("color: #666; font-size: 11px; padding: 5px;")
+        layout.addWidget(hint)
+        
+        # 按钮组
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
+        
+        # 保存到Excel按钮
+        btn_save_excel = QPushButton("保存到Excel")
+        btn_save_excel.setFixedWidth(120)
+        btn_save_excel.clicked.connect(self._save_to_excel)
+        btn_layout.addWidget(btn_save_excel)
+        
+        # 保存并导入按钮
+        btn_save_import = QPushButton("直接导入画布")
+        btn_save_import.setFixedWidth(120)
+        btn_save_import.setStyleSheet("""
+            QPushButton {
+                background-color: #0078d4;
+                color: white;
+                border: none;
+                border-radius: 4px;
+                padding: 6px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #106ebe;
+            }
+        """)
+        btn_save_import.clicked.connect(self._save_and_import)
+        btn_layout.addWidget(btn_save_import)
+        
+        # 关闭按钮
+        btn_close = QPushButton("关闭")
+        btn_close.setFixedWidth(80)
+        btn_close.clicked.connect(self.reject)
+        btn_layout.addWidget(btn_close)
+        
+        layout.addLayout(btn_layout)
+    
+    def _add_row(self):
+        """添加新行"""
+        row_count = self.table.rowCount()
+        self.table.insertRow(row_count)
+        # 初始化空单元格
+        for col in range(5):
+            self.table.setItem(row_count, col, QTableWidgetItem(""))
+    
+    def _delete_row(self):
+        """删除选中的行"""
+        selected_rows = set(item.row() for item in self.table.selectedItems())
+        if not selected_rows:
+            QMessageBox.information(self, "提示", "请先选择要删除的行")
+            return
+        
+        reply = QMessageBox.question(
+            self, "确认删除",
+            f"确定要删除选中的 {len(selected_rows)} 行吗？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        
+        if reply == QMessageBox.StandardButton.Yes:
+            for row in sorted(selected_rows, reverse=True):
+                self.table.removeRow(row)
+    
+    def get_edited_records(self):
+        """获取编辑后的记录"""
+        edited_records = []
+        for row_idx in range(self.table.rowCount()):
+            generation = self.table.item(row_idx, 0)
+            t1 = self.table.item(row_idx, 1)
+            t2 = self.table.item(row_idx, 2)
+            t3 = self.table.item(row_idx, 3)
+            d = self.table.item(row_idx, 4)
+            
+            generation_text = generation.text().strip() if generation else ''
+            t1_text = t1.text().strip() if t1 else ''
+            t2_text = t2.text().strip() if t2 else ''
+            t3_text = t3.text().strip() if t3 else ''
+            d_text = d.text().strip() if d else ''
+            
+            # 解析d组数据（用|分隔）
+            d_list = [item.strip() for item in d_text.split('|') if item.strip()]
+            
+            # 跳过完全空的行
+            if not any([generation_text, t1_text, t2_text, t3_text, d_list]):
+                continue
+            
+            record = {
+                'generation': generation_text,
+                't1': t1_text,
+                't2': t2_text,
+                't3': t3_text,
+                'd': d_list,
+            }
+            edited_records.append(record)
+        
+        return edited_records
+    
+    def _save_to_excel(self):
+        """保存编辑后的数据到新的Excel文件"""
+        save_path, _ = QFileDialog.getSaveFileName(
+            self, "保存Excel文件",
+            self.excel_path.replace('.xlsx', '_编辑后.xlsx'),
+            "Excel 文件 (*.xlsx)"
+        )
+        
+        if not save_path:
+            return
+        
+        try:
+            import openpyxl
+            from openpyxl import Workbook
+            
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "处理后数据"
+            
+            # 写入表头
+            ws.append(['辈分', '名称', '组'])
+            
+            # 写入数据 - 将处理后的数据还原成原始格式
+            edited_records = self.get_edited_records()
+            for record in edited_records:
+                generation = record['generation']
+                
+                # 写入a组（t1）
+                if record['t1']:
+                    ws.append([generation, record['t1'], 'a'])
+                
+                # 写入c组（t2）
+                if record['t2']:
+                    ws.append([generation, record['t2'], 'c'])
+                
+                # 写入b组（t3）
+                if record['t3']:
+                    ws.append([generation, record['t3'], 'b'])
+                
+                # 写入d组（可多个）
+                for d_item in record.get('d', []):
+                    if d_item:
+                        ws.append([generation, d_item, 'd'])
+            
+            wb.save(save_path)
+            QMessageBox.information(self, "保存成功", f"数据已保存到：\n{save_path}")
+            
+        except Exception as e:
+            QMessageBox.critical(self, "保存失败", f"保存Excel文件失败：\n{e}")
+    
+    def _save_and_import(self):
+        """保存并直接导入到画布"""
+        # 提示用户：将使用当前编辑的数据导入
+        edited_records = self.get_edited_records()
+        
+        if not edited_records:
+            QMessageBox.warning(self, "无法导入", "没有有效的数据记录")
+            return
+        
+        reply = QMessageBox.question(
+            self, "确认导入",
+            f"将使用当前表格中的 {len(edited_records)} 条记录导入到画布。\n\n"
+            "提示：如需保存编辑后的数据到Excel文件，请先点击'保存到Excel'按钮。\n\n"
+            "是否继续导入？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes
+        )
+        
+        if reply == QMessageBox.StandardButton.Yes:
+            self.should_import = True
+            self.direct_import = True
+            self.accept()
+
+
 class FamilyTreeImportDialog(QDialog):
     """从 Excel 批量导入族谱成员对话框"""
 
@@ -8728,6 +8970,7 @@ class FamilyTreeImportDialog(QDialog):
         self.scene = scene
         self.setWindowTitle("批量导入族谱成员")
         self.setMinimumWidth(520)
+        self._preview_edited_records = None  # 存储预览编辑后的数据
         self._build_ui()
         self._load_settings()
 
@@ -8745,17 +8988,32 @@ class FamilyTreeImportDialog(QDialog):
         btn_browse.setFixedWidth(70)
         btn_browse.clicked.connect(self._browse_excel)
         fl.addWidget(btn_browse)
+        btn_preview = QPushButton("预览数据")
+        btn_preview.setFixedWidth(80)
+        btn_preview.clicked.connect(self._preview_excel_data)
+        fl.addWidget(btn_preview)
         root.addWidget(file_group)
 
         # Excel 列映射说明
         hint = QLabel(
-            "Excel 默认格式：A列=辈分  B列=主文字(对应A组)  C列=副文字1(对应C组)  D列=副文字2(对应B组)  E列=图片路径\n"
-            "也支持中文表头：辈分/代数/分类  名称/内容  组/组值\n"
+            "Excel 格式：从上到下连续的acb单元格放置到一行 | A组→t1列  C组→t2列  B组→t3列  D组→d列\n"
+            "支持中文表头：辈分/代数/分类  名称/内容  组/组值\n"
             "使用组合模板时，通过下方'模板文字对象指定'设置Excel列与模板中文字对象的对应关系"
         )
         hint.setStyleSheet("color: #666; font-size: 11px;")
         hint.setWordWrap(True)
         root.addWidget(hint)
+        
+        # 导入模式选择
+        mode_group = QGroupBox("导入模式")
+        mode_layout = QVBoxLayout(mode_group)
+        self.radio_mode_group = QRadioButton("按组合并模式（连续acbd组合并到一行）")
+        self.radio_mode_direct = QRadioButton("按列直接导入模式（Excel列直接对应t1/t2/t3/d）")
+        # 默认使用按列直接导入模式，避免未主动选择时按旧的组合并规则处理。
+        self.radio_mode_direct.setChecked(True)
+        mode_layout.addWidget(self.radio_mode_group)
+        mode_layout.addWidget(self.radio_mode_direct)
+        root.addWidget(mode_group)
 
         # 模板素材选择
         tmpl_group = QGroupBox("组合素材模板（可选）")
@@ -8975,6 +9233,246 @@ class FamilyTreeImportDialog(QDialog):
         if path:
             self.txt_excel.setText(path)
             self._save_settings()
+    
+    def _preview_excel_data(self):
+        """预览Excel数据处理结果 - 弹出窗口显示，支持编辑、保存和导入"""
+        excel_path = self.txt_excel.text().strip()
+        if not excel_path or not os.path.exists(excel_path):
+            QMessageBox.warning(self, "预览失败", "请先选择有效的Excel文件")
+            return
+        
+        try:
+            import openpyxl
+        except ImportError:
+            QMessageBox.warning(self, "预览失败", "需要安装openpyxl库")
+            return
+        
+        try:
+            wb = openpyxl.load_workbook(excel_path, data_only=True)
+            ws = wb.active
+            rows = list(ws.iter_rows(min_row=1, values_only=True))
+        except Exception as e:
+            QMessageBox.critical(self, "预览失败", f"读取Excel失败：\n{e}")
+            return
+        
+        # 判断使用哪种模式处理数据
+        use_direct_mode = self.radio_mode_direct.isChecked()
+        
+        # 处理数据
+        processed_records = self._process_excel_rows(rows, use_direct_mode)
+        
+        if not processed_records:
+            QMessageBox.information(self, "预览结果", "没有找到有效的数据记录")
+            return
+        
+        # 创建预览对话框
+        preview_dialog = ExcelPreviewDialog(self, processed_records, excel_path)
+        result = preview_dialog.exec()
+        
+        # 如果用户选择了"保存并导入"
+        if result == QDialog.DialogCode.Accepted and preview_dialog.should_import:
+            # 获取编辑后的数据
+            edited_records = preview_dialog.get_edited_records()
+            # 保存到临时变量，供后续导入使用
+            self._preview_edited_records = edited_records
+            # 如果用户选择了直接导入
+            if preview_dialog.direct_import:
+                self.accept()  # 关闭导入对话框，触发导入流程
+    
+    def _process_excel_rows(self, rows, use_direct_mode=False):
+        """处理Excel行数据
+        
+        Args:
+            rows: Excel行数据
+            use_direct_mode: True=按列直接导入模式，False=按组合并模式
+        """
+        if use_direct_mode:
+            return self._process_excel_rows_direct(rows)
+        else:
+            return self._process_excel_rows_group(rows)
+    
+    def _process_excel_rows_direct(self, rows):
+        """按列直接导入模式：辈分列 + t1/t2/t3/d列直接对应"""
+        def cell_text(value):
+            if value is None:
+                return ''
+            return str(value).strip()
+        
+        # 构建表头映射
+        header_map = {}
+        if rows:
+            header_map.update({
+                cell_text(value).lower(): idx
+                for idx, value in enumerate(rows[0])
+                if cell_text(value)
+            })
+        
+        def get_column_index(possible_names):
+            """根据可能的列名获取列索引"""
+            for name in possible_names:
+                idx = header_map.get(name.lower())
+                if idx is not None:
+                    return idx
+            return None
+        
+        def row_value(row, col_idx):
+            if col_idx is None or col_idx >= len(row):
+                return ''
+            return cell_text(row[col_idx])
+        
+        # 识别列索引
+        gen_idx = get_column_index(['辈分', '代数', '分类'])
+        t1_idx = get_column_index(['t1', 't1(a组)', 't1（a组）'])
+        t2_idx = get_column_index(['t2', 't2(c组)', 't2（c组）'])
+        t3_idx = get_column_index(['t3', 't3(b组)', 't3（b组）'])
+        d_idx = get_column_index(['d', 'd(d组)', 'd（d组）'])
+        
+        processed_records = []
+        
+        for row in rows[1:]:  # 跳过表头行
+            generation = row_value(row, gen_idx)
+            t1 = row_value(row, t1_idx)
+            t2 = row_value(row, t2_idx)
+            t3 = row_value(row, t3_idx)
+            d_text = row_value(row, d_idx)
+            
+            # 跳过完全空的行
+            if not any([generation, t1, t2, t3, d_text]):
+                continue
+            
+            # 处理d列（可能有换行符或|分隔）
+            d_list = []
+            if d_text:
+                # 先按换行符分割，再按|分割
+                for line in d_text.split('\n'):
+                    for item in line.split('|'):
+                        item = item.strip()
+                        if item:
+                            d_list.append(item)
+            
+            record = {
+                'generation': generation,
+                't1': t1,
+                't2': t2,
+                't3': t3,
+                'd': d_list,
+            }
+            processed_records.append(record)
+        
+        return processed_records
+    
+    def _process_excel_rows_group(self, rows):
+        """按组合并模式：将连续的acb组合到一行"""
+        def cell_text(value):
+            if value is None:
+                return ''
+            return str(value).strip()
+        
+        def normalize_key(value):
+            return cell_text(value).lower()
+        
+        # 构建表头映射
+        header_map = {}
+        if rows:
+            header_map.update({
+                cell_text(value).lower(): idx
+                for idx, value in enumerate(rows[0])
+                if cell_text(value)
+            })
+        
+        def row_value(row, column_name):
+            column_name = str(column_name).strip()
+            if not column_name:
+                return ''
+            # 先查表头
+            header_index = header_map.get(column_name.lower())
+            if header_index is not None:
+                return cell_text(row[header_index]) if header_index < len(row) else ''
+            # 列字母转索引
+            if column_name.isdigit():
+                index = max(0, int(column_name) - 1)
+            else:
+                index = 0
+                for char in column_name.upper():
+                    if not ('A' <= char <= 'Z'):
+                        return ''
+                    index = index * 26 + ord(char) - ord('A') + 1
+                index = index - 1
+            return cell_text(row[index]) if index < len(row) else ''
+        
+        def row_first_value(row, column_names):
+            for column_name in column_names:
+                value = row_value(row, column_name)
+                if value:
+                    return value
+            return ''
+        
+        # 组到字段的映射 a->t1, c->t2, b->t3, d->d
+        group_to_field = {
+            'a': 't1',
+            'c': 't2',
+            'b': 't3',
+            'd': 'd',
+        }
+        
+        processed_records = []
+        current_record = None
+        current_fields = set()
+        
+        def flush_current_record():
+            nonlocal current_record, current_fields
+            if current_record and any((
+                    current_record['t1'],
+                    current_record['t2'],
+                    current_record['t3'],
+                    current_record.get('d'))):
+                processed_records.append(current_record)
+            current_record = None
+            current_fields = set()
+        
+        for row in rows:
+            generation = row_first_value(row, ('A', '辈分', '代数', 'generation'))
+            group_value = normalize_key(row_first_value(row, ('组', '组值')))
+            name_text = row_first_value(row, ('名称', '内容'))
+            
+            # 跳过空行和表头
+            if group_value in ('', '组', '组值'):
+                continue
+            if generation in ('', '辈分', '代数', 'generation'):
+                continue
+            
+            # 获取字段名
+            field = group_to_field.get(group_value)
+            if not field or not name_text:
+                continue
+            
+            # 判断是否需要新建记录
+            if current_record and (
+                    (field in current_fields and field != 'd') or  # 同一字段重复（d组除外）
+                    (generation and current_record['generation'] and generation != current_record['generation'])):  # 辈分变化
+                flush_current_record()
+            
+            # 初始化新记录
+            if current_record is None:
+                current_record = {
+                    'generation': generation,
+                    't1': '',
+                    't2': '',
+                    't3': '',
+                    'd': [],
+                }
+            elif generation and not current_record['generation']:
+                current_record['generation'] = generation
+            
+            # 填入数据
+            if field == 'd':
+                current_record[field].append(name_text)
+            else:
+                current_record[field] = name_text
+            current_fields.add(field)
+        
+        flush_current_record()
+        return processed_records
 
     def _load_settings(self):
         cfg = self.scene.config_manager
@@ -9062,17 +9560,19 @@ class FamilyTreeImportDialog(QDialog):
                 't1': 'B',
                 't2': 'C',
                 't3': 'D',
+                'd': 'E',
                 'image': 'E',
                 'name': '内容',
                 'group': '组',
             },
             'group_match': {
-                'enabled': True,
+                'enabled': not self.radio_mode_direct.isChecked(),  # 按列直接导入时禁用组合并
                 't1': 'a',
                 't2': 'c',
                 't3': 'b',
                 'extra_text': 'd',
             },
+            'use_direct_mode': self.radio_mode_direct.isChecked(),  # 新增：是否使用按列直接导入模式
             'template_text_map': {
                 't1': self.combo_template_t1.currentData(),
                 't2': self.combo_template_t2.currentData(),
@@ -11219,8 +11719,9 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "导入失败", f"Excel 文件不存在：\n{excel_path}")
             return
 
-        # 执行实际导入逻辑
-        self._perform_excel_import(params, excel_path)
+        # 执行实际导入逻辑，传递预览编辑后的数据
+        preview_records = getattr(dlg, '_preview_edited_records', None)
+        self._perform_excel_import(params, excel_path, preview_records)
 
     def _open_excel_import_with_path(self, excel_path):
         """打开 Excel 导入对话框并预填文件路径（用于拖拽）"""
@@ -11244,10 +11745,17 @@ class MainWindow(QMainWindow):
         
         # 获取参数并执行导入
         params = dlg.get_params()
-        self._perform_excel_import(params, excel_path)
+        preview_records = getattr(dlg, '_preview_edited_records', None)
+        self._perform_excel_import(params, excel_path, preview_records)
 
-    def _perform_excel_import(self, params, excel_path):
-        """执行Excel导入的核心逻辑"""
+    def _perform_excel_import(self, params, excel_path, preview_records=None):
+        """执行Excel导入的核心逻辑
+        
+        Args:
+            params: 导入参数
+            excel_path: Excel文件路径
+            preview_records: 预览编辑后的记录（可选），格式为[{'generation': '', 't1': '', 't2': '', 't3': '', 'd': []}]
+        """
         try:
             import openpyxl
         except ImportError:
@@ -11299,6 +11807,82 @@ class MainWindow(QMainWindow):
 
         def normalize_key(value):
             return cell_text(value).lower()
+        
+        def _process_excel_rows_for_import(rows, columns, group_match):
+            """处理Excel行数据，将连续的acb组合到一行 - a->t1, c->t2, b->t3, d->extra_texts"""
+            # 新的组到字段映射: a->main_text(t1), c->sub_text1(t2), b->sub_text2(t3), d->extra_texts
+            group_to_field = {
+                'a': 'main_text',
+                'c': 'sub_text1',
+                'b': 'sub_text2',
+                'd': 'extra_texts',
+            }
+            
+            processed_records = []
+            current_record = None
+            current_fields = set()
+            
+            def flush_current_record():
+                nonlocal current_record, current_fields
+                if current_record and any((
+                        current_record['main_text'],
+                        current_record['sub_text1'],
+                        current_record['sub_text2'],
+                        current_record['image_path'],
+                        current_record.get('extra_texts'))):
+                    processed_records.append(current_record)
+                current_record = None
+                current_fields = set()
+            
+            for row in rows:
+                generation = row_first_value(row, (columns['generation'], '辈分', '代数', 'generation'))
+                group_value = normalize_key(row_first_value(row, (columns['group'], '组', '组值')))
+                name_text = row_first_value(row, (columns['name'], '名称', '内容'))
+                image_path = row_value(row, columns['image'])
+                
+                # 跳过空行和表头
+                if group_value in ('', '组', '组值'):
+                    continue
+                if generation in ('', '辈分', '代数', 'generation'):
+                    continue
+                
+                # 获取字段名
+                field = group_to_field.get(group_value)
+                if not field or not name_text:
+                    continue
+                
+                # 判断是否需要新建记录
+                if current_record and (
+                        (field in current_fields and field != 'extra_texts') or  # 同一字段重复（d组除外）
+                        (generation and current_record['generation'] and generation != current_record['generation'])):  # 辈分变化
+                    flush_current_record()
+                
+                # 初始化新记录
+                if current_record is None:
+                    current_record = {
+                        'generation': generation,
+                        'main_text': '',
+                        'sub_text1': '',
+                        'sub_text2': '',
+                        'image_path': '',
+                        'extra_texts': [],
+                    }
+                elif generation and not current_record['generation']:
+                    current_record['generation'] = generation
+                
+                # 填入数据
+                if field == 'extra_texts':
+                    current_record[field].append(name_text)
+                else:
+                    current_record[field] = name_text
+                current_fields.add(field)
+                
+                # 更新图片路径
+                if image_path and not current_record['image_path']:
+                    current_record['image_path'] = image_path
+            
+            flush_current_record()
+            return processed_records
 
         def make_full_text(main_text, sub_text1, sub_text2):
             parts = [text for text in (main_text, sub_text1, sub_text2) if text]
@@ -11610,11 +12194,12 @@ class MainWindow(QMainWindow):
             image_path = record['image_path']
             extra_texts = record.get('extra_texts', [])
 
-            if generation in ('', '辈分', '代数', 'generation'):
+            if generation in ('辈分', '代数', 'generation'):
                 skipped += 1
                 return
 
-            generation_idx = generation_map.get(generation)
+            # 空辈分记录仍可导入，统一使用第一代的布局位置。
+            generation_idx = 0 if not generation else generation_map.get(generation)
             if generation_idx is None or generation_idx >= len(params['y_coords']):
                 skipped += 1
                 return
@@ -11647,26 +12232,31 @@ class MainWindow(QMainWindow):
                 imported_items.extend(new_items)
                 commands.extend(new_commands)
                 
-                # 从模板资源中直接获取t3的样式作为D组参考
-                t3_index = params['template_text_map'].get('t3')
-                ref_item = None
-                if t3_index is not None and 0 <= t3_index < len(template_asset['items']):
-                    t3_data = template_asset['items'][t3_index]
-                    if t3_data.get('type') == 'VTextItem':
-                        # 从模板数据创建一个临时参考对象
-                        ref_item = VTextItem("", t3_data['font_size'], 400)
-                        ref_item.font_family = t3_data['font_family']
-                        ref_item.character_spacing = t3_data.get('character_spacing', 0)
-                        ref_item.column_spacing = t3_data.get('column_spacing', COLUMN_SPACING)
-                
-                extra_items = add_extra_text_items(extra_texts, base_pos, new_items, ref_text_item=ref_item)
-                placed_items = new_items + extra_items
+                # 计算组合位置（不包含d组）
+                placed_items = new_items
                 keep_items_inside_canvas(placed_items)
                 placed_rect = QRectF()
                 for item in placed_items:
                     placed_rect = placed_rect.united(item_scene_rect(item))
                 if not placed_rect.isEmpty():
                     generation_next_x[generation_idx] = placed_rect.left() - generation_layout_spacing[generation_idx]
+                
+                # D组单独导入，不影响主组合的位置
+                if extra_texts:
+                    # 从模板资源中直接获取t3的样式作为D组参考
+                    t3_index = params['template_text_map'].get('t3')
+                    ref_item = None
+                    if t3_index is not None and 0 <= t3_index < len(template_asset['items']):
+                        t3_data = template_asset['items'][t3_index]
+                        if t3_data.get('type') == 'VTextItem':
+                            # 从模板数据创建一个临时参考对象
+                            ref_item = VTextItem("", t3_data['font_size'], 400)
+                            ref_item.font_family = t3_data['font_family']
+                            ref_item.character_spacing = t3_data.get('character_spacing', 0)
+                            ref_item.column_spacing = t3_data.get('column_spacing', COLUMN_SPACING)
+                    
+                    extra_items = add_extra_text_items(extra_texts, base_pos, new_items, ref_text_item=ref_item)
+                    keep_items_inside_canvas(extra_items)
                 return
 
             row_items = []
@@ -11699,11 +12289,8 @@ class MainWindow(QMainWindow):
                 imported_items.append(text_item)
                 row_items.append(text_item)
             
-            # D组（extra_texts）的样式参考：纯文字模式下不使用主文字，保持None使用默认配置
-            ref_item = None
-
-            extra_items = add_extra_text_items(extra_texts, base_pos, row_items, ref_text_item=ref_item)
-            placed_items = row_items + extra_items
+            # 计算主组合位置（不包含d组）
+            placed_items = row_items
             keep_items_inside_canvas(placed_items)
             placed_rect = QRectF()
             for item in placed_items:
@@ -11716,81 +12303,53 @@ class MainWindow(QMainWindow):
                 if conn_cmd:
                     conn_cmd.execute()
                     commands.append(conn_cmd)
+            
+            # D组单独导入，不影响主组合的位置
+            if extra_texts:
+                ref_item = None
+                extra_items = add_extra_text_items(extra_texts, base_pos, row_items, ref_text_item=ref_item)
+                keep_items_inside_canvas(extra_items)
 
-        if group_match['enabled']:
-            group_to_field = {
-                normalize_key(group_match['t1']): 'main_text',
-                normalize_key(group_match['t2']): 'sub_text1',
-                normalize_key(group_match['t3']): 'sub_text2',
-                normalize_key(group_match['extra_text']): 'extra_texts',
-            }
-            current_record = None
-            current_fields = set()
-
-            def flush_current_record():
-                nonlocal current_record, current_fields
-                if current_record and any((
-                        current_record['main_text'],
-                        current_record['sub_text1'],
-                        current_record['sub_text2'],
-                        current_record['image_path'],
-                        current_record.get('extra_texts'))):
-                    collect_import_record(current_record)
-                current_record = None
-                current_fields = set()
-
-            for row in rows:
-                generation = row_first_value(row, (columns['generation'], '辈分', '代数', 'generation'))
-                group_value = normalize_key(row_first_value(row, (columns['group'], '组', '组值')))
-                name_text = row_first_value(row, (columns['name'], '名称', '内容'))
-                image_path = row_value(row, columns['image'])
-
-                if group_value in ('', normalize_key(columns['group'])):
-                    continue
-
-                field = group_to_field.get(group_value)
-                if not field or not name_text:
-                    skipped += 1
-                    continue
-
-                if current_record and (
-                        (field in current_fields and field != 'extra_texts') or
-                        (generation and current_record['generation'] and generation != current_record['generation'])):
-                    flush_current_record()
-
-                if current_record is None:
-                    current_record = {
-                        'generation': generation,
-                        'main_text': '',
-                        'sub_text1': '',
-                        'sub_text2': '',
-                        'image_path': '',
-                        'extra_texts': [],
-                    }
-                elif generation and not current_record['generation']:
-                    current_record['generation'] = generation
-
-                if field == 'extra_texts':
-                    current_record[field].append(name_text)
-                else:
-                    current_record[field] = name_text
-                current_fields.add(field)
-                if image_path and not current_record['image_path']:
-                    current_record['image_path'] = image_path
-
-            flush_current_record()
-        else:
-            for row in rows:
+        # 优先使用预览编辑后的数据（支持两种模式）
+        if preview_records:
+            # 将预览格式转换为导入格式
+            for rec in preview_records:
                 record = {
-                    'generation': row_value(row, columns['generation']),
+                    'generation': rec['generation'],
+                    'main_text': rec['t1'],
+                    'sub_text1': rec['t2'],
+                    'sub_text2': rec['t3'],
+                    'image_path': '',
+                    'extra_texts': rec.get('d', []),
+                }
+                collect_import_record(record)
+        elif group_match['enabled']:
+            # 使用按组合并模式从Excel读取
+            for record in _process_excel_rows_for_import(rows, columns, group_match):
+                collect_import_record(record)
+        else:
+            # 使用按列直接导入模式从Excel读取（需要重新处理获取d列数据）
+            for row in rows:
+                generation = row_value(row, columns['generation'])
+                if generation in ('辈分', '代数', 'generation'):
+                    continue
+
+                # D组是独立文字列，不应并入t3（B组）。支持单元格内换行或|分隔多个D组文本。
+                d_text = row_value(row, columns.get('d', 'E'))
+                extra_texts = []
+                for line in d_text.split('\n'):
+                    extra_texts.extend(item.strip() for item in line.split('|') if item.strip())
+                
+                record = {
+                    'generation': generation,
                     'main_text': row_value(row, columns['t1']),
                     'sub_text1': row_value(row, columns['t2']),
                     'sub_text2': row_value(row, columns['t3']),
-                    'image_path': row_value(row, columns['image']),
-                    'extra_texts': [],
+                    # 直接模式下 E 列是 D 组时，不再把 D 文本误当成图片路径。
+                    'image_path': '' if columns.get('image') == columns.get('d')
+                                  else row_value(row, columns['image']),
+                    'extra_texts': extra_texts,
                 }
-                if record['generation'] in ('', '辈分', '代数', 'generation'):
-                    continue
                 collect_import_record(record)
 
         records_by_generation = {}
