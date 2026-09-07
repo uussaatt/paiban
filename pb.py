@@ -9343,12 +9343,8 @@ class FamilyTreeImportDialog(QDialog):
             # 处理d列（可能有换行符或|分隔）
             d_list = []
             if d_text:
-                # 先按换行符分割，再按|分割
-                for line in d_text.split('\n'):
-                    for item in line.split('|'):
-                        item = item.strip()
-                        if item:
-                            d_list.append(item)
+                # 一行默认对应一个D组文字框；只有|明确表示多个D组。
+                d_list = [item.strip() for item in d_text.split('|') if item.strip()]
             
             record = {
                 'generation': generation,
@@ -12334,11 +12330,9 @@ class MainWindow(QMainWindow):
                 if generation in ('辈分', '代数', 'generation'):
                     continue
 
-                # D组是独立文字列，不应并入t3（B组）。支持单元格内换行或|分隔多个D组文本。
+                # D组是独立文字列，不应并入t3（B组）。每行一个文字框，|分隔多个D组。
                 d_text = row_value(row, columns.get('d', 'E'))
-                extra_texts = []
-                for line in d_text.split('\n'):
-                    extra_texts.extend(item.strip() for item in line.split('|') if item.strip())
+                extra_texts = [item.strip() for item in d_text.split('|') if item.strip()]
                 
                 record = {
                     'generation': generation,
