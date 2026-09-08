@@ -3372,13 +3372,13 @@ class BaseElement(QGraphicsItem):
 
         owner_rect = owner.sceneBoundingRect()
         candidate_rect = best_candidate.sceneBoundingRect()
+        # X 边缘吸附提示线的端点使用两张图片的右上角。
         aligned_x = candidate_rect.right()
+        owner_top_right = QPointF(aligned_x, owner_rect.top())
+        candidate_top_right = candidate_rect.topRight()
         set_indicator((
-            aligned_x,
-            min(owner_rect.top(), candidate_rect.top()),
-            max(owner_rect.bottom(), candidate_rect.bottom()),
-            owner_rect.top(),
-            candidate_rect.top(),
+            owner_top_right,
+            candidate_top_right,
         ))
 
         return best_offset
@@ -3449,13 +3449,20 @@ class BaseElement(QGraphicsItem):
 
         owner_rect = self.sceneBoundingRect()
         candidate_rect = best_candidate.sceneBoundingRect()
+        # Y 顶部吸附提示线的端点使用两张图片的顶部连接点。
         aligned_y = candidate_rect.top()
+        owner_connection = getattr(self, 'connection_point', None)
+        candidate_connection = getattr(best_candidate, 'connection_point', None)
+        move_delta = new_scene_pos - current_scene_pos
+        owner_point = (owner_connection.get_scene_center() + move_delta
+                       if owner_connection else owner_rect.topLeft() + move_delta)
+        candidate_point = (candidate_connection.get_scene_center()
+                          if candidate_connection else candidate_rect.topLeft())
+        owner_anchor = QPointF(owner_point.x(), aligned_y)
+        candidate_anchor = QPointF(candidate_point.x(), aligned_y)
         set_indicator((
-            aligned_y,
-            min(owner_rect.left(), candidate_rect.left()),
-            max(owner_rect.right(), candidate_rect.right()),
-            owner_rect.left(),
-            candidate_rect.left(),
+            owner_anchor,
+            candidate_anchor,
         ))
 
         return best_offset
@@ -6289,36 +6296,26 @@ class LayoutScene(QGraphicsScene):
 
         indicator = self._image_right_edge_snap_indicator
         if indicator and not getattr(self, '_rendering_pdf', False):
-            x, top, bottom, moving_top, target_top = indicator
-            scale = abs(painter.worldTransform().m11()) or 1.0
-            padding = 8.0 / scale
-            radius = 5.0 / scale
+            owner_anchor, target_anchor = indicator
             color = QColor(255, 45, 100)
             pen = QPen(color, 3, Qt.PenStyle.SolidLine)
             pen.setCosmetic(True)
             painter.setOpacity(1.0)
             painter.setPen(pen)
-            painter.setBrush(QBrush(color))
-            painter.drawLine(QPointF(x, top - padding), QPointF(x, bottom + padding))
-            painter.drawEllipse(QPointF(x, moving_top), radius, radius)
-            painter.drawEllipse(QPointF(x, target_top), radius, radius)
+            # 只绘制图片右上角之间的提示线，不再绘制圆点。
+            painter.drawLine(owner_anchor, target_anchor)
 
         # 绘制顶部Y吸附指示线
         top_indicator = self._image_top_edge_snap_indicator
         if top_indicator and not getattr(self, '_rendering_pdf', False):
-            y, left, right, moving_left, target_left = top_indicator
-            scale = abs(painter.worldTransform().m11()) or 1.0
-            padding = 8.0 / scale
-            radius = 5.0 / scale
+            owner_anchor, target_anchor = top_indicator
             color = QColor(50, 200, 255)  # 蓝色，与右边缘的红色区分
             pen = QPen(color, 3, Qt.PenStyle.SolidLine)
             pen.setCosmetic(True)
             painter.setOpacity(1.0)
             painter.setPen(pen)
-            painter.setBrush(QBrush(color))
-            painter.drawLine(QPointF(left - padding, y), QPointF(right + padding, y))
-            painter.drawEllipse(QPointF(moving_left, y), radius, radius)
-            painter.drawEllipse(QPointF(target_left, y), radius, radius)
+            # 只绘制两端连接点之间的水平提示线，不再绘制圆点。
+            painter.drawLine(owner_anchor, target_anchor)
 
     def drawBackground(self, painter, rect):
         # PDF导出时：直接填白色，跳过灰色外框和网格
