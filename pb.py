@@ -2754,6 +2754,7 @@ class ConnectionPoint(QGraphicsEllipseItem):
             self._press_scene_pos = None
             if self.scene():
                 self.scene().hide_temp_alignment_guide()
+                self.scene().clear_snap_guides()
 
     def itemChange(self, change, value):
         """监听选中状态变化，触发重绘"""
@@ -3508,6 +3509,14 @@ class BaseElement(QGraphicsItem):
                         best_dy = gy - ey
                         best_guide_y = gy
 
+        # 记录当前真正参与吸附的永久辅助线，供辅助线显示吸附反馈。
+        active_guides = []
+        if best_guide_x is not None and abs(best_dx) <= threshold:
+            active_guides.append((Qt.Orientation.Vertical, best_guide_x))
+        if best_guide_y is not None and abs(best_dy) <= threshold:
+            active_guides.append((Qt.Orientation.Horizontal, best_guide_y))
+        scene.set_snap_guides(active_guides)
+
         # 画布存在永久辅助线时，只使用永久辅助线吸附，不显示元素间临时水平线。
         scene.hide_temp_alignment_guide()
 
@@ -3543,6 +3552,7 @@ class BaseElement(QGraphicsItem):
             
             # 隐藏临时对齐辅助线
             scene.hide_temp_alignment_guide()
+            scene.clear_snap_guides()
             scene._image_right_edge_snap_indicator = None
             scene._image_top_edge_snap_indicator = None
             scene.update()
@@ -5044,6 +5054,8 @@ class ResizeHandle(QGraphicsItem):
 
     def mouseReleaseEvent(self, event):
         self._dragging = False
+        if self.scene():
+            self.scene().clear_snap_guides()
         event.accept()
 
 
@@ -5666,6 +5678,7 @@ class GuideItem(QGraphicsItem):
 
         self._hovered = False
         self._selected_for_edit = False
+        self._snap_active = False
         self._update_pos()
 
     def _update_pos(self):
@@ -5685,6 +5698,8 @@ class GuideItem(QGraphicsItem):
     def paint(self, painter, option, widget):
         if getattr(self, "_selected_for_edit", False):
             color = QColor(255, 165, 0, 255)
+        elif getattr(self, "_snap_active", False):
+            color = QColor(255, 70, 70, 255)
         else:
             color = QColor(0, 210, 255, 255) if self._hovered else QColor(0, 180, 255, 220)
         pen = QPen(color, 2, Qt.PenStyle.SolidLine)
@@ -5735,6 +5750,8 @@ class GuideItem(QGraphicsItem):
 
     def mouseReleaseEvent(self, event):
         self._dragging = False
+        if self.scene():
+            self.scene().clear_snap_guides()
         event.accept()
 
     def mouseDoubleClickEvent(self, event):
@@ -5937,6 +5954,7 @@ class LayoutScene(QGraphicsScene):
         self.last_selection_by_marquee = False  # 最后一次选中是否为框选
         self.background_pixmap = None  # 背景图片缓存
         self.guides = []          # 辅助线列表
+        self._snap_guides = set()  # 当前被元素吸附的辅助线键集合
         self._selected_guide = None
         self.show_guides = True   # 辅助线显示开关
         self.snap_threshold = self.config_manager.get('snap_threshold', 20)  # 辅助线吸附距离（场景像素）
@@ -6088,6 +6106,8 @@ class LayoutScene(QGraphicsScene):
     def remove_guide(self, guide):
         """删除指定辅助线"""
         if guide in self.guides:
+            guide._snap_active = False
+            self._snap_guides.discard((guide.orientation, guide.pos_value))
             if guide is self._selected_guide:
                 self.clear_guide_selection()
             self.removeItem(guide)
@@ -6096,7 +6116,9 @@ class LayoutScene(QGraphicsScene):
     def clear_guides(self):
         """清除所有辅助线"""
         self.clear_guide_selection()
+        self._snap_guides.clear()
         for g in self.guides[:]:
+            g._snap_active = False
             self.removeItem(g)
         self.guides.clear()
 
@@ -6105,6 +6127,23 @@ class LayoutScene(QGraphicsScene):
         self.show_guides = visible
         for g in self.guides:
             g.setVisible(visible)
+
+    def set_snap_guides(self, guide_keys):
+        """更新当前吸附辅助线的高亮状态。"""
+        new_keys = set(guide_keys or [])
+        if new_keys == self._snap_guides:
+            return
+        self._snap_guides = new_keys
+        for guide in self.guides:
+            key = (guide.orientation, guide.pos_value)
+            active = key in new_keys
+            if guide._snap_active != active:
+                guide._snap_active = active
+                guide.update()
+
+    def clear_snap_guides(self):
+        """清除吸附辅助线高亮。"""
+        self.set_snap_guides(())
 
     def show_temp_alignment_guide(self, orientation, pos_value):
         """显示临时对齐辅助线（拖动时使用）"""
@@ -8444,6 +8483,11 @@ class LayoutView(QGraphicsView):
         super().leaveEvent(event)
 
     def mouseReleaseEvent(self, event):
+        # 无论由元素还是视图处理释放，都结束辅助线吸附高亮。
+        scene = self.scene()
+        if scene:
+            scene.clear_snap_guides()
+
         if self._smart_brush_enabled and event.button() == Qt.MouseButton.LeftButton:
             self._smart_brush_active = False
             self._smart_brush_seen.clear()
